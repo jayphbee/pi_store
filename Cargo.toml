@@ -1,6 +1,11 @@
 [package]
-name = "set"
+name = "pi_store"
 version = "0.1.0"
 authors = ["zmythleo <zmythleo@gmail.com>"]
 
 [lib]
+
+[dependencies]
+bytes = "*"
+lazy_static = "*"
+pi_vm = { path = "../pi_vm" }
