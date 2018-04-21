@@ -1,11 +1,20 @@
 // 当且仅当测试套件运行时，才条件编译 `test` 模块。
 #[cfg(test)]
-extern crate set;
+extern crate pi_vm;
+extern crate pi_store;
 
-use set::ordmap::Entry;
-use set::ordmap::OrdMap;
-use set::ordmap::ImOrdMap;
-use set::sbtree::Tree;
+use std::thread;
+use std::io::Result;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::fs::{File, OpenOptions};
+
+use pi_vm::worker_pool::WorkerPool;
+use pi_store::ordmap::Entry;
+use pi_store::ordmap::OrdMap;
+use pi_store::ordmap::ImOrdMap;
+use pi_store::sbtree::Tree;
+use pi_store::file::{STORE_TASK_POOL, AsyncFile, AsynFileOptions};
 
 
 // 需要一个辅助函数
@@ -17,7 +26,7 @@ fn show(t: &OrdMap<usize, usize, Tree<usize, usize>>) -> Vec<usize> {
 	}
 	v
 }
-#[test]
+// #[test]
 fn sb_test() {
 	let tree:Tree<usize, usize> = Tree::new();
 	let mut t = OrdMap::new(tree);
@@ -76,8 +85,83 @@ fn sb_test() {
 	assert!(show(&t) == vec![2,21, 3, 31, 50, 50, 60, 60,  70, 71, 80, 80]);
 }
 
-#[test]
+// #[test]
 #[should_panic]
 fn failing_test() {
 	assert!(1i32 == 2i32);
+}
+
+#[test]
+fn test_file() {
+	let mut worker_pool = Box::new(WorkerPool::new(10, 1024 * 1024, 10000));
+    worker_pool.run(STORE_TASK_POOL.clone());
+
+	let open = move |f0: Result<AsyncFile>| {
+		assert!(f0.is_ok());
+		let write = move |f1: AsyncFile, result: Result<()>| {
+			assert!(result.is_ok());
+			println!("!!!!!!write file");
+			let write = move |f3: AsyncFile, result: Result<()>| {
+				assert!(result.is_ok());
+				println!("!!!!!!write file");
+				let sync_all = move |f4: AsyncFile, result: Result<()>| {
+					assert!(result.is_ok());
+					println!("!!!!!!sync all file");
+				};
+				f3.sync_all(Box::new(sync_all));
+			};
+			f1.write(8, Vec::from("Hello World!!!!!!######你好 Rust\nHello World!!!!!!######你好 Rust\nHello World!!!!!!######你好 Rust\n".as_bytes()), Box::new(write));
+		};
+		f0.ok().unwrap().write(0, vec![], Box::new(write));
+	};
+	AsyncFile::open(PathBuf::from(r"foo.txt"), AsynFileOptions::ReadWrite(1), Box::new(open));
+	thread::sleep(Duration::from_millis(5000));
+
+	let open = move |f0: Result<AsyncFile>| {
+		assert!(f0.is_ok());
+		println!("!!!!!!open file, symlink: {}, file: {}, only_read: {}, size: {}, time: {:?}", 
+			f0.as_ref().ok().unwrap().is_symlink(), f0.as_ref().ok().unwrap().is_file(), f0.as_ref().ok().unwrap().is_only_read(), 
+			f0.as_ref().ok().unwrap().get_size(), 
+			(f0.as_ref().ok().unwrap().get_modified_time(), f0.as_ref().ok().unwrap().get_accessed_time(), f0.as_ref().ok().unwrap().get_created_time()));
+		let read = move |f1: AsyncFile, result: Result<Vec<u8>>| {
+			assert!(result.is_ok());
+			println!("!!!!!!read file1, result: {:?}", result.ok().unwrap());
+			let read = move |f3: AsyncFile, result: Result<Vec<u8>>| {
+				assert!(result.is_ok());
+				println!("!!!!!!read file3, result: {:?}", String::from_utf8(result.ok().unwrap()).unwrap_or("invalid utf8 string".to_string()));
+				let read = move |f4: AsyncFile, result: Result<Vec<u8>>| {
+					assert!(result.is_ok());
+					println!("!!!!!!read file4, result: {:?}", String::from_utf8(result.ok().unwrap()).unwrap_or("invalid utf8 string".to_string()));
+					let read = move |f7: AsyncFile, result: Result<Vec<u8>>| {
+						assert!(result.is_ok());
+						println!("!!!!!!read file7, result: {:?}", String::from_utf8(result.ok().unwrap()).unwrap_or("invalid utf8 string".to_string()));
+						let read = move |f11: AsyncFile, result: Result<Vec<u8>>| {
+							assert!(result.is_ok());
+							println!("!!!!!!read file11, result: {:?}", String::from_utf8(result.ok().unwrap()).unwrap_or("invalid utf8 string".to_string()));
+							let read = move |f13: AsyncFile, result: Result<Vec<u8>>| {
+								assert!(result.is_ok());
+								println!("!!!!!!read file13, result: {:?}", String::from_utf8(result.ok().unwrap()).unwrap_or("invalid utf8 string".to_string()));
+								
+							};
+							f11.read(0, 1000, Box::new(read));
+						};
+						f7.read(0, 34, Box::new(read));
+					};
+					f4.read(0, 32, Box::new(read));
+				};
+				f3.read(0, 16, Box::new(read));
+			};
+			f1.read(0, 10, Box::new(read));
+		};
+		f0.ok().unwrap().read(0, 0, Box::new(read));
+	};
+	AsyncFile::open(PathBuf::from(r"foo.txt"), AsynFileOptions::OnlyRead(1), Box::new(open));
+	thread::sleep(Duration::from_millis(1000));
+
+	let remove = move |result: Result<()>| {
+		assert!(result.is_ok());
+		println!("!!!!!!remove file");
+	};
+	AsyncFile::remove(PathBuf::from(r"foo.txt"), Box::new(remove));
+	thread::sleep(Duration::from_millis(1000));
 }
