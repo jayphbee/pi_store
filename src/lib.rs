@@ -4,6 +4,9 @@
 #[allow(dead_code,unused_variables,non_snake_case,unused_parens,unused_assignments,unused_unsafe,unused_imports)]
 
 extern crate bytes;
+extern crate rocksdb;
+extern crate pi_db;
+extern crate pi_lib;
 
 #[macro_use]
 extern crate lazy_static;
@@ -15,3 +18,4 @@ pub mod rc;
 pub mod ordmap;
 pub mod sbtree;
 pub mod file;
+pub mod db;
