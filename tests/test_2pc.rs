@@ -10,7 +10,7 @@ use std::thread;
 
 use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, WriteOptions, ReadOptions};
 
-use pi_store::db::{LocalTXN, STORE_TASK_POOL};
+use pi_store::db::{TabTxn, STORE_TASK_POOL};
 use pi_db::db::{TabKV, Txn, DBResult};
 use pi_lib::atom::{Atom};
 use pi_vm::worker_pool::WorkerPool;
@@ -39,15 +39,14 @@ fn test_2pc() {
         let read_opts = ReadOptions::default();
         //打开rocksdb
         let db = TXN_DB::open(&opts, &txn_db_opts, &path).unwrap();
-        println!("111111111111111111");
         //创建事务
-        let mut txn = LocalTXN {
-            txn: TXN::begin(&db, &write_opts, &txn_opts).unwrap(),
-        };
-        println!("22222222222222222222222");
+        let mut tab = TabTxn::new(Atom::from(Path), 1);
+        tab.txn = TXN::begin(&db, &write_opts, &txn_opts).unwrap();
+        // let mut txn = LocalTXN {
+        //     txn: TXN::begin(&db, &write_opts, &txn_opts).unwrap(),
+        // };
         //为2pc事务命名（必要，否则无法使用预提交）
-        assert!(txn.txn.setName("xid111").is_ok());
-        println!("33333333333333333333");
+        assert!(tab.txn.setName("xid111").is_ok());
         //插入测试数据
         let mut arrTabkv = Vec::new();
         let mut tabkv2 = TabKV::new(path.to_string(), b"k1".to_vec());
@@ -63,31 +62,29 @@ fn test_2pc() {
         tabkv2.value = Some(Arc::new(b"v44".to_vec()));
         arrTabkv.push(tabkv2);
 
-        let p = txn.modify(arrTabkv, Some(0), Arc::new(
+        let p = tab.modify(arrTabkv, Some(0), Arc::new(
             |v: Result<usize, String>|{
-                println!("modify!!!!!!!!!!!!!!!!!!!!!!ok");
                 assert!(v.unwrap() == 4);
             }
         ));
         thread::sleep(Duration::from_millis(1000));
-        
-        println!("555555555555555");
+        let txn2 = tab.clone();
         //删除k1
         let p = txn.modify(tabkv(path.to_string(), b"k1".to_vec(), None), Some(0), Arc::new(
-            |v1: Result<usize, String>| {
+            move |v1: Result<usize, String>| {
                 assert!(v1.unwrap() == 1);
-                // let r: Option<DBResult<Vec<TabKV>>> = txn.query(tabkv(path.to_string(), b"k1".to_vec(), None), Some(0), Arc::new(
-                //     |v2| {
-                //         for values in v2.unwrap() {
-                //         assert!(values.value == None);
-                // }
-                //     }
-                // ));     
+                let r: Option<DBResult<Vec<TabKV>>> = txn2.query(tabkv(path.to_string(), b"k1".to_vec(), None), Some(0), Arc::new(
+                    |v2| {
+                        for values in v2.unwrap() {
+                        assert!(values.value == None);
+                }
+                    }
+                ));     
             }
         ));
         thread::sleep(Duration::from_millis(1000));
         //查询k3
-        let r: Option<DBResult<Vec<TabKV>>> = txn.query(tabkv(path.to_string(), b"k3".to_vec(), None), Some(0), Arc::new(
+        let r: Option<DBResult<Vec<TabKV>>> = tab.query(tabkv(path.to_string(), b"k3".to_vec(), None), Some(0), Arc::new(
             |v: DBResult<Vec<TabKV>>| {
                 for values in v.unwrap() {
                     assert!(str::from_utf8(values.value.unwrap().as_slice()).unwrap() == "v33");
@@ -95,15 +92,13 @@ fn test_2pc() {
             }
         ));
         thread::sleep(Duration::from_millis(1000));
-        println!("21212112112121");
         //迭代
-        let p = txn.iter(Atom::from(path.to_string()), None, false, true, "test".to_string(), Arc::new(
+        let p = tab.iter(Atom::from(path.to_string()), None, false, true, "test".to_string(), Arc::new(
             |v| {
                 let mut iter = v.unwrap();
                 assert_eq!(iter.state(), Ok(true));
                 assert_eq!(iter.key(), b"k2");
                 assert_eq!(iter.value(), Some(Arc::new(b"v22".to_vec())));
-                println!("13222212123123");
                 //下一个
                 iter.next();
                 assert_eq!(iter.state(), Ok(true));
@@ -111,9 +106,19 @@ fn test_2pc() {
                 assert_eq!(iter.value(), Some(Arc::new(b"v33".to_vec())));
             }
         ));
-        //
-        // assert!(txn.prepare(Arc::new(|a|println!("ttttt"))).unwrap().is_ok());
-        // assert!(txn.commit(Arc::new(|a|println!("ttttt"))).unwrap().is_ok());
+        //预提交
+        tab.prepare(Arc::new(
+            |v| {
+                assert!(v.unwrap() == 1);
+            }
+        ));
+        thread::sleep(Duration::from_millis(1000));
+        //提交
+        tab.commit(Arc::new(
+            |v| {
+                assert!(v.unwrap() == 1);
+            }
+        ));
         thread::sleep(Duration::from_millis(1000));
     }
 }

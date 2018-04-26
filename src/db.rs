@@ -1,6 +1,6 @@
 
 use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator};
-use pi_db::db::{Txn, DBResult, TabKV, UsizeResult, TxQueryCallback, TxCallback, Cursor, TxIterCallback, TxState};
+use pi_db::db::{TabBuilder, Tab, Txn, DBResult, TabKV, UsizeResult, TxQueryCallback, TxCallback, Cursor, TxIterCallback, TxState};
 use pi_db::mgr::{Mgr};
 use pi_lib::sinfo::{StructInfo};
 use pi_lib::atom::{Atom};
@@ -11,22 +11,41 @@ use std::sync::{Arc, Mutex, Condvar};
 use std::string::String;
 use std::str;
 use std::convert::From;
+use std::path::Path;
+use std::marker::Sized;
 use std::vec::Vec;
 use std::usize;
 
 use pi_vm::task::TaskType;
 use pi_vm::task_pool::TaskPool;
 
+#[derive(Clone)]
 pub struct LocalTXN {
     pub txn: TXN,
 }
 
-pub struct ASYNC_TXN {
-    pub txn: TXN,
-}
-
+// pub struct ASYNC_TXN {
+//     pub txn: TXN,
+// }
+#[derive(Clone)]
 pub struct LocalDBRawIterator {
     pub iter: DBRawIterator,
+}
+
+#[derive(Clone)]
+pub struct TabTxn {
+    tab: Atom,
+    id: u128,
+    state: TabState,
+    db: Option<TXN_DB>,
+    txn: Option<LocalTXN>,
+    iter: Option<LocalDBRawIterator>,
+}
+
+#[derive(Clone)]
+pub enum TabState {
+    close = 0,
+    open,
 }
 
 lazy_static! {
@@ -47,6 +66,112 @@ const DB_PRIORITY: u32 = 20;
 * 信息
 */
 const DB_ASYNC_FILE_INFO: &str = "DB asyn file";
+
+
+pub fn init<T>(path: &str, cb: Arc<Fn(Option<Vec<(&[u8], Option<Arc<Vec<u8>>>)>>)>) {
+    let mut tab = TabTxn::new(Atom::from(path), 1);
+    tab.open();
+    tab.transaction(1, true, 1000);
+    tab.txn.unwrap().iter(Atom::from(path), None, false, true, "test".to_string(), Arc::new(
+            move |v: DBResult<Box<Cursor>>| {
+                let iter = v.unwrap();
+                let mut arr = Vec::new();
+                while iter.state().unwrap() {
+                    arr.push((iter.key(), iter.value()));
+                    iter.next()
+                }
+                (*cb)(Some(arr))
+            }
+        ));
+
+}
+
+impl TabTxn {
+    fn new(tab: Atom, id: u128) -> Self {
+        TabTxn {
+            tab,
+            id,
+            state: TabState::close,
+            db: None,
+            txn: None,
+            iter: None,
+        }
+    }
+    fn open(&mut self) -> &mut Self {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        let mut txn_db_opts = TransactionDBOptions::default();
+        let tab = &*self.tab.clone();
+        //打开rocksdb
+        let db = TXN_DB::open(&opts, &txn_db_opts, &*tab).unwrap();
+        self.db = Some(db);
+        return self
+    }
+    fn close(&mut self) {
+        // self.db.unwrap().drop();
+    }
+}
+
+impl Tab for TabTxn {
+    fn transaction(&mut self, id: u128, writable: bool, timeout: usize) -> Box<Txn> {
+        let mut txn_opts = TransactionOptions::default();
+        let write_opts = WriteOptions::default();
+        let txnDB = &self.db.as_ref().unwrap();
+        let localTxn = LocalTXN {txn: TXN::begin(txnDB, &write_opts, &txn_opts).unwrap()};
+        self.txn = Some(localTxn);
+        self.txn.unwrap().txn.setName("xid111");
+        return Box::new(LocalTXN {
+            txn: self.txn.unwrap().txn,
+        })
+    }
+}
+
+impl TabBuilder for TabTxn {
+    fn iter(
+		&self,
+		cb: TxIterCallback,
+	) -> Option<DBResult<Box<Cursor>>> {
+        let read_opts = ReadOptions::default();
+        let mut iter = self.txn.unwrap().txn.iter(&read_opts);
+        iter.seek_to_first();
+        self.iter = Some(LocalDBRawIterator {iter: iter});
+        cb(Ok(
+                Box::new(LocalDBRawIterator {
+                    iter: iter,
+                })
+                ));
+        return None
+    }
+	fn build(
+		&mut self,
+		tab: Atom,
+		meta: Arc<Vec<u8>>,
+		cb: TxCallback,
+	) -> Option<Result<Arc<Tab>, String>> {
+        let path = &*self.tab.clone();
+        let mut arrTabkv = Vec::new();
+        let key = &*tab;
+        let mut tabkv2 = TabKV::new(path.to_string(), key.clone().into_bytes());
+        tabkv2.value = Some(meta);
+        arrTabkv.push(tabkv2);
+        self.txn.unwrap().modify(arrTabkv, Some(0), Arc::new(
+            |v: Result<usize, String>|{
+                v.unwrap() == 4;
+            }
+        ));
+        None
+    }
+	fn alter(
+		&mut self,
+		meta: Arc<Vec<u8>>,
+		cb: TxCallback,
+	) -> Option<Result<Arc<Tab>, String>> {
+        None
+    }
+	fn delete(&mut self, tab: Atom) {
+        ()
+    }
+}
 
 impl Txn for LocalTXN {
     // 获得事务的状态
@@ -174,10 +299,8 @@ impl Txn for LocalTXN {
     }
     // 修改，插入、删除及更新
     fn modify(&mut self, arr: Vec<TabKV>, lock_time:Option<usize>, cb: TxCallback) -> UsizeResult {
-        println!("db.modify!!!!!!!!!!!");
         let mut txn = self.txn.clone();
         let func = move || {
-            println!("db.modify!!!!!!!!!!!22222222222");
             let len = arr.len();
             for tabkv in arr {
                 // let key = &TableKey.key.as_slice();
@@ -201,7 +324,6 @@ impl Txn for LocalTXN {
                     };
                 }
             }
-            println!("db.modify!!!!!!!!!!!333333333");
             // (*cb)(Ok(()))
             cb(Ok(len))
         };
