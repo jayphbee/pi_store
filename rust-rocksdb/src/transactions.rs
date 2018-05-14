@@ -119,7 +119,7 @@ impl TXN {
         }
     }
     
-    pub fn setName(&self, name: &str) -> Result<(), Error> {
+    pub fn set_name(&self, name: &str) -> Result<(), Error> {
         
         let cname = CString::new(name).unwrap();
         unsafe {

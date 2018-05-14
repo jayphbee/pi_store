@@ -984,7 +984,7 @@ impl Options {
 
 // impl TransactionOptions {
     
-//     pub fn setName(&mut self, sid: usize) {
+//     pub fn set_name(&mut self, sid: usize) {
 //         unsafe {
 //             ffi::rocksdb_transaction_setName(self.inner, sid);
 //         }
