@@ -1,52 +1,54 @@
 
 use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator};
-use pi_db::db::{TabBuilder, Tab, Txn, DBResult, TabKV, UsizeResult, TxQueryCallback, TxCallback, Cursor, TxIterCallback, TxState};
-use pi_db::mgr::{Mgr};
+use pi_db::db::{Txn, TabTxn, TabKV, TxIterCallback, TxQueryCallback, DBResult, MetaTxn, Tab, TabBuilder, TxCallback, TxState, Cursor, UsizeResult};
 use pi_lib::sinfo::{StructInfo};
 use pi_lib::atom::{Atom};
+use pi_lib::guid::{Guid, GuidGen};
+use pi_lib::time::now_nanos;
+use pi_lib::bon::{BonBuffer, Encode};
 
-use std::boxed::FnBox;
 use std::sync::{Arc, Mutex, Condvar};
 
 use std::string::String;
 use std::str;
-use std::convert::From;
-use std::path::Path;
-use std::marker::Sized;
 use std::vec::Vec;
 use std::usize;
+use std::clone::Clone;
 
 use pi_vm::task::TaskType;
 use pi_vm::task_pool::TaskPool;
 
 #[derive(Clone)]
-pub struct LocalTXN {
-    pub txn: TXN,
+pub struct FdbTxn {
+    id: Guid,
+    txn: TXN,
+    state: TxState,
 }
 
-// pub struct ASYNC_TXN {
-//     pub txn: TXN,
-// }
+//绑定了所有事务方法
 #[derive(Clone)]
-pub struct LocalDBRawIterator {
-    pub iter: DBRawIterator,
-}
+pub struct MutexFdbTxn(Arc<Mutex<FdbTxn>>);
 
-#[derive(Clone)]
-pub struct TabTxn {
-    tab: Atom,
-    id: u128,
-    state: TabState,
-    db: Option<TXN_DB>,
-    txn: Option<LocalTXN>,
-    iter: Option<LocalDBRawIterator>,
-}
-
-#[derive(Clone)]
+//表状态
 pub enum TabState {
     close = 0,
     open,
 }
+
+//迭代器方法
+pub struct FDBIterator(DBRawIterator);
+
+//本地方法表基础操作（打开、关闭）
+pub struct FDBTab {
+    tab: Atom,
+    state: TabState,
+}
+
+//对应接口的Tab 创建事务
+pub struct FDB(TXN_DB);
+
+//系统表 记录所有表信息
+pub struct SysDb(TXN_DB);
 
 lazy_static! {
 	pub static ref STORE_TASK_POOL: Arc<(Mutex<TaskPool>, Condvar)> = Arc::new((Mutex::new(TaskPool::new(10)), Condvar::new()));
@@ -67,125 +69,48 @@ const DB_PRIORITY: u32 = 20;
 */
 const DB_ASYNC_FILE_INFO: &str = "DB asyn file";
 
-
-pub fn init<T>(path: &str, cb: Arc<Fn(Option<Vec<(&[u8], Option<Arc<Vec<u8>>>)>>)>) {
-    let mut tab = TabTxn::new(Atom::from(path), 1);
-    tab.open();
-    tab.transaction(1, true, 1000);
-    tab.txn.unwrap().iter(Atom::from(path), None, false, true, "test".to_string(), Arc::new(
-            move |v: DBResult<Box<Cursor>>| {
-                let iter = v.unwrap();
-                let mut arr = Vec::new();
-                while iter.state().unwrap() {
-                    arr.push((iter.key(), iter.value()));
-                    iter.next()
-                }
-                (*cb)(Some(arr))
-            }
-        ));
-
-}
-
-impl TabTxn {
-    fn new(tab: Atom, id: u128) -> Self {
-        TabTxn {
-            tab,
-            id,
+impl FDBTab {
+    fn new(tab: &Atom) -> Self {
+        FDBTab {
+            tab: tab.clone(),
             state: TabState::close,
-            db: None,
-            txn: None,
-            iter: None,
         }
     }
-    fn open(&mut self) -> &mut Self {
+    fn open(&mut self) -> TXN_DB {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         let mut txn_db_opts = TransactionDBOptions::default();
         let tab = &*self.tab.clone();
         //打开rocksdb
-        let db = TXN_DB::open(&opts, &txn_db_opts, &*tab).unwrap();
-        self.db = Some(db);
-        return self
+        let db = TXN_DB::open(&opts, &txn_db_opts, &tab).unwrap();
+        db
     }
     fn close(&mut self) {
         // self.db.unwrap().drop();
     }
 }
 
-impl Tab for TabTxn {
-    fn transaction(&mut self, id: u128, writable: bool, timeout: usize) -> Box<Txn> {
-        let mut txn_opts = TransactionOptions::default();
-        let write_opts = WriteOptions::default();
-        let txnDB = &self.db.as_ref().unwrap();
-        let localTxn = LocalTXN {txn: TXN::begin(txnDB, &write_opts, &txn_opts).unwrap()};
-        self.txn = Some(localTxn);
-        self.txn.unwrap().txn.setName("xid111");
-        return Box::new(LocalTXN {
-            txn: self.txn.unwrap().txn,
-        })
-    }
-}
-
-impl TabBuilder for TabTxn {
-    fn iter(
-		&self,
-		cb: TxIterCallback,
-	) -> Option<DBResult<Box<Cursor>>> {
-        let read_opts = ReadOptions::default();
-        let mut iter = self.txn.unwrap().txn.iter(&read_opts);
-        iter.seek_to_first();
-        self.iter = Some(LocalDBRawIterator {iter: iter});
-        cb(Ok(
-                Box::new(LocalDBRawIterator {
-                    iter: iter,
-                })
-                ));
-        return None
-    }
-	fn build(
-		&mut self,
-		tab: Atom,
-		meta: Arc<Vec<u8>>,
-		cb: TxCallback,
-	) -> Option<Result<Arc<Tab>, String>> {
-        let path = &*self.tab.clone();
-        let mut arrTabkv = Vec::new();
-        let key = &*tab;
-        let mut tabkv2 = TabKV::new(path.to_string(), key.clone().into_bytes());
-        tabkv2.value = Some(meta);
-        arrTabkv.push(tabkv2);
-        self.txn.unwrap().modify(arrTabkv, Some(0), Arc::new(
-            |v: Result<usize, String>|{
-                v.unwrap() == 4;
-            }
-        ));
-        None
-    }
-	fn alter(
-		&mut self,
-		meta: Arc<Vec<u8>>,
-		cb: TxCallback,
-	) -> Option<Result<Arc<Tab>, String>> {
-        None
-    }
-	fn delete(&mut self, tab: Atom) {
-        ()
-    }
-}
-
-impl Txn for LocalTXN {
+impl Txn for MutexFdbTxn {
     // 获得事务的状态
     fn get_state(&self) -> TxState {
         TxState::Ok
     }
     // 预提交一个事务
-    //TODO txn.clone是非安全的
-    fn prepare(&mut self, cb: TxCallback) -> UsizeResult {
-        let mut txn = self.txn.clone();
+    fn prepare(&self, cb: TxCallback) -> UsizeResult {
+        let mut fdb_txn = self.0.lock().unwrap();
+        fdb_txn.state = TxState::Preparing;
+        let txn = fdb_txn.txn.clone();
+        let mut state = fdb_txn.state.clone();
         let func = move || {
         match txn.prepare() {
-            Ok(()) => cb(Ok(1)),
-            Err(e) => cb(Err(e.to_string())),
+            Ok(()) => {
+                state = TxState::PreparOk;
+                cb(Ok(1))
+                },
+            Err(e) => {
+                state = TxState::PreparFail;
+                cb(Err(e.to_string()))
+                },
         }
         };
         let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
@@ -196,12 +121,21 @@ impl Txn for LocalTXN {
         
     }
     // 提交一个事务
-    fn commit(&mut self, cb: TxCallback) -> UsizeResult {
-        let mut txn = self.txn.clone();
+    fn commit(&self, cb: TxCallback) -> UsizeResult {
+        let mut fdb_txn = self.0.lock().unwrap();
+        fdb_txn.state = TxState::Committing;
+        let txn = fdb_txn.txn.clone();
+        let mut state = fdb_txn.state.clone();
         let func = move || {
         match txn.commit() {
-            Ok(()) => cb(Ok(1)),
-            Err(e) => cb(Err(e.to_string())),
+            Ok(()) => {
+                state = TxState::Commited;
+                cb(Ok(1))
+            },
+            Err(e) => {
+                state = TxState::CommitFail;
+                cb(Err(e.to_string()))
+                },
         }
         };
         let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
@@ -211,12 +145,21 @@ impl Txn for LocalTXN {
         None
     }
     // 回滚一个事务
-    fn rollback(&mut self, cb: TxCallback) -> UsizeResult {
-        let mut txn = self.txn.clone();
+    fn rollback(&self, cb: TxCallback) -> UsizeResult {
+        let mut fdb_txn = self.0.lock().unwrap();
+        fdb_txn.state = TxState::Rollbacking;
+        let txn = fdb_txn.txn.clone();
+        let mut state = fdb_txn.state.clone();
         let func = move || {
         match txn.rollback() {
-            Ok(()) => cb(Ok(1)),
-            Err(e) => cb(Err(e.to_string())),
+            Ok(()) => {
+                state = TxState::Rollbacked;
+                cb(Ok(1))
+                },
+            Err(e) => {
+                state = TxState::RollbackFail;
+                cb(Err(e.to_string()))
+                },
         }
         };
         let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
@@ -225,18 +168,26 @@ impl Txn for LocalTXN {
         cvar.notify_one();
         None
     }
-    // 锁
-	fn klock(&mut self, arr:Vec<TabKV>, lock_time:usize, cb: TxCallback) -> UsizeResult {
-        // (*cb)(Some(Ok(()))) //TODO 临时
-        Some(Ok(1))
-    }
+}
+
+impl TabTxn for MutexFdbTxn {
+    // 键锁，key可以不存在，根据lock_time的值，大于0是锁，0为解锁。 分为读写锁，读写互斥，读锁可以共享，写锁只能有1个
+	fn key_lock(&self, _arr: Arc<Vec<TabKV>>, _lock_time: usize, _readonly: bool, _cb: TxCallback) -> UsizeResult {
+		None
+	}
     // 查询
-    fn query(&mut self, arr:Vec<TabKV>, lock_time: Option<usize>, cb: TxQueryCallback) -> Option<DBResult<Vec<TabKV>>> {
-        let mut txn = self.txn.clone();
+	fn query(
+		&self,
+		arr: Arc<Vec<TabKV>>,
+		_lock_time: Option<usize>,
+		_readonly: bool,
+		cb: TxQueryCallback,
+	) -> Option<DBResult<Vec<TabKV>>> {
+        let fdb_txn = self.0.lock().unwrap();
+        let txn = fdb_txn.txn.clone();
         let func = move || {
-            let mut valueArr = Vec::new();
-            // let tab = self.txn.path.clone().into_os_string().into_string().unwrap();
-            for tabkv in arr {
+            let mut value_arr = Vec::new();
+            for tabkv in arr.iter() {
                 let read_opts = ReadOptions::default();
                 let mut value = None;
                 match txn.get(&read_opts, tabkv.key.as_slice()) {
@@ -252,17 +203,16 @@ impl Txn for LocalTXN {
                                     return;
                                 },
                         }
-                valueArr.push(
+                value_arr.push(
                     TabKV{
-                    tab: tabkv.tab,
+                    tab: tabkv.tab.clone(),
                     key: tabkv.key.clone(),
                     index: tabkv.index,
                     value: value,
                     }
                 )
             }
-            // (*cb)(Some(Ok(valueArr)))
-            cb(Ok(valueArr))
+            cb(Ok(value_arr))
             
         };
         let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
@@ -270,40 +220,14 @@ impl Txn for LocalTXN {
         (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
         cvar.notify_one();
         None
-        // let mut valueArr = Vec::new();
-        // // let tab = self.txn.path.clone().into_os_string().into_string().unwrap();
-        // for tabkv in arr {
-        //     let read_opts = ReadOptions::default();
-        //     let mut value = None;
-        //     match self.txn.get(&read_opts, tabkv.key.as_slice()) {
-        //                 Ok(None) => (),
-        //                 Ok(v) => 
-        //                     {
-        //                         value = Some(Arc::new(v.unwrap().to_utf8().unwrap().as_bytes().to_vec()));
-        //                         ()
-        //                     },
-        //                 Err(e) => 
-        //                     return Some(Err(e.to_string())),
-        //             }
-        //     valueArr.push(
-        //         TabKV{
-        //         tab: tabkv.tab,
-        //         key: tabkv.key.clone(),
-        //         index: tabkv.index,
-        //         value: value,
-        //         }
-        //     )
-        // }
-        // // (*cb)(Some(Ok(valueArr)))
-        // Some(Ok(valueArr))
     }
     // 修改，插入、删除及更新
-    fn modify(&mut self, arr: Vec<TabKV>, lock_time:Option<usize>, cb: TxCallback) -> UsizeResult {
-        let mut txn = self.txn.clone();
+    fn modify(&self, arr: Arc<Vec<TabKV>>, _lock_time: Option<usize>, _readonly: bool, cb: TxCallback) -> UsizeResult {
+        let fdb_txn = self.0.lock().unwrap();
+        let txn = fdb_txn.clone().txn;
         let func = move || {
             let len = arr.len();
-            for tabkv in arr {
-                // let key = &TableKey.key.as_slice();
+            for tabkv in arr.iter() {
                 if tabkv.value == None {
                     match txn.delete(&tabkv.key.as_slice()) {
                     Ok(_) => (),
@@ -314,7 +238,7 @@ impl Txn for LocalTXN {
                         },
                     };
                 } else {
-                    match txn.put(&tabkv.key.as_slice(), &tabkv.value.unwrap().as_slice()) {
+                    match txn.put(&tabkv.key.as_slice(), &tabkv.value.clone().unwrap().as_slice()) {
                     Ok(_) => (),
                     Err(e) =>
                         {
@@ -324,7 +248,6 @@ impl Txn for LocalTXN {
                     };
                 }
             }
-            // (*cb)(Ok(()))
             cb(Ok(len))
         };
         let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
@@ -332,141 +255,73 @@ impl Txn for LocalTXN {
         (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
         cvar.notify_one();
         None
-        // let len = arr.len();
-        // for tabkv in arr {
-        //     // let key = &TableKey.key.as_slice();
-        //     if tabkv.value == None {
-        //         match self.txn.delete(&tabkv.key.as_slice()) {
-        //         Ok(_) => (),
-        //         Err(e) => return Some(Err(e.to_string())),
-        //         };
-        //     } else {
-        //         match self.txn.put(&tabkv.key.as_slice(), &tabkv.value.unwrap().as_slice()) {
-        //         Ok(_) => (),
-        //         Err(e) => return Some(Err(e.to_string())),
-        //         };
-        //     }
-        // }
-        // // (*cb)(Ok(()))
-        // Some(Ok(len))
     }
     // 迭代表
-    fn iter(&mut self, 
-    tab: Atom, 
-    key: Option<Vec<u8>>, 
-    descending: bool, 
-    key_only:bool, 
-    filter:String, 
-    cb: TxIterCallback) -> Option<DBResult<Box<Cursor>>> {
-        let mut txn = self.txn.clone();
+    fn iter(
+		&self,
+		tab: &Atom,
+		key: Option<Vec<u8>>,
+		descending: bool,
+		_key_only: bool,
+		_filter: String,
+		cb: TxIterCallback,
+	) -> Option<DBResult<Box<Cursor>>> {
+        let fdb_txn = self.0.lock().unwrap();
+        let txn = fdb_txn.txn.clone();
         let func = move || {
             let read_opts = ReadOptions::default();
-            let mut iter = txn.iter(&read_opts);
+            let mut rocksdb_iter = txn.iter(&read_opts);
             if key == None {
                 if descending {
-                    iter.seek_to_last();
+                    rocksdb_iter.seek_to_last();
                 } else {
-                    iter.seek_to_first();
+                    rocksdb_iter.seek_to_first();
                 }
             } else {
                 if descending {
-                    iter.seek_for_prev(key.unwrap().as_slice());
+                    rocksdb_iter.seek_for_prev(key.unwrap().as_slice());
                 } else {
-                    iter.seek(key.unwrap().as_slice());
+                    rocksdb_iter.seek(key.unwrap().as_slice());
                 }
             }
-            cb(Ok(
-                Box::new(LocalDBRawIterator {
-                    iter
-                }))
-            )
+            cb(Ok(Box::new(FDBIterator(rocksdb_iter))))
         };
         let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
         let mut task_pool = lock.lock().unwrap();
         (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
         cvar.notify_one();
         None
+
         // let read_opts = ReadOptions::default();
-        // let mut iter = self.txn.iter(&read_opts);
+        // let mut rocksdb_iter = txn.iter(&read_opts);
+        
         // if key == None {
         //     if descending {
-        //         iter.seek_to_last();
+        //         rocksdb_iter.seek_to_last();
         //     } else {
-        //         iter.seek_to_first();
+        //         rocksdb_iter.seek_to_first();
         //     }
         // } else {
         //     if descending {
-        //         iter.seek_for_prev(key.unwrap().as_slice());
+        //         rocksdb_iter.seek_for_prev(key.unwrap().as_slice());
         //     } else {
-        //         iter.seek(key.unwrap().as_slice());
+        //         rocksdb_iter.seek(key.unwrap().as_slice());
         //     }
         // }
-        // Some(Ok(
-        //     Box::new(LocalDBRawIterator {
-        //         iter
-        //     }))
-        // )
+        // Some(Ok(Box::new(FDBIterator(rocksdb_iter))))
     }
     // 迭代索引
 	fn index(
-        &mut self,
-		tab: Atom,
-		key: Option<Vec<u8>>,
-		descending: bool,
-		filter: String,
-		cb: TxIterCallback,
-    ) -> Option<DBResult<Box<Cursor>>> {
-        let mut txn = self.txn.clone();
-        let func = move || {
-            let read_opts = ReadOptions::default();
-            let mut iter = txn.iter(&read_opts);
-            if key == None {
-                if descending {
-                    iter.seek_to_last();
-                } else {
-                    iter.seek_to_first();
-                }
-            } else {
-                if descending {
-                    iter.seek_for_prev(key.unwrap().as_slice());
-                } else {
-                    iter.seek(key.unwrap().as_slice());
-                }
-            }
-            cb(Ok(
-                Box::new(LocalDBRawIterator {
-                    iter
-                }))
-            )
-        };
-        let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-        let mut task_pool = lock.lock().unwrap();
-        (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
-        cvar.notify_one();
+		&self,
+		_tab: &Atom,
+		_key: Option<Vec<u8>>,
+		_descending: bool,
+		_filter: String,
+		_cb: TxIterCallback,
+	) -> Option<DBResult<Box<Cursor>>> {
         None
-        // //TODO 暂不实现
-        // let read_opts = ReadOptions::default();
-        // let mut iter = self.txn.iter(&read_opts);
-        // if key == None {
-        //     if descending {
-        //         iter.seek_to_last();
-        //     } else {
-        //         iter.seek_to_first();
-        //     }
-        // } else {
-        //     if descending {
-        //         iter.seek_for_prev(key.unwrap().as_slice());
-        //     } else {
-        //         iter.seek(key.unwrap().as_slice());
-        //     }
-        // }
-        // Some(Ok(
-        //     Box::new(LocalDBRawIterator {
-        //         iter
-        //     }))
-        // )
 }
-    fn tab_size(&mut self, tab: Atom, cb: TxCallback) -> UsizeResult {
+    fn tab_size(&self, cb: TxCallback) -> UsizeResult {
         let func = move || {
            cb(Ok(usize::max_value()))
         };
@@ -475,74 +330,143 @@ impl Txn for LocalTXN {
         (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
         cvar.notify_one();
         None
-        // Some(Ok(usize::max_value()))
     }
 
 }
 
-impl Cursor for LocalDBRawIterator {
-    fn state(&self) -> DBResult<bool> {
-        Ok(self.iter.valid())
+impl Tab for FDB {
+    fn transaction(&self, id: &Guid, _writable: bool, _timeout: usize) -> Arc<TabTxn> {
+        let txn_opts = TransactionOptions::default();
+        let write_opts = WriteOptions::default();
+        let txn_db = &self.0;
+        let rocksdb_txn = TXN::begin(txn_db, &write_opts, &txn_opts).unwrap();
+        let mut txn_name = String::from("rocksdb_");
+        txn_name.push_str(now_nanos().to_string().as_str());
+        match rocksdb_txn.set_name(&txn_name) {
+            Ok(_) => println!("set_name ok!!!!!"),
+            Err(e) => println!("set_name err:{}", e.to_string()),
+        };
+
+        let txn = MutexFdbTxn(Arc::new(Mutex::new(
+            FdbTxn {
+                id: id.clone(),
+                txn: rocksdb_txn,
+                state: TxState::Ok
+            }
+        )));
+        
+        return Arc::new(txn)
     }
-    fn key(&self) -> &[u8] {
-        unsafe {self.iter.key_inner().unwrap()}
+}
+
+// 每个TabBuilder的元信息事务
+impl MetaTxn for MutexFdbTxn {
+	// 创建表、修改指定表的元数据
+	fn alter(
+		&self,
+		tab: &Atom,
+		meta: Option<Arc<StructInfo>>,
+		_cb: TxCallback,
+	) -> UsizeResult {
+        let mut value;
+		match meta {
+			None => value = None,
+			Some(m) => {
+				let mut meta_buf = BonBuffer::new();
+				m.encode(&mut meta_buf);
+				value = Some(Arc::new(meta_buf.unwrap()));
+			}
+		}
+		let mut arr = Vec::new();
+		let tab_name = &**tab;
+		let mut kv = TabKV::new(tab.clone(), tab_name.clone().into_bytes());
+		kv.value = value;
+		arr.push(kv);
+		&self.modify(Arc::new(arr), None, false, Arc::new(|_v|{}));
+        Some(Ok(1))
+    }
+	// 修改指定表的名字
+	fn rename(
+		&self,
+		_tab: &Atom,
+		_new_name: &Atom,
+		_cb: TxCallback,
+	) -> UsizeResult {
+        Some(Ok(1))
+    }
+}
+
+//管理端需要调用new方法生成一张系统表，用于存放所有表信息
+impl SysDb {
+	pub fn new(tab_name: &Atom) -> Self {
+		let mut tab = FDBTab::new(tab_name);
+        let db = tab.open();
+        SysDb(db)
+	}
+}
+
+impl TabBuilder for SysDb {
+    // 列出全部的表
+	fn list(
+		&self,
+	) -> Vec<(Atom, Arc<StructInfo>)> {
+        //TODO Txn和MetaTxn接口中未提供迭代方法，暂不实现
+        vec![]
+    }
+	// 打开指定的表，表必须有meta
+	fn open(
+		&self,
+		tab: &Atom,
+		_cb: Box<Fn(DBResult<Arc<Tab>>)>,
+	) -> Option<DBResult<Arc<Tab>>> {
+        let mut tab = FDBTab::new(tab);
+        let db = tab.open();
+        Some(Ok(Arc::new(FDB(db))))
+    }
+	// 检查该表是否可以创建
+	fn check(
+		&self,
+		tab: &Atom,
+		meta: &Arc<StructInfo>,
+	) -> DBResult<()> {
+        Ok(())
+    }
+	// 创建一个meta事务
+	fn transaction(&self, id: &Guid, _timeout: usize) -> Arc<MetaTxn> {
+        let txn_opts = TransactionOptions::default();
+        let write_opts = WriteOptions::default();
+        let txn_db = &self.0;
+        let rocksdb_txn = TXN::begin(txn_db, &write_opts, &txn_opts).unwrap();
+        let mut txn_name = String::from("rocksdb_");
+        txn_name.push_str(now_nanos().to_string().as_str());
+        match rocksdb_txn.set_name(&txn_name) {
+            Ok(_) => println!("set_name ok!!!!!"),
+            Err(e) => println!("set_name err:{}", e.to_string()),
+        };
+        let txn = MutexFdbTxn(Arc::new(Mutex::new(
+            FdbTxn {
+                id: id.clone(),
+                txn: rocksdb_txn,
+                state: TxState::Ok
+            }
+        )));
+        
+		return Arc::new(txn)
+    }
+}
+
+//迭代器方法
+impl Cursor for FDBIterator {
+    fn state(&self) -> DBResult<bool> {
+        Ok(self.0.valid())
+    }
+    fn key(&self) -> Arc<Vec<u8>> {
+        Arc::new(self.0.key().unwrap())
     }
     fn value(&self) -> Option<Arc<Vec<u8>>> {
-        Some(Arc::new(self.iter.value().unwrap()))
+        Some(Arc::new(self.0.value().unwrap()))
     }
     fn next(&mut self) {
-        self.iter.next()
+        self.0.next()
     }
 }
-
-// fn prepare(txn: TXN,  callback: TxCallback) {
-//     let func = move || {
-//         match txn.prepare() {
-//             Ok(()) => callback(Ok(1)),
-//             Err(e) => callback(Err(e.to_string())),
-//         }
-//     };
-//     let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-//     let mut task_pool = lock.lock().unwrap();
-//     (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
-//     cvar.notify_one();
-// }
-
-// fn commit(txn: TXN,  callback: Arc<Fn(Result<(), String>)>) {
-//     let func = move || {
-//         match txn.commit() {
-//             Ok(()) => callback(Ok(())),
-//             Err(e) => callback(Err(e.to_string())),
-//         }
-//     };
-//     let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-//     let mut task_pool = lock.lock().unwrap();
-//     (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
-//     cvar.notify_one();
-// }
-
-// fn rollback(txn: TXN,  callback: Arc<Fn(Result<(), String>)>) {
-//     let func = move || {
-//         match txn.rollback() {
-//             Ok(()) => callback(Ok(())),
-//             Err(e) => callback(Err(e.to_string())),
-//         }
-//     };
-//     let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-//     let mut task_pool = lock.lock().unwrap();
-//     (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
-//     cvar.notify_one();
-// }
-
-// fn get(txn: TXN, opts: &ReadOptions, key: &[u8],  callback: Arc<Fn(Result<Option<DBVector>, Error>)>) {
-//     let func = move || {
-//         match txn.get(opts, key) {
-//             Ok(()) => callback(Ok(())),
-//             Err(e) => callback(Err(e.to_string())),
-//         }
-//     };
-//     let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-//     let mut task_pool = lock.lock().unwrap();
-//     (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, Box::new(func), DB_ASYNC_FILE_INFO);
-//     cvar.notify_one();
-// }
