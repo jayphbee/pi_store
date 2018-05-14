@@ -17,7 +17,7 @@ fn transaction() {
         
         //
         let txn = TXN::begin(&db, &write_opts, &txn_opts).unwrap();
-        assert!(txn.setName("xid111").is_ok());
+        assert!(txn.set_name("xid111").is_ok());
         let p = txn.put(b"k1", b"v1111");
         assert!(p.is_ok());
         let r: Result<Option<DBVector>, Error> = txn.get(&read_opts, b"k1");
@@ -60,7 +60,7 @@ fn transaction_cf() {
         // };
         
         let txn = TXN::begin(&db, &write_opts, &txn_opts).unwrap();
-        assert!(txn.setName("xid111").is_ok());
+        assert!(txn.set_name("xid111").is_ok());
         let p = txn.put_cf(&cf1, b"k1", b"v1111");
         assert!(p.is_ok());
         let r: Result<Option<DBVector>, Error> = txn.get_cf(&read_opts, &cf1, b"k1");
