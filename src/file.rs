@@ -1,9 +1,9 @@
 use std::boxed::FnBox;
 use std::time::Duration;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, Condvar};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::fs::{File, OpenOptions, Metadata, remove_file};
+use std::fs::{File, OpenOptions, Metadata, rename, remove_file};
 use std::io::{Seek, Read, Write, Result, SeekFrom, Error, ErrorKind};
 
 use pi_vm::task::TaskType;
@@ -40,6 +40,11 @@ const WRITE_ASYNC_FILE_PRIORITY: u32 = 60;
 const SYNC_ASYNC_FILE_PRIORITY: u32 = 30;
 
 /*
+* 重命名文件优先级
+*/
+const RENAME_ASYNC_FILE_PRIORITY: u32 = 15;
+
+/*
 * 移除文件任务优先级
 */
 const REMOVE_ASYNC_FILE_PRIORITY: u32 = 10;
@@ -68,6 +73,11 @@ const SYNC_ALL_ASYNC_FILE_INFO: &str = "sync all asyn file";
 * 同步文件信息
 */
 const SYNC_ASYNC_FILE_INFO: &str = "sync asyn file";
+
+/*
+* 重命名文件
+*/
+const RENAME_ASYNC_FILE_INFO: &str = "rename asyn file";
 
 /*
 * 移除文件信息
@@ -127,19 +137,19 @@ impl AsyncFile {
                             .append(a)
                             .create(c)
                             .open(path) {
-                                Err(e) => callback(Err(e)),
-                                Ok(file) => {
-                                    let buffer_size = match file.metadata() {
-                                        Ok(meta) => get_block_size(&meta) * len as usize,
-                                        _ => BLOCK_SIZE * len as usize,
-                                    };
-                                    callback(Ok(AsyncFile {
-                                                            inner: file, 
-                                                            buffer_size: buffer_size, 
-                                                            pos: 0, 
-                                                            buffer: Some(Vec::with_capacity(0))
-                                                        }))
-                                },
+                Err(e) => callback(Err(e)),
+                Ok(file) => {
+                    let buffer_size = match file.metadata() {
+                        Ok(meta) => get_block_size(&meta) * len as usize,
+                        _ => BLOCK_SIZE * len as usize,
+                    };
+                    callback(Ok(AsyncFile {
+                                            inner: file, 
+                                            buffer_size: buffer_size, 
+                                            pos: 0, 
+                                            buffer: Some(Vec::with_capacity(0))
+                                        }))
+                },
             }
         };
 
@@ -149,7 +159,20 @@ impl AsyncFile {
         cvar.notify_one();
     }
 
-    //移除文件
+    //文件重命名
+    pub fn rename<P: AsRef<Path> + Clone + Send + 'static>(from: P, to: P, callback: Box<FnBox(P, P, Result<()>)>) {
+        let func = move || {
+            let result = rename(from.clone(), to.clone());
+            callback(from, to, result);
+        };
+
+        let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
+        let mut task_pool = lock.lock().unwrap();
+        (*task_pool).push(ASYNC_FILE_TASK_TYPE, RENAME_ASYNC_FILE_PRIORITY, Box::new(func), RENAME_ASYNC_FILE_INFO);
+        cvar.notify_one();
+    }
+
+    //移除指定文件
     pub fn remove<P: AsRef<Path> + Send + 'static>(path: P, callback: Box<FnBox(Result<()>)>) {
         let func = move || {
             let result = remove_file(path);
@@ -382,10 +405,10 @@ fn init_write_file(mut file: AsyncFile) -> AsyncFile {
 fn alloc_buffer(mut file: AsyncFile, file_size: usize, len: usize) -> AsyncFile {
     if file.buffer.as_ref().unwrap().len() == 0 {
         if file_size > len {
-            unsafe { file.buffer.as_mut().unwrap().reserve(len); }
+            file.buffer.as_mut().unwrap().reserve(len);
             file.buffer.as_mut().unwrap().resize(len, 0);
         } else {
-            unsafe { file.buffer.as_mut().unwrap().reserve(file_size); }
+            file.buffer.as_mut().unwrap().reserve(file_size);
             file.buffer.as_mut().unwrap().resize(file_size, 0);
         }
     }
