@@ -158,10 +158,16 @@ fn test_file() {
 	AsyncFile::open(PathBuf::from(r"foo.txt"), AsynFileOptions::OnlyRead(1), Box::new(open));
 	thread::sleep(Duration::from_millis(1000));
 
-	let remove = move |result: Result<()>| {
+	let rename = move |from, to, result: Result<()>| {
 		assert!(result.is_ok());
-		println!("!!!!!!remove file");
+		println!("!!!!!!rename file, from: {:?}, to: {:?}", from, to);
+
+		let remove = move |result: Result<()>| {
+			assert!(result.is_ok());
+			println!("!!!!!!remove file");
+		};
+		AsyncFile::remove(PathBuf::from(r"foo.swap"), Box::new(remove));
 	};
-	AsyncFile::remove(PathBuf::from(r"foo.txt"), Box::new(remove));
+	AsyncFile::rename(PathBuf::from(r"foo.txt"), PathBuf::from(r"foo.swap"), Box::new(rename));
 	thread::sleep(Duration::from_millis(1000));
 }
