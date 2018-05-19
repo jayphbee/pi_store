@@ -14,7 +14,7 @@ use pi_store::ordmap::Entry;
 use pi_store::ordmap::OrdMap;
 use pi_store::ordmap::ImOrdMap;
 use pi_store::sbtree::Tree;
-use pi_store::file::{STORE_TASK_POOL, AsyncFile, AsynFileOptions};
+use pi_store::file::{STORE_TASK_POOL, AsyncFile, AsynFileOptions, WriteOptions};
 
 
 // 需要一个辅助函数
@@ -103,16 +103,11 @@ fn test_file() {
 			println!("!!!!!!write file");
 			let write = move |f3: AsyncFile, result: Result<()>| {
 				assert!(result.is_ok());
-				println!("!!!!!!write file");
-				let sync_all = move |f4: AsyncFile, result: Result<()>| {
-					assert!(result.is_ok());
-					println!("!!!!!!sync all file");
-				};
-				f3.sync_all(Box::new(sync_all));
+				println!("!!!!!!write file by sync");
 			};
-			f1.write(8, Vec::from("Hello World!!!!!!######你好 Rust\nHello World!!!!!!######你好 Rust\nHello World!!!!!!######你好 Rust\n".as_bytes()), Box::new(write));
+			f1.write(WriteOptions::SyncAll(true), 8, Vec::from("Hello World!!!!!!######你好 Rust\nHello World!!!!!!######你好 Rust\nHello World!!!!!!######你好 Rust\n".as_bytes()), Box::new(write));
 		};
-		f0.ok().unwrap().write(0, vec![], Box::new(write));
+		f0.ok().unwrap().write(WriteOptions::Flush, 0, vec![], Box::new(write));
 	};
 	AsyncFile::open(PathBuf::from(r"foo.txt"), AsynFileOptions::ReadWrite(1), Box::new(open));
 	thread::sleep(Duration::from_millis(5000));
