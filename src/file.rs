@@ -35,14 +35,9 @@ const READ_ASYNC_FILE_PRIORITY: u32 = 100;
 const WRITE_ASYNC_FILE_PRIORITY: u32 = 60;
 
 /*
-* 文件同步任务优先级
-*/
-const SYNC_ASYNC_FILE_PRIORITY: u32 = 30;
-
-/*
 * 重命名文件优先级
 */
-const RENAME_ASYNC_FILE_PRIORITY: u32 = 15;
+const RENAME_ASYNC_FILE_PRIORITY: u32 = 30;
 
 /*
 * 移除文件任务优先级
@@ -63,16 +58,6 @@ const READ_ASYNC_FILE_INFO: &str = "read asyn file";
 * 写异步文件信息
 */
 const WRITE_ASYNC_FILE_INFO: &str = "write asyn file";
-
-/*
-* 全同步文件信息
-*/
-const SYNC_ALL_ASYNC_FILE_INFO: &str = "sync all asyn file";
-
-/*
-* 同步文件信息
-*/
-const SYNC_ASYNC_FILE_INFO: &str = "sync asyn file";
 
 /*
 * 重命名文件
@@ -100,6 +85,16 @@ pub enum AsynFileOptions {
     OnlyAppend(u8),
     ReadAppend(u8),
     ReadWrite(u8),
+}
+
+/*
+* 写文件选项
+*/
+pub enum WriteOptions {
+    None,
+    Flush,
+    Sync(bool),
+    SyncAll(bool),
 }
 
 /*
@@ -308,7 +303,7 @@ impl AsyncFile {
     }
 
     //从指定位置开始，写指定字节
-    pub fn write(mut self, pos: usize, bytes: Vec<u8>, callback: Box<FnBox(Self, Result<()>)>) {
+    pub fn write(mut self, options: WriteOptions, pos: usize, bytes: Vec<u8>, callback: Box<FnBox(Self, Result<()>)>) {
         let func = move || {
             if !&bytes[self.pos..].is_empty() {
                 match self.inner.seek(SeekFrom::Start(pos as u64)) {
@@ -321,11 +316,11 @@ impl AsyncFile {
                             Ok(n) => {
                                 //继续写
                                 self.pos += n;
-                                self.write(pos + n, bytes, callback);
+                                self.write(options, pos + n, bytes, callback);
                             },
                             Err(ref e) if e.kind() == ErrorKind::Interrupted => {
                                 //重复写
-                                self.write(pos, bytes, callback);
+                                self.write(options, pos, bytes, callback);
                             },
                             Err(e) => {
                                 callback(init_write_file(self), Err(e));
@@ -335,7 +330,14 @@ impl AsyncFile {
                 }
             } else {
                 //写完成
-                let result = self.inner.flush();
+                let result = match options {
+                    WriteOptions::None => Ok(()),
+                    WriteOptions::Flush => self.inner.flush(),
+                    WriteOptions::Sync(true) => self.inner.flush().and_then(|_| self.inner.sync_data()),
+                    WriteOptions::Sync(false) => self.inner.sync_data(),
+                    WriteOptions::SyncAll(true) => self.inner.flush().and_then(|_| self.inner.sync_all()),
+                    WriteOptions::SyncAll(false) => self.inner.sync_all(),
+                };
                 callback(init_write_file(self), result);
             }
         };
@@ -343,32 +345,6 @@ impl AsyncFile {
         let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
         let mut task_pool = lock.lock().unwrap();
         (*task_pool).push(ASYNC_FILE_TASK_TYPE, WRITE_ASYNC_FILE_PRIORITY, Box::new(func), WRITE_ASYNC_FILE_INFO);
-        cvar.notify_one();
-    }
-
-    //全同步文件
-    pub fn sync_all(self, callback: Box<FnBox(Self, Result<()>)>) {
-        let func = move || {
-            let result = self.inner.sync_all();
-            callback(self, result);
-        };
-
-        let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-        let mut task_pool = lock.lock().unwrap();
-        (*task_pool).push(ASYNC_FILE_TASK_TYPE, SYNC_ASYNC_FILE_PRIORITY, Box::new(func), SYNC_ALL_ASYNC_FILE_INFO);
-        cvar.notify_one();
-    }
-
-    //同步文件
-    pub fn sync(self, callback: Box<FnBox(Self, Result<()>)>) {
-        let func = move || {
-            let result = self.inner.sync_data();
-            callback(self, result);
-        };
-
-        let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-        let mut task_pool = lock.lock().unwrap();
-        (*task_pool).push(ASYNC_FILE_TASK_TYPE, SYNC_ASYNC_FILE_PRIORITY, Box::new(func), SYNC_ASYNC_FILE_INFO);
         cvar.notify_one();
     }
 
