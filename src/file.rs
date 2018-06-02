@@ -266,7 +266,6 @@ impl AsyncFile {
                             }
                             
                             match self.inner.read(&mut self.buffer.as_mut().unwrap()[(self.pos)..(self.pos + buf_size)]) {
-                                Err(e) => callback(init_read_file(self), Err(e)),
                                 Ok(n) if n == 0 || n < buf_size => {
                                     //文件尾
                                     self.pos = self.buffer.as_ref().unwrap().len();
@@ -284,6 +283,11 @@ impl AsyncFile {
                                         self.read(pos + n, len - n, callback);
                                     }
                                 },
+                                Err(ref e) if e.kind() == ErrorKind::Interrupted => {
+                                    //重复读
+                                    self.read(pos, len, callback);
+                                },
+                                Err(e) => callback(init_read_file(self), Err(e)),
                             }
                         },
                         _ => {
