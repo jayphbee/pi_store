@@ -103,7 +103,7 @@ pub enum WriteOptions {
 pub struct AsyncFile{
     inner: File, 
     buffer_size: usize, 
-    pos: usize, 
+    pos: u64, 
     buffer: Option<Vec<u8>>,
 }
 
@@ -196,8 +196,8 @@ impl AsyncFile {
     }
     
     //获取文件大小
-    pub fn get_size(&self) -> usize {
-        self.inner.metadata().ok().unwrap().len() as usize
+    pub fn get_size(&self) -> u64 {
+        self.inner.metadata().ok().unwrap().len()
     }
 
     //获取文件修改时间
@@ -240,7 +240,7 @@ impl AsyncFile {
     }
 
     //从指定位置开始，读指定字节
-    pub fn read(mut self, pos: usize, len: usize, callback: Box<FnBox(Self, Result<Vec<u8>>)>) {
+    pub fn read(mut self, pos: u64, len: usize, callback: Box<FnBox(Self, Result<Vec<u8>>)>) {
         let func = move || {
             let file_size = self.get_size();
             if file_size == 0 || len == 0 {
@@ -258,30 +258,29 @@ impl AsyncFile {
                     let buf_cap = self.buffer.as_ref().unwrap().capacity() as isize;
                     match  buf_cap - self.pos as isize {
                         diff if diff > 0 => {
-                            let mut buf_size: usize;
-                            if diff as usize >= self.buffer_size {
-                                buf_size = self.buffer_size;
+                            let buf_size = if diff as usize >= self.buffer_size {
+                                self.buffer_size
                             } else {
-                                buf_size = diff as usize;
-                            }
+                                diff as usize
+                            };
                             
-                            match self.inner.read(&mut self.buffer.as_mut().unwrap()[(self.pos)..(self.pos + buf_size)]) {
+                            match self.inner.read(&mut self.buffer.as_mut().unwrap()[(self.pos as usize)..(self.pos as usize + buf_size)]) {
                                 Err(e) => callback(init_read_file(self), Err(e)),
                                 Ok(n) if n == 0 || n < buf_size => {
                                     //文件尾
-                                    self.pos = self.buffer.as_ref().unwrap().len();
+                                    self.pos = self.buffer.as_ref().unwrap().len() as u64;
                                     let vec = self.buffer.take().unwrap();
                                     callback(init_read_file(self), Ok(vec));
                                 },
                                 Ok(n) => {
-                                    self.pos += n;
-                                    if self.pos >= buf_cap as usize {
+                                    self.pos += n as u64;
+                                    if self.pos >= buf_cap as u64 {
                                         //读完成
                                         let vec = self.buffer.take().unwrap();
                                         callback(init_read_file(self), Ok(vec));
                                     } else {
                                         //继续读
-                                        self.read(pos + n, len - n, callback);
+                                        self.read(pos + n as u64, len - n, callback);
                                     }
                                 },
                             }
@@ -303,20 +302,20 @@ impl AsyncFile {
     }
 
     //从指定位置开始，写指定字节
-    pub fn write(mut self, options: WriteOptions, pos: usize, bytes: Vec<u8>, callback: Box<FnBox(Self, Result<()>)>) {
+    pub fn write(mut self, options: WriteOptions, pos: u64, bytes: Vec<u8>, callback: Box<FnBox(Self, Result<()>)>) {
         let func = move || {
-            if !&bytes[self.pos..].is_empty() {
+            if !&bytes[self.pos as usize..].is_empty() {
                 match self.inner.seek(SeekFrom::Start(pos as u64)) {
                     Err(e) => callback(init_write_file(self), Err(e)),
                     Ok(_) => {
-                        match self.inner.write(&bytes[self.pos..]) {
+                        match self.inner.write(&bytes[self.pos as usize..]) {
                             Ok(0) => {
                                 callback(init_write_file(self), Err(Error::new(ErrorKind::WriteZero, "write failed")));
                             },
                             Ok(n) => {
                                 //继续写
-                                self.pos += n;
-                                self.write(options, pos + n, bytes, callback);
+                                self.pos += n as u64;
+                                self.write(options, pos + n as u64, bytes, callback);
                             },
                             Err(ref e) if e.kind() == ErrorKind::Interrupted => {
                                 //重复写
@@ -378,14 +377,14 @@ fn init_write_file(mut file: AsyncFile) -> AsyncFile {
 }
 
 #[inline]
-fn alloc_buffer(mut file: AsyncFile, file_size: usize, len: usize) -> AsyncFile {
+fn alloc_buffer(mut file: AsyncFile, file_size: u64, len: usize) -> AsyncFile {
     if file.buffer.as_ref().unwrap().len() == 0 {
-        if file_size > len {
+        if file_size > len as u64 {
             file.buffer.as_mut().unwrap().reserve(len);
             file.buffer.as_mut().unwrap().resize(len, 0);
         } else {
-            file.buffer.as_mut().unwrap().reserve(file_size);
-            file.buffer.as_mut().unwrap().resize(file_size, 0);
+            file.buffer.as_mut().unwrap().reserve(file_size as usize);
+            file.buffer.as_mut().unwrap().resize(file_size as usize, 0);
         }
     }
     file
