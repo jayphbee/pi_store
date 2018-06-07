@@ -13,3 +13,4 @@ pi_vm = { path = "../pi_vm" }
 rocksdb = { path = "rust-rocksdb", version = "0.10.0" }
 pi_db = {path = "../pi_db"}
 pi_lib = { path = "../pi_lib" }
+pi_base = { path = "../pi_base" }

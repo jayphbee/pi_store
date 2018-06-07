@@ -1,5 +1,5 @@
-#![feature(fnbox)]
 #![crate_type = "rlib"]
+#![feature(fnbox)]
 #![feature(integer_atomics)]
 #![feature(duration_extras)]
 #![feature(custom_derive,asm,box_syntax,box_patterns)]
@@ -22,10 +22,9 @@ extern crate rocksdb;
 extern crate lazy_static;
 
 extern crate pi_lib;
+extern crate pi_base;
 extern crate pi_db;
-extern crate pi_vm;
 
 
-pub mod file;
 //pub mod log;
 
