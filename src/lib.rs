@@ -26,5 +26,5 @@ extern crate pi_base;
 extern crate pi_db;
 
 
-//pub mod log;
-
+pub mod log;
+pub mod kg;
