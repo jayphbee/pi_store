@@ -1,5 +1,5 @@
 /**
- * 日志存储的定义，分为：一般日志，KV日志。
+ * 日志存储的定义
  * 1、用2个以上读写日志做日志记录。2个以上的目的是为了保证有的日志记录晚到可以被记录。大小到了，要开辟新的读写日志。
  * 2、用时间起始值作为文件名，一般大小为4-64兆。文件内一般64k为1个块，默认采用lz4压缩。
  * 由外部驱动来建索引及重命名，这样可以用作索引完成的标志。
@@ -9,15 +9,9 @@
  * 日志需要建立索引。先修改头部的索引位置。然后创建索引。 // 一般总是用Guid来查询，所以不太需要有GuidBloom过滤器。
  * 为了自己管理缓冲，使用O_DIRECT 直接读写文件。元数据保留块索引数组。有块缓存，缓存单个的数据块。根据内存需要可单独加载和释放。缓存数据块时，可以按4k左右的大小建立简单索引。
  * 读写模式下： Ver(2字节), 配置(2字节), 整理时间-秒-总为0(4字节), 索引位置-总为0(4字节), 块索引数组长度-总为0(2字节), [{块长-块结束时写入(3字节), [{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(2字节，可选，整理时删除)}...], }...]=数据块数组(块与块可能会出现Guid交叠)
- * 只读模式下： Ver(2字节), 配置-描述是否有子表编号(2字节), 整理时间-秒(4字节), 索引位置(4字节), 块索引数组长度(2字节), [块长(3字节), {[{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(2字节，可选，整理时删除)}...], }...]=数据块数组, 0xFFFFFF(3字节表示为索引), [{MinGuidTime(8字节), MaxGuidTime(8字节), Pos(4字节), Count(4字节)}...]=块索引数组
+ * 只读模式下： Ver(2字节), 配置-描述是否有子表编号(2字节), 整理时间-秒(4字节), 索引位置(4字节), 块索引数组长度(2字节), [块长(3字节), {[{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(4字节，可选，整理时删除)}...], }...]=数据块数组, 0xFFFFFF(3字节表示为索引), [{MinGuidTime(8字节), MaxGuidTime(8字节), Pos(4字节), Count(4字节)}...]=块索引数组
  *
  * 管理器用sbtree记录每个文件名对应的元信息(时间和修改次数)
- * 
- * KV日志需要外部提供从Bon数据中获取key的方法和批量按键获取Guid的方法。并且写日志时需要指定子表编号。其余和一般日志一样。
- * KV日志的按键进行合并，部分垃圾回收的流程：
- * 寻找超过指定时间并且整理次数最少的块，如果块太小，会和前一个块合并到一起，一起进行整理。
- * 对块内日志进行遍历，每个条目反查key来决定是否存在。
- * 合并时，会创建一个临时文件，然后生成新的日志文件后，将临时文件命名成{time}.{mcount+1}，修改内存。最后删除原日志。
  * 
  * 使用direct IO和pread来提升性能
  * 
@@ -56,18 +50,17 @@ pub type Callback = Arc<Fn(SResult<()>)>;
 pub type ReadCallback = Arc<Fn(SResult<Bin>)>;
 
 
-
 /*
- * 一般log日志
+ * log日志
  */
 #[derive(Clone)]
-pub struct GLog {
+pub struct Log {
 	dir: Atom,
 	cfg: Config,
 	stat: Statistics,
-	rw: Arc<RwLock<GLogRW>>,
+	rw: Arc<RwLock<LogRW>>,
 }
-impl GLog {
+impl Log {
 	pub fn new(dir: Atom, cfg: Config, cb: Arc<Fn(SResult<Self>)>) -> Option<SResult<Self>> {
 		let path = Path::new(&**dir);
 		if !path.exists() {
@@ -130,11 +123,11 @@ impl GLog {
 		}
 		let len = temp.len();
 		if len == 0 {
-			return Some(Ok(GLog{
+			return Some(Ok(Log{
 				dir: dir,
 				cfg: cfg,
 				stat: Statistics::new(),
-				rw: Arc::new(RwLock::new(GLogRW::new(&reads, Vec::new()))),
+				rw: Arc::new(RwLock::new(LogRW::new(&reads, Vec::new()))),
 			}))
 		};
 		// 加载所有正在写入的日志文件
@@ -147,11 +140,11 @@ impl GLog {
 					let mut vec = writes.lock().unwrap();
 					vec[i] = FileInfo(time, 0, w);
 					if count.fetch_sub(1, Ordering::SeqCst) == 1 {
-						cb(Ok(GLog{
+						cb(Ok(Log{
 							dir: dir.clone(),
 							cfg: cfg.clone(),
 							stat: Statistics::new(),
-							rw: Arc::new(RwLock::new(GLogRW::new(&reads, mem::replace(&mut vec, Vec::new())))),
+							rw: Arc::new(RwLock::new(LogRW::new(&reads, mem::replace(&mut vec, Vec::new())))),
 						}))
 					}
 				},
@@ -190,15 +183,19 @@ impl GLog {
 		};
 		None
 	}
-	pub fn write(&self, guid: Guid, data: Bin, st_key: u16, callback: Callback) -> SResult<()> {
+	pub fn write(&self, guid: Guid, data: Bin, st_key: u32, callback: Callback) -> SResult<()> {
 		Err("guid too old".to_string())
 	}
 	// 列出所有可以读写的日志文件名
 	pub fn list_writes(&self) -> Vec<u64> {
 		vec![]
 	}
-
+	// 整理指定的可读写的日志文件，为其建立索引并以只读方式打开
+	pub fn collect(&self, file: u64, callback: Callback) -> SResult<()> {
+		Err("file not found".to_string())
+	}
 }
+
 // 统计
 #[derive(Clone)]
 pub struct Config {
@@ -252,7 +249,7 @@ const CFG_ST: u16 = 1;
 /*
 * 子表编号的大小
 */
-const ST_SIZE: usize = 2;
+const ST_SIZE: usize = 4;
 
 /*
 * 块的长度
@@ -305,9 +302,9 @@ impl<T:Clone> PartialEq for FileInfo<T> {
 	}
 }
 
-struct GLogRW(Vec<FileInfo<AReader>>, Vec<FileInfo<AWriter>>);
+struct LogRW(Vec<FileInfo<AReader>>, Vec<FileInfo<AWriter>>);
 
-impl GLogRW {
+impl LogRW {
 	fn new(reader: &OrdMap<Tree<u64, (u32, AReader)>>, mut writer: Vec<FileInfo<AWriter>>) -> Self {
 		let mut vec = Vec::with_capacity(reader.size());
 		let mut f = |e: &Entry<u64, (u32, AReader)>| {
@@ -317,7 +314,7 @@ impl GLogRW {
 		// 对reader和writer按时间排序
 		vec.as_mut_slice().sort();
 		writer.as_mut_slice().sort();
-		GLogRW(vec, writer)
+		LogRW(vec, writer)
 	}
 }
 
@@ -643,7 +640,7 @@ fn read_log(data: &[u8], pos: usize, st_size: usize) -> (usize, u64) {
 	let bon_len = r.read_lengthen() as usize;
 	(pos + 16 + r.head() + bon_len + st_size, time)
 }
-// 读取块长度
+// 读取3字节的块长度
 fn read_bsize(data: &[u8], pos: usize) -> usize {
 	((data.get_lu16(pos) as usize) << 8) + data.get_u8(pos + 2) as usize
 }

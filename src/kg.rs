@@ -7,10 +7,10 @@
  * 	4、用日志整理作为写BTree的驱动，批量处理，写一次根文件。因为不同子表有自己独立缓存，如果掉电，需要从日志中恢复是那个子表缓存的，所以每条kv会在日志记录中记录子表(2字节)
  * 	5、支持2pc事务。
  * 	6、内存中的索引文件也是用的cow的sbtree。如果当前索引文件不够，需要分裂。分裂时，sbtree 也全局保证COW特性！
- * 	7、支持用指定的key创建新的子表，内存中会克隆sbtree，根文件中追加{子表(2字节), 长度(2字节), [所有索引文件名的根块位置(2字节)...]}。
+ * 	7、支持用指定的key创建新的子表，内存中会克隆sbtree，根文件中追加{长度(2字节), 子表(4字节), [所有索引文件名的根块位置(2字节)...]}。
  * 	8、怎么在运行中安全的收缩？需要考虑
  * 
- * 根日志文件的格式为： [{子表key(2字节), 块数组长度(2字节，实际为块数组长度+1), [{文件ID(2字节), 根块位置(2字节)},...]=块数组, }, ...]
+ * 根日志文件的格式为： [块数组长度(2字节，实际为块数组长度+1), {子表key(4字节), [{文件ID(2字节), 根块位置(2字节)},...]=块数组, }, ...]
  * 如果块数组长度为0，表示子表被删除
  * 如果块数组长度为FFFF，表示初始化成功，根日志文件必须包含一个块数组长度为FFFF的数据。
  */
@@ -40,12 +40,16 @@ use pi_lib::base58::{ToBase58, FromBase58};
 
 use pi_base::file::{AsyncFile, AsynFileOptions};
 
-use log::{Bin, SResult, LogResult, Callback, ReadCallback, Config as LogCfg};
+use log::{Bin, Log, SResult, LogResult, Callback, ReadCallback, Config as LogCfg};
+use kg_log::KGLog;
+use kg_record::{Record, RecordMap};
+use kg_root::RootLog;
+use kg_subtab::{SubTab, SubTabList};
 
 // data的目录名
-pub const KV_DATA: &str = "data";
+pub const KV_DATA: &str = ".data";
 // kv索引的目录名
-pub const KV_INDEX: &str = "index";
+pub const KV_INDEX: &str = ".index";
 // kv索引的根文件名
 pub const KV_ROOT: &str = "root";
 
@@ -54,13 +58,14 @@ pub const KV_ROOT: &str = "root";
  */
 #[derive(Clone)]
 pub struct Tab {
-	dir: Atom,
-	cfg: Config,
-	log_cfg: LogCfg,
-	stat: Statistics,
-	root: Arc<Mutex<RLog>>,
-	subs: Arc<RwLock<FnvHashMap<u16, SubTab>>>,
-	files: Arc<RwLock<FnvHashMap<usize, Record>>>,
+	pub dir: Atom,
+	pub cfg: Config,
+	pub log_cfg: LogCfg,
+	pub stat: Statistics,
+	pub root: Arc<Mutex<RootLog>>,
+	pub subs: SubTabList,
+	pub records: RecordMap,
+	pub kg_log: KGLog,
 }
 
 impl Tab {
@@ -78,6 +83,7 @@ impl Tab {
 			return Some(Err("invalid kg data dir".to_string()))
 		}
 		let index_dir = path.join(KV_INDEX);
+		let idir = Atom::from(index_dir.to_str().unwrap());
 		if !index_dir.exists() {
 			DirBuilder::new().recursive(true).create(index_dir).unwrap();
 		}else if !index_dir.is_dir() {
@@ -115,16 +121,16 @@ impl Tab {
 		}
 		roots.as_mut_slice().sort();
 		let file = path.join(KV_ROOT);
-		let tab = Tab{
-			dir: dir.clone(),
-			cfg: cfg,
-			log_cfg: log_cfg,
-			stat: Statistics::new(),
-			root: Arc::new(Mutex::new(RLog::new(file.to_string_lossy().to_string(), 0))),
-			subs: Arc::new(RwLock::new(FnvHashMap::with_capacity_and_hasher(0, Default::default()))),
-			files: Arc::new(RwLock::new(FnvHashMap::with_capacity_and_hasher(0, Default::default()))),
-		};
-		load_root(roots, file, tab, cb);
+		// let tab = Tab{
+		// 	dir: dir.clone(),
+		// 	cfg: cfg,
+		// 	log_cfg: log_cfg,
+		// 	stat: Statistics::new(),
+		// 	root: Arc::new(Mutex::new(RLog::new(file.to_string_lossy().to_string(), 0))),
+		// 	subs: SubTabMap::new(),
+		// 	records: RecordMap::new(idir),
+		// };
+		// load_root(roots, file, tab, cb);
 		None
 	}
 	pub fn dir(&self) -> &Atom {
@@ -143,6 +149,13 @@ impl Tab {
 	pub fn list_subs(&self) -> Vec<u16> {
 		vec![]
 	}
+	// TODO 多子表按时间共同落地
+	pub fn collect(&self, subs: Vec<(u16, Vec<(Bin, Guid)>)>, log_file: u64, cb: Callback) {
+		// 每个子表循环，写入到每个记录文件中
+		// 每子表的根块写入根日志文件
+		// 通知日志生成索引
+	}
+
 }
 // 统计
 #[derive(Clone)]
@@ -182,124 +195,7 @@ impl Statistics {
 }
 
 
-#[derive(Clone)]
-pub struct SubTab {
-	key: u16,
-	stat: Arc<Statistics>,
-	root: Arc<Mutex<RLog>>,
-	files: Arc<RwLock<FnvHashMap<u16, Record>>>,
-	map: OrdMap<Tree<Bin, (u16, u16)>>,
-}
-impl SubTab {
-	fn new(key: u16,
-	stat: Arc<Statistics>,
-	root: Arc<Mutex<RLog>>,
-	map: OrdMap<Tree<Bin, (usize, u16)>>,
-	cb: Arc<Fn(SResult<Self>)>) -> Option<SResult<Self>> {
-		None
-	}
-	pub fn read(&self, key: Bin, callback: ReadCallback) -> Option<SResult<Bin>> {
-		None
-	}
-	pub fn write(&self, key: Bin, value: Bin, guid: Guid, callback: Callback) -> SResult<()> {
-		Err("guid too old".to_string())
-	}
-
-}
 //====================================
-// 根日志
-struct RLog {
-	name: String,
-	modify: u32,
-	file: SResult<AsyncFile>,
 
-}
-impl RLog {
-	pub fn new(name: String, modify: u32) -> Self {
-		RLog {
-			name: name,
-			modify: modify,
-			file: Err("".to_string()),
-		}
-	}
-	pub fn write(&self, sub_tab: u16, value: Bin, guid: Guid, callback: Callback) -> SResult<()> {
-		Err("guid too old".to_string())
-	}
-
-}
-
-/*
- * 记录文件
- */
-struct Record {
-	file: SResult<AsyncFile>,
-	file_size: usize,
-	emptys: Vec<u64>, //空块索引数组
-	roots: FnvHashMap<u16, Bin>, // Pos为键， 值为根块
-	buffer: FnvHashMap<u16, (Bin, u64)>, // Pos为键， 值为值块及超时时间
-	waits: FnvHashMap<usize, Vec<Box<Fn(SResult<AsyncFile>)>>>, // 单个块上的读等待队列
-}
-
-/*
- * 记录文件内的根块，默认4K
- */
-struct RBlock {
-	pos: u16,
-	data: Bin,
-}
-/*
- * 记录文件内的值块，默认4K
- */
-struct VBlock {
-	pos: u16,
-	data: Bin,
-}
 
 //================================ 内部静态方法
-// 加载空的根日志文件
-fn load_empty<P: AsRef<Path> + Send + 'static>(file: P, tab: Tab, cb: Arc<Fn(SResult<Tab>)>) {
-	AsyncFile::open(file, AsynFileOptions::ReadWrite(8), Box::new(move |f: IoResult<AsyncFile>| match f {
-		Ok(afile) => {
-			{
-				let mut root = tab.root.lock().unwrap();
-				root.file = Ok(afile);
-			}
-			cb(Ok(tab))
-		},
-		Err(s) => cb(Err(s.to_string()))
-	}));
-
-}
-
-// 顺序加载根日志文件
-fn load_root<P: AsRef<Path> + Send + 'static>(mut vec: Vec<(u32, P)>, file: P, tab: Tab, cb: Arc<Fn(SResult<Tab>)>) {
-	match vec.pop() {
-		Some((m, path)) => {
-			AsyncFile::open(path, AsynFileOptions::ReadAppend(8), Box::new(move |f: IoResult<AsyncFile>| match f {
-				Ok(afile) =>{
-					let len = afile.get_size();
-					afile.read(0, len as usize, Box::new(move |f: AsyncFile, r: IoResult<Vec<u8>>| match r {
-						Ok(vec_u8) => {
-							let b = {
-								let mut root = tab.root.lock().unwrap();
-								//read_root(vec_u8),
-								root.file = Ok(f);
-								root.modify = m;
-								true
-							};
-							if b {
-								load_root(vec, file, tab, cb);
-							}else{
-								cb(Ok(tab))
-							}
-						},
-						Err(s) => cb(Err(s.to_string()))
-					}));
-				},
-				Err(s) => cb(Err(s.to_string()))
-			}));
-		},
-		_ => load_empty(file, tab, cb),
-	}
-
-}

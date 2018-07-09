@@ -27,4 +27,8 @@ extern crate pi_db;
 
 
 pub mod log;
+pub mod kg_log;
+pub mod kg_record;
+pub mod kg_root;
+pub mod kg_subtab;
 pub mod kg;
