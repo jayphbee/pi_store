@@ -1,18 +1,7 @@
 /**
  * 以日志存储为基础，KG索引存储。K要求定长, G为Guid，也是值的指针，可以到日志存储中查找value。
- * KG, 可以用二级的 cow BTree 存储。
- * 	1、采用外部文件分裂，文件名就是1234，不超过65535，这样单个索引文件的大小在几兆，可以存放十万级的KG。要求每个索引文件管理的键范围不重叠。
- * 	2、在单个文件内部用2级结构，一个根节点{Count(4Byte), [{Key, 叶节点的位置Pos(2B)}...]}，几百个叶节点[{Key, Guid}...]。采用COW，每次修改都重新用一个新的根节点。由于块定长（4,8,16,32,64k），而且2级结构，可以不需要空块记录。内存中采用位索引方式记录。
- * 	3、用一个根日志文件不断追加写，可以记录所有索引文件的根块位置。按2字节作为基础单元，FEFE作为结尾符。
- * 	4、用日志整理作为写BTree的驱动，批量处理，写一次根文件。因为不同子表有自己独立缓存，如果掉电，需要从日志中恢复是那个子表缓存的，所以每条kv会在日志记录中记录子表(2字节)
- * 	5、支持2pc事务。
- * 	6、内存中的索引文件也是用的cow的sbtree。如果当前索引文件不够，需要分裂。分裂时，sbtree 也全局保证COW特性！
- * 	7、支持用指定的key创建新的子表，内存中会克隆sbtree，根文件中追加{长度(2字节), 子表(4字节), [所有索引文件名的根块位置(2字节)...]}。
- * 	8、怎么在运行中安全的收缩？需要考虑
+ * 	用日志整理作为写索引的驱动，批量处理，会所有的涉及到的子表更新子节点，并删除相关的等待表，写一次根文件。因为不同子表有自己独立缓存，如果掉电，需要从日志中恢复是那个子表缓存的，所以每条kv会在日志记录中记录子表(4字节)
  * 
- * 根日志文件的格式为： [块数组长度(2字节，实际为块数组长度+1), {子表key(4字节), [{文件ID(2字节), 根块位置(2字节)},...]=块数组, }, ...]
- * 如果块数组长度为0，表示子表被删除
- * 如果块数组长度为FFFF，表示初始化成功，根日志文件必须包含一个块数组长度为FFFF的数据。
  */
 
 
@@ -42,16 +31,38 @@ use pi_base::file::{AsyncFile, AsynFileOptions};
 
 use log::{Bin, Log, SResult, LogResult, Callback, ReadCallback, Config as LogCfg};
 use kg_log::KGLog;
-use kg_record::{Record, RecordMap};
+use kg_record::{Record};
 use kg_root::RootLog;
-use kg_subtab::{SubTab, SubTabList};
+use kg_subtab::{SubTab, SubTabMap};
+
+pub type ReadGuidCallback = Arc<Fn(SResult<Guid>)>;
 
 // data的目录名
 pub const KV_DATA: &str = ".data";
-// kv索引的目录名
-pub const KV_INDEX: &str = ".index";
-// kv索引的根文件名
-pub const KV_ROOT: &str = "root";
+// kv索引的子节点文件名
+pub const KV_NODE: &str = "node";
+// kv索引的叶节点文件名
+pub const KV_LEAF: &str = "leaf";
+// kv索引的根日志文件名
+pub const KV_RLOG: &str = "rlog";
+
+// 共享的节点位置，如果节点无人引用，则写入到空块索引数组中
+#[derive(Clone)]
+pub struct BinPos(Arc<RwLock<Vec<u64>>>, Bin, u32);
+
+impl BinPos {
+	pub fn new(empty: Arc<RwLock<Vec<u64>>>, bin: Bin, pos: u32) -> Self {
+		BinPos(empty, bin, pos)
+	}
+}
+impl Drop for BinPos {
+	fn drop(&mut self) {
+		if Arc::strong_count(&self.1) == 1 {
+			println!("Dropping!");
+			// TODO 将空的位置写入到空块索引数组中
+		}
+	}
+}
 
 /*
  * kv表
@@ -63,8 +74,8 @@ pub struct Tab {
 	pub log_cfg: LogCfg,
 	pub stat: Statistics,
 	pub root: Arc<Mutex<RootLog>>,
-	pub subs: SubTabList,
-	pub records: RecordMap,
+	pub subs: SubTabMap,
+	pub record: Arc<RwLock<Record>>,
 	pub kg_log: KGLog,
 }
 
@@ -82,7 +93,7 @@ impl Tab {
 		}else if !data_dir.is_dir() {
 			return Some(Err("invalid kg data dir".to_string()))
 		}
-		let index_dir = path.join(KV_INDEX);
+		let index_dir = path.join(KV_NODE);
 		let idir = Atom::from(index_dir.to_str().unwrap());
 		if !index_dir.exists() {
 			DirBuilder::new().recursive(true).create(index_dir).unwrap();
@@ -99,7 +110,7 @@ impl Tab {
 					match name.rfind('.') {
 						Some(dot) => {
 							let (name_str, modify_str) = name.split_at(dot);
-							if name_str != KV_ROOT {
+							if name_str != KV_RLOG {
 								continue;
 							}
 							match u32::from_str_radix(modify_str, 16) {
@@ -120,7 +131,7 @@ impl Tab {
 			}
 		}
 		roots.as_mut_slice().sort();
-		let file = path.join(KV_ROOT);
+		let file = path.join(KV_RLOG);
 		// let tab = Tab{
 		// 	dir: dir.clone(),
 		// 	cfg: cfg,
@@ -151,7 +162,7 @@ impl Tab {
 	}
 	// TODO 多子表按时间共同落地
 	pub fn collect(&self, subs: Vec<(u16, Vec<(Bin, Guid)>)>, log_file: u64, cb: Callback) {
-		// 每个子表循环，写入到每个记录文件中
+		// 每个子表循环，写入到记录文件中
 		// 每子表的根块写入根日志文件
 		// 通知日志生成索引
 	}

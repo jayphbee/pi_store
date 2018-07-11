@@ -8,10 +8,10 @@
  * 
  * 日志需要建立索引。先修改头部的索引位置。然后创建索引。 // 一般总是用Guid来查询，所以不太需要有GuidBloom过滤器。
  * 为了自己管理缓冲，使用O_DIRECT 直接读写文件。元数据保留块索引数组。有块缓存，缓存单个的数据块。根据内存需要可单独加载和释放。缓存数据块时，可以按4k左右的大小建立简单索引。
- * 读写模式下： Ver(2字节), 配置(2字节), 整理时间-秒-总为0(4字节), 索引位置-总为0(4字节), 块索引数组长度-总为0(2字节), [{块长-块结束时写入(3字节), [{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(2字节，可选，整理时删除)}...], }...]=数据块数组(块与块可能会出现Guid交叠)
- * 只读模式下： Ver(2字节), 配置-描述是否有子表编号(2字节), 整理时间-秒(4字节), 索引位置(4字节), 块索引数组长度(2字节), [块长(3字节), {[{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(4字节，可选，整理时删除)}...], }...]=数据块数组, 0xFFFFFF(3字节表示为索引), [{MinGuidTime(8字节), MaxGuidTime(8字节), Pos(4字节), Count(4字节)}...]=块索引数组
+ * 读写模式下： Ver(2字节), 配置(2字节), 整理时间-秒-总为0(4字节), 索引位置-总为0(4字节), 块索引数组长度-总为0(2字节), [{块长-块结束时写入(3字节), CRC32-块结束时写入(4字节), [{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(2字节，可选，整理时删除)}...], }...]=数据块数组(块与块可能会出现Guid交叠)
+ * 只读模式下： Ver(2字节), 配置-描述是否有子表编号(2字节), 整理时间-秒(4字节), 索引位置(4字节), 块索引数组长度(2字节), [块长(3字节), CRC32(4字节), {[{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(4字节，可选，整理时删除)}...], }...]=数据块数组, 0xFFFFFF(3字节表示为索引), CRC32(4字节), [{MinGuidTime(8字节), MaxGuidTime(8字节), Pos(4字节), Count(4字节)}...]=块索引数组
  *
- * 管理器用sbtree记录每个文件名对应的元信息(时间和修改次数)
+ * 管理器用sbtree记录每个文件名对应的元信息(时间和修改次数) 
  * 
  * 使用direct IO和pread来提升性能
  * 
@@ -167,6 +167,7 @@ impl Log {
 	pub fn stat(&self) -> &Statistics {
 		&self.stat
 	}
+	// 读取指定Guid对应的数据
 	pub fn read(&self, guid: Guid, callback: ReadCallback) -> Option<SResult<Bin>> {
 		let time = guid.time();
 		let r = {
@@ -183,6 +184,7 @@ impl Log {
 		};
 		None
 	}
+	// 写入指定Guid对应的数据
 	pub fn write(&self, guid: Guid, data: Bin, st_key: u32, callback: Callback) -> SResult<()> {
 		Err("guid too old".to_string())
 	}
@@ -564,7 +566,7 @@ fn load_whead(file: AsyncFile, i: usize, time: u64, cfg: Config, cb: WriteLoader
 						Err(s) => cb(Err(s.to_string()))
 					}))
 			}else {
-				load_windex(f, i, time, cfg, Writer::new(reader), size, HEAD_SIZE, read_bsize(data, HEAD_SIZE - BLOCK_LEN), cb)
+				load_windex(f, i, time, cfg, Writer::new(reader), size, HEAD_SIZE, read_3byte(data, HEAD_SIZE - BLOCK_LEN), cb)
 			}
 		},
 		Err(s) => cb(Err(s.to_string()))
@@ -598,7 +600,7 @@ fn load_windex(file: AsyncFile, i: usize, time: u64, cfg: Config, mut writer: Wr
 }
 // 加载日志的索引，返回下一个日志块的长度
 fn read_index(vec_u8: Vec<u8>, reader: &mut Reader, cfg: &Config, pos: usize, len: usize) -> usize {
-	let next_len = read_bsize(&vec_u8[..], len);
+	let next_len = read_3byte(&vec_u8[..], len);
 	let (b, info) = LogBlock::new(vec_u8, len, cfg, reader.config);
 	reader.index.push(info);
 	reader.buffer.insert(pos, (b, cfg.cache_timeout as u64 + now_millis()));
@@ -641,7 +643,7 @@ fn read_log(data: &[u8], pos: usize, st_size: usize) -> (usize, u64) {
 	(pos + 16 + r.head() + bon_len + st_size, time)
 }
 // 读取3字节的块长度
-fn read_bsize(data: &[u8], pos: usize) -> usize {
+pub fn read_3byte(data: &[u8], pos: usize) -> usize {
 	((data.get_lu16(pos) as usize) << 8) + data.get_u8(pos + 2) as usize
 }
 // 读取索引

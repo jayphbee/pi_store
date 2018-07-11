@@ -27,10 +27,11 @@ use log::{Bin, Config, Log, SResult, Callback, ReadCallback};
 #[derive(Clone)]
 pub struct KGLog {
 	log: Log,
-	key_fn: Arc<Fn(Bin) -> Bin>,
-	read_fn: Arc<Fn(Vec<Bin>) -> Vec<Guid>>,
+	key_fn: Arc<Fn(Bin) -> Bin>, // TODO 改成静态函数
+	read_fn: Arc<Fn(Vec<Bin>) -> Vec<Guid>>, // TODO 改成静态函数
 }
 impl KGLog {
+	// 用Log日志配置创建KVlog日志
 	pub fn new(dir: Atom, cfg: Config, cb: Arc<Fn(SResult<Self>)>) -> Option<SResult<Self>> {
 		// match Log::new(dir, cfg, cb) {
 		// 	Some(r) => Some(r),
@@ -38,12 +39,15 @@ impl KGLog {
 		// }
 		None
 	}
+	// 获取内部的Log日志
 	pub fn log(&self) -> &Log {
 		&self.log
 	}
+	// 读取指定Guid对应的数据
 	pub fn read(&self, guid: Guid, cb: ReadCallback) -> Option<SResult<Bin>> {
 		self.log.read(guid, cb)
 	}
+	// 写入指定Guid对应的数据
 	pub fn write(&self, guid: Guid, data: Bin, st_key: u32, cb: Callback) -> SResult<()> {
 		self.log.write(guid, data, st_key, cb)
 	}
@@ -51,9 +55,9 @@ impl KGLog {
 	pub fn list_writes(&self) -> Vec<u64> {
 		self.log.list_writes()
 	}
-	// 列出所有可以读写的日志文件内的(guid: Guid, key: Bin, st_key: u16)
-	pub fn list_writes_datas(&self) -> Vec<(u64, Vec<(Guid, Bin, u16)>)> {
-		vec![]
+	// 列出所有可以读写的日志文件内的(guid: Guid, key: Bin, st_key: u32)
+	pub fn list_writes_datas(&self) -> Vec<(u64, Vec<(Guid, Bin, u32)>)> {
+		vec![] // TODO
 	}
 	// 整理指定的可读写的日志文件，为其建立索引并以只读方式打开
 	pub fn collect(&self, file: u64, cb: Callback) -> SResult<()> {
