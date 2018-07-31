@@ -24,6 +24,7 @@ extern crate lazy_static;
 extern crate pi_lib;
 extern crate pi_base;
 extern crate pi_db;
+extern crate pi_vm;
 
 
 pub mod log;
@@ -32,3 +33,4 @@ pub mod kg_record;
 pub mod kg_root;
 pub mod kg_subtab;
 pub mod kg;
+pub mod db;

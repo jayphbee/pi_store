@@ -1,69 +1,61 @@
 extern crate pi_store;
 extern crate pi_lib;
 extern crate pi_db;
-extern crate pi_vm;
+extern crate pi_base;
 
-use pi_store::db::{SysDb, FDBTab, FDB, STORE_TASK_POOL};
-use pi_lib::bon::{BonBuffer, Encode, Decode};
+use pi_store::db::{DB, STORE_TASK_POOL};
 use pi_lib::atom::Atom;
 use std::sync::Arc;
-use pi_db::db::{UsizeResult, Cursor, DBResult, TabKV, TxCallback, TxIterCallback, TxQueryCallback, TxState, MetaTxn, Tab, TabTxn, TabBuilder};
+use pi_db::db::{DBResult, TabKV, TxCallback, TxQueryCallback, TxState, MetaTxn, Tab, TabTxn, Bin, SResult};
 use pi_db::mgr::Mgr;
 use std::collections::HashMap;
 use pi_lib::sinfo::StructInfo;
 use pi_lib::guid::{Guid, GuidGen};
 use std::thread;
 use std::time::Duration;
-use pi_vm::worker_pool::WorkerPool;
+use pi_base::worker_pool::WorkerPool;
 
-#[derive(Debug)]
-struct Player{
-	name: String,
-	id: u32,
+#[cfg(test)]
+fn create_tabkv(ware: Atom,tab: Atom,key: Bin,index: usize,value: Option<Bin>,) -> TabKV{
+    TabKV{ware, tab, key, index, value}
 }
 
-impl Encode for Player{
-	fn encode(&self, bb: &mut BonBuffer){
-		self.name.encode(bb);
-		self.id.encode(bb);
-	}
-}
-
-impl Decode for Player{
-	fn decode(bb: &mut BonBuffer) -> Self{
-		Player{
-			name: String::decode(bb),
-			id: u32::decode(bb),
-		}
-	}
-}
 
 #[test]
 fn test_file_db_mgr(){
+    let ware_name = Atom::from("file_test_mgr");
+    let tab_name = Atom::from("player");
     let mut worker_pool = Box::new(WorkerPool::new(10, 1024 * 1024, 10000));
     worker_pool.run(STORE_TASK_POOL.clone());
 	let mgr = Mgr::new(GuidGen::new(1,1));
-	mgr.register_builder(&Atom::from("file"), Arc::new(SysDb::new(&Atom::from("file"))));
-	let mgr = Arc::new(mgr);
+    let db = DB::new(ware_name.clone()).expect("create db fail, name is: file");
+    mgr.register(ware_name.clone(), Arc::new(db));
+
+
+    let key1 = Arc::new(Vec::from(String::from("key1").as_bytes()));
+    let value1 = Arc::new(Vec::from(String::from("value1").as_bytes()));
+    let key2 = Arc::new(Vec::from(String::from("key2").as_bytes()));
+    let value2 = Arc::new(Vec::from(String::from("value2").as_bytes()));
+    let key3 = Arc::new(Vec::from(String::from("key3").as_bytes()));
+    let value3 = Arc::new(Vec::from(String::from("value3").as_bytes()));
+
+    let item1 = create_tabkv(ware_name.clone(), tab_name.clone(), key1.clone(), 0, Some(value1.clone()));
+    let item2 = create_tabkv(ware_name.clone(), tab_name.clone(), key2.clone(), 0, Some(value2.clone()));
+    let item3 = create_tabkv(ware_name.clone(), tab_name.clone(), key3.clone(), 0, Some(value3.clone()));
+
+    let sinfo = Arc::new(StructInfo::new(tab_name.clone(), 8888));
 
     //  插入元信息
-	let tr = mgr.transaction(true, 1000);
+	let tr = mgr.transaction(true);
 	let tr1 = tr.clone();
-	let mut sinfo = StructInfo::new(Atom::from("Player"), 555555555555);
-	let mut m = HashMap::new();
-	m.insert(Atom::from("class"), Atom::from("file"));
-	sinfo.notes = Some(m);
-	let alter_back = Arc::new(move|r: DBResult<usize>|{
-        match r {
-            Ok(_) => (),
-            Err(v) => {println!("alter_fail:{}", v);},
-        };
 
-        let prepare_back = Arc::new(|r|{
-            match r {
-                Ok(_) => (),
-                Err(v) => {println!("preparer_alter_fail:{}", v);},
-            };
+	let alter_back = Arc::new(move|r: SResult<()>|{
+        assert!(r.is_ok());
+        // println!("alter_success");
+
+        let prepare_back = Arc::new(|r: SResult<()>|{
+            assert!(r.is_ok());
+            //println!("alter_prepare_success");
         });
         let r = tr1.prepare(prepare_back.clone());
         if r.is_some(){
@@ -71,18 +63,17 @@ fn test_file_db_mgr(){
         }
         thread::sleep(Duration::from_millis(300));
 
-        let commit_back = Arc::new(|r|{
-            match r {
-                Ok(_) => (),
-                Err(v) => {println!("commit_alter_fail:{}", v);},
-            };
+        let commit_back = Arc::new(|r: SResult<()>|{
+            assert!(r.is_ok());
+            //println!("alter_commit_success");
         });
         let r = tr1.commit(commit_back.clone());
         if r.is_some(){
             commit_back(r.unwrap());
         }
     });
-	let r = tr.alter(&Atom::from("Player"), Some(Arc::new(sinfo)), alter_back.clone());
+    //println!("alter_start");
+	let r = tr.alter(&ware_name, &tab_name, Some(sinfo), alter_back.clone());
 	if r.is_some(){
 		alter_back(r.unwrap());
 	}
@@ -90,35 +81,17 @@ fn test_file_db_mgr(){
     thread::sleep(Duration::from_millis(1000));
 
     //写数据
-    let tr = mgr.transaction(true, 1000);
+    let tr = mgr.transaction(true);
     let tr1 = tr.clone();
-    let p = Player{
-        name: String::from("chuanyan"),
-        id:5
-    };
-    let mut bonbuf = BonBuffer::new();
-    let bon = p.encode(&mut bonbuf);
-    let buf = bonbuf.unwrap();
 
-    let mut arr = Vec::new();
-    let t1 = TabKV{
-        tab: Atom::from("Player"),
-        key: vec![5u8],
-        index: 0,
-        value: Some(Arc::new(buf)),
-    };
-    arr.push(t1);
-    let write_back = Arc::new(move|r|{
-        match r {
-            Ok(_) => (),
-            Err(v) => {println!("write_fail:{}", v);},
-        };
+    let arr =  vec![item1.clone(), item2.clone(), item3.clone()];
+    let write_back = Arc::new(move|r: SResult<()>|{
+        assert!(r.is_ok());
+        //println!("write_success");
 
-        let prepare_back = Arc::new(|r|{
-            match r {
-                Ok(_) => (),
-                Err(v) => {println!("prepare_write_fail:{}", v);},
-            };
+        let prepare_back = Arc::new(|r: SResult<()>|{
+            assert!(r.is_ok());
+            //println!("write_prepare_success");
         });
         let r = tr1.prepare(prepare_back.clone());
         if r.is_some(){
@@ -126,11 +99,9 @@ fn test_file_db_mgr(){
         }
         thread::sleep(Duration::from_millis(300));
 
-        let commit_back = Arc::new(|r|{
-            match r {
-                Ok(_) => (),
-                Err(v) => {println!("commit_write_fail:{}", v);},
-            };
+        let commit_back = Arc::new(|r: SResult<()>|{
+            assert!(r.is_ok());
+            //println!("write_commit_success");
         });
         let r = tr1.commit(commit_back.clone());
         if r.is_some(){
@@ -144,39 +115,25 @@ fn test_file_db_mgr(){
 
     thread::sleep(Duration::from_millis(1500));
 
-    let tr = mgr.transaction(false, 1000);
+    let tr = mgr.transaction(false);
     let tr1 = tr.clone();
-    let mut arr = Vec::new();
-    let t1 = TabKV{
-        tab: Atom::from("Player"),
-        key: vec![5u8],
-        index: 0,
-        value: None,
-    };
-    arr.push(t1);
-    let read_back = Arc::new(move|r: DBResult<Vec<TabKV>>|{
-        match r {
-            Ok(mut v) => {
-                for elem in v.iter_mut(){
-                    match elem.value {
-                        Some(ref mut v) => {
-                            let mut buf = BonBuffer::with_bytes(Arc::make_mut(v).clone(), None, None);
-                            let p = Player::decode(&mut buf);
-                            assert_eq!(p.name, "chuanyan");
-                            assert_eq!(p.id, 5);
-                        },
-                        None => (),
-                    }
-                }
-            },
-            Err(v) => println!("read_fail:{}", v),
+    let arr =  vec![item1.clone(), item2.clone(), item2.clone()];
+    let read_back = Arc::new(move|r: SResult<Vec<TabKV>>|{
+        assert!(r.is_ok());
+        //println!("read_success");
+        let r = r.expect("");
+        for elem in r.iter(){
+            match elem.value {
+                Some(ref v) => {
+                    //println!("read---------------{}", String::from_utf8_lossy(v.as_slice()));
+                },
+                None => (),
+            }
         }
 
-        let prepare_back = Arc::new(|r|{
-            match r {
-                Ok(_) => (),
-                Err(v) => {println!("prepare_read_fail:{}", v);},
-            };
+        let prepare_back = Arc::new(|r: SResult<()>|{
+            assert!(r.is_ok());
+            //println!("read_prepare_success");
         });
         let r = tr1.prepare(prepare_back.clone());
         if r.is_some(){
@@ -184,17 +141,14 @@ fn test_file_db_mgr(){
         }
         thread::sleep(Duration::from_millis(300));
 
-        let commit_back = Arc::new(|r|{
-            match r {
-                Ok(_) => (),
-                Err(v) => {println!("commit_read_fail:{}", v);},
-            };
+        let commit_back = Arc::new(|r: SResult<()>|{
+            assert!(r.is_ok());
+            //println!("read_commit_success");
         });
         let r = tr1.commit(commit_back.clone());
         if r.is_some(){
             commit_back(r.unwrap());
         }
-        //println!("succsess:{}", arr.len());
     });
 
     let r = tr.query(arr, Some(100), true, read_back.clone());
@@ -202,5 +156,5 @@ fn test_file_db_mgr(){
         read_back(r.unwrap());
     }
 
-    thread::sleep(Duration::from_millis(1000));
+    thread::sleep(Duration::from_millis(3000));
 }
