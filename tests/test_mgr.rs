@@ -3,17 +3,17 @@ extern crate pi_lib;
 extern crate pi_db;
 extern crate pi_base;
 
-use pi_store::db::{DB, STORE_TASK_POOL};
+use pi_store::db::{DB};
 use pi_lib::atom::Atom;
 use std::sync::Arc;
-use pi_db::db::{DBResult, TabKV, TxCallback, TxQueryCallback, TxState, MetaTxn, Tab, TabTxn, Bin, SResult};
+use pi_db::db::{TabKV, Bin, SResult};
 use pi_db::mgr::Mgr;
-use std::collections::HashMap;
 use pi_lib::sinfo::StructInfo;
-use pi_lib::guid::{Guid, GuidGen};
+use pi_lib::guid::{ GuidGen};
 use std::thread;
 use std::time::Duration;
 use pi_base::worker_pool::WorkerPool;
+use pi_base::pi_base_impl::STORE_TASK_POOL;
 
 #[cfg(test)]
 fn create_tabkv(ware: Atom,tab: Atom,key: Bin,index: usize,value: Option<Bin>,) -> TabKV{
@@ -25,7 +25,7 @@ fn create_tabkv(ware: Atom,tab: Atom,key: Bin,index: usize,value: Option<Bin>,) 
 fn test_file_db_mgr(){
     let ware_name = Atom::from("file_test_mgr");
     let tab_name = Atom::from("player");
-    let mut worker_pool = Box::new(WorkerPool::new(10, 1024 * 1024, 10000));
+    let worker_pool = Box::new(WorkerPool::new(10, 1024 * 1024, 10000));
     worker_pool.run(STORE_TASK_POOL.clone());
 	let mgr = Mgr::new(GuidGen::new(1,1));
     let db = DB::new(ware_name.clone()).expect("create db fail, name is: file");
@@ -121,15 +121,15 @@ fn test_file_db_mgr(){
     let read_back = Arc::new(move|r: SResult<Vec<TabKV>>|{
         assert!(r.is_ok());
         //println!("read_success");
-        let r = r.expect("");
-        for elem in r.iter(){
-            match elem.value {
-                Some(ref v) => {
-                    //println!("read---------------{}", String::from_utf8_lossy(v.as_slice()));
-                },
-                None => (),
-            }
-        }
+        // let r = r.expect("");
+        // for elem in r.iter(){
+        //     match elem.value {
+        //         Some(ref v) => {
+        //             println!("read---------------{}", String::from_utf8_lossy(v.as_slice()));
+        //         },
+        //         None => (),
+        //     }
+        // }
 
         let prepare_back = Arc::new(|r: SResult<()>|{
             assert!(r.is_ok());
