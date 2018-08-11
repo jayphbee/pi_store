@@ -18,7 +18,7 @@ extern crate crc;
 extern crate core;
 extern crate fnv;
 extern crate bytes;
-// extern crate rocksdb;
+extern crate rocksdb;
 
 #[macro_use]
 extern crate lazy_static;
