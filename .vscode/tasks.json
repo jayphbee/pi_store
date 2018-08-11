@@ -1,22 +1,31 @@
 {
-	// See https://go.microsoft.com/fwlink/?LinkId=733558
-	// for the documentation about the tasks.json format
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"type": "shell",
-			"label": "cargo build",
-			"command": "cargo",
-			"args": [
-				"build"
-			],
-			"problemMatcher": [
-				"$rustc"
-			],
-			"group": {
-				"kind": "build",
-				"isDefault": true
-			}
-		}
-	]
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build pi_store debug",
+            "type": "shell",
+            "command": "cargo build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "build pi_store release",
+            "type": "shell",
+            "command": "cargo build --release",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "test pi_store",
+            "type": "shell",
+            "command": "cargo test -- --nocapture --color always",
+            "problemMatcher": []
+        }
+    ]
 }
