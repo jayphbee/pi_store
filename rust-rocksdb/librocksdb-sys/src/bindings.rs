@@ -17,7 +17,7 @@ pub const WINT_MAX: libc::c_uint = 65535;
 pub type va_list = __builtin_va_list;
 pub type __gnuc_va_list = __builtin_va_list;
 pub type wchar_t = libc::c_ushort;
-#[link(name="librocksdb")]
+#[link(name="rocksdb")]
 extern "C" {
     pub fn __va_start(arg1: *mut va_list, ...);
 }
