@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, Condvar, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::string::String;
 use std::vec::Vec;
 use std::usize;
@@ -9,7 +9,7 @@ use std::boxed::FnBox;
 use std::rc::Rc;
 
 use fnv::FnvHashMap;
-use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator, DB as RockDB};
+use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator};
 
 use pi_lib::sinfo::{StructInfo};
 use pi_lib::atom::{Atom};
@@ -17,7 +17,7 @@ use pi_lib::guid::{Guid};
 use pi_lib::time::now_nanos;
 use pi_lib::bon::{ReadBuffer, WriteBuffer, Encode, Decode};
 use pi_base::task::TaskType;
-use pi_base::task_pool::TaskPool;
+use pi_base::pi_base_impl::STORE_TASK_POOL;
 use pi_db::db::{Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog};
 use pi_db::tabs::{TabLog, Tabs};
 
@@ -41,10 +41,6 @@ const SINFO: &str = "_$sinfo";
 */
 lazy_static! {
 	pub static ref DB_ASYNC_FILE_INFO: Atom = Atom::from("DB asyn file");
-}
-
-lazy_static! {
-	pub static ref STORE_TASK_POOL: Arc<(Mutex<TaskPool>, Condvar)> = Arc::new((Mutex::new(TaskPool::new(10)), Condvar::new()));
 }
 
 //对应接口的Tab 创建事务
@@ -383,18 +379,18 @@ impl DB {
 	pub fn new(name: Atom) -> Result<Self, String>{
         let root = String::from(ROOT) + "/" + name.as_str() + "/"; //根路径 + 库名
         let sinfo_path = root.clone() + SINFO;
-        println!("55555555555555555555555555555555555555555555555555");
         let mut opts = Options::default();
         opts.create_if_missing(true);
-        let db = TXN_DB::open(&opts, &TransactionDBOptions::default(), &sinfo_path).expect("open db fail:");//打开元信息表可能出现异常
+        let db = match TXN_DB::open(&opts, &TransactionDBOptions::default(), &sinfo_path){
+            Ok(v) => v,
+            Err(e) => return Err(e.to_string() + ",open db fail")
+        };
         let rocksdb_txn = TXN::begin(&db, &WriteOptions::default(), &TransactionOptions::default()).unwrap();
-        println!("666666666666666666666666666666666666666666666");
         let mut it = rocksdb_txn.iter(&ReadOptions::default());
         it.seek_to_first();
         let mut tabs: Tabs<FileTab> = Tabs::new();
         while it.valid() {
             let v = it.value().unwrap();
-            println!("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk{:?}", &v);
             tabs.set_tab_meta(Atom::decode(&mut ReadBuffer::new(&it.key().unwrap(), 0)), Arc::new(StructInfo::decode(&mut ReadBuffer::new(&v, 0))));
             it.next();
         }
@@ -486,7 +482,7 @@ impl WareSnapshot for DBSnapshot {
 }
 
 pub struct FDBIterator{
-    it: DBRawIterator,
+    it: Arc<RefCell<DBRawIterator>>,
     descending: bool,
     _filter: Filter,
 }
@@ -494,7 +490,7 @@ pub struct FDBIterator{
 impl FDBIterator{
     pub fn new(it: DBRawIterator, descending: bool, filter: Filter) -> Self{
         FDBIterator{
-            it: it,
+            it: Arc::new(RefCell::new(it)),
             descending:descending,
             _filter: filter
         }
@@ -504,9 +500,10 @@ impl FDBIterator{
 impl Iter for FDBIterator{
     type Item = (Bin, Bin);
 	fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>>{
-        let mut it = self.it.clone();
+        let it = self.it.clone();
         let descending = self.descending;
         let func = move || {
+            let mut it = it.borrow_mut();
             match it.valid(){
                 true => {
                     cb(Ok(Some((Arc::new(it.key().unwrap()), Arc::new(it.value().unwrap())))));
@@ -577,21 +574,15 @@ use std::thread;
 use std::time::Duration;
 #[cfg(test)]
 use pi_base::worker_pool::WorkerPool;
-#[cfg(test)]
-use pi_vm::adapter::load_lib_backtrace;
-
 
 #[test]
 fn test(){
-    load_lib_backtrace();
     let worker_pool0 = Box::new(WorkerPool::new(3, 1024 * 1024, 1000));
     worker_pool0.run(STORE_TASK_POOL.clone());
 
     let tab_name = Atom::from("player");
     let ware_name = Atom::from("file_test");
-    println!("000000000000000000000000000000000000000000000");
     let db = DB::new(ware_name.clone()).expect("new db fail");
-    println!("1111111111111111111111111111111111111111111111111");
     let snapshot = db.snapshot();
     let guid = Guid(0);
     
@@ -600,8 +591,6 @@ fn test(){
 
     let sinfo = Arc::new(StructInfo::new(tab_name.clone(), 8888));
     snapshot.alter(&tab_name, Some(sinfo.clone()));
-
-    let meta_txn_clone = meta_txn.clone();
 
     let tab_txn1 = snapshot.tab_txn(&Atom::from(SINFO), &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
     let key1 = Arc::new(Vec::from(String::from("key1").as_bytes()));
@@ -627,108 +616,108 @@ fn test(){
         //println!("assert is success");
     }));
 
-    // thread::sleep(Duration::from_millis(1000));
-    // let key1 = Arc::new(Vec::from(String::from("key1").as_bytes()));
-    // let value1 = Arc::new(Vec::from(String::from("value1").as_bytes()));
-    // let key2 = Arc::new(Vec::from(String::from("key2").as_bytes()));
-    // let value2 = Arc::new(Vec::from(String::from("value2").as_bytes()));
-    // let key3 = Arc::new(Vec::from(String::from("key3").as_bytes()));
-    // let value3 = Arc::new(Vec::from(String::from("value3").as_bytes()));
+    thread::sleep(Duration::from_millis(1000));
+    let key1 = Arc::new(Vec::from(String::from("key1").as_bytes()));
+    let value1 = Arc::new(Vec::from(String::from("value1").as_bytes()));
+    let key2 = Arc::new(Vec::from(String::from("key2").as_bytes()));
+    let value2 = Arc::new(Vec::from(String::from("value2").as_bytes()));
+    let key3 = Arc::new(Vec::from(String::from("key3").as_bytes()));
+    let value3 = Arc::new(Vec::from(String::from("value3").as_bytes()));
 
-    // let item1 = create_tabkv(ware_name.clone(), tab_name.clone(), key1.clone(), 0, Some(value1.clone()));
-    // let item2 = create_tabkv(ware_name.clone(), tab_name.clone(), key2.clone(), 0, Some(value2.clone()));
-    // let item3 = create_tabkv(ware_name.clone(), tab_name.clone(), key3.clone(), 0, Some(value3.clone()));
-    // let arr3 =  Arc::new(vec![item1.clone(), item2.clone(), item2.clone()]);
+    let item1 = create_tabkv(ware_name.clone(), tab_name.clone(), key1.clone(), 0, Some(value1.clone()));
+    let item2 = create_tabkv(ware_name.clone(), tab_name.clone(), key2.clone(), 0, Some(value2.clone()));
+    let item3 = create_tabkv(ware_name.clone(), tab_name.clone(), key3.clone(), 0, Some(value3.clone()));
+    let arr3 =  Arc::new(vec![item1.clone(), item2.clone(), item2.clone()]);
 
     
-    // let tab_txn1 = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
-    // let tab_txn2 = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
-    // let tab_txn = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
+    let tab_txn1 = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
+    let tab_txn2 = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
+    let tab_txn = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
 
-    // //事务1插入key1, key2
-    // let arr = Arc::new(vec![item1.clone(), item2.clone()]);
-    // let tab_txn1_clone = tab_txn1.clone();
-    // tab_txn1_clone.modify(arr.clone(), None, false, Arc::new(move |modify|{
-    //     match modify {
-    //         Ok(_) => (),//插入数据成功
-    //         Err(e) => panic!("{:?}", e),
-    //     };
-    //     println!("tab_txn1 insert key1, key2 is success");
+    //事务1插入key1, key2
+    let arr = Arc::new(vec![item1.clone(), item2.clone()]);
+    let tab_txn1_clone = tab_txn1.clone();
+    tab_txn1_clone.modify(arr.clone(), None, false, Arc::new(move |modify|{
+        match modify {
+            Ok(_) => (),//插入数据成功
+            Err(e) => panic!("{:?}", e),
+        };
+        println!("tab_txn1 insert key1, key2 is success");
 
-    //     //事务2插入key1
-    //     let item1 = item1.clone();
-    //     let item3 = item3.clone();
-    //     let tab_txn2 = tab_txn2.clone();
-    //     let tab_txn1 = tab_txn1.clone();
-    //     let tab_txn2_clone = tab_txn2.clone();
-    //     let arr3 = arr3.clone();
-    //     let tab_txn = tab_txn.clone();
-    //     let arr = Arc::new(vec![item1.clone()]);
-    //     tab_txn2_clone.modify(arr.clone(), None, false, Arc::new(move|modify|{
-    //         assert!(modify.is_err());//插入数据不成功
-    //         //println!("tab_txn2 insert key1 is fail");
+        //事务2插入key1
+        let item1 = item1.clone();
+        let item3 = item3.clone();
+        let tab_txn2 = tab_txn2.clone();
+        let tab_txn1 = tab_txn1.clone();
+        let tab_txn2_clone = tab_txn2.clone();
+        let arr3 = arr3.clone();
+        let tab_txn = tab_txn.clone();
+        let arr = Arc::new(vec![item1.clone()]);
+        tab_txn2_clone.modify(arr.clone(), None, false, Arc::new(move|modify|{
+            assert!(modify.is_err());//插入数据不成功
+            //println!("tab_txn2 insert key1 is fail");
 
-    //         //事务2插入key3
-    //         let tab_txn2_clone = tab_txn2.clone();
-    //         let tab_txn2 = tab_txn2.clone();
-    //         let tab_txn1 = tab_txn1.clone();
-    //         let arr3 = arr3.clone();
-    //         let tab_txn = tab_txn.clone();
-    //         let arr = Arc::new(vec![item3.clone()]);
-    //         tab_txn2_clone.modify(arr.clone(), None, false, Arc::new(move |modify|{
-    //             match modify {
-    //                 Ok(_) => (),//插入数据成功
-    //                 Err(e) => panic!("{:?}", e),
-    //             };
-    //             //println!("tab_txn2 insert key3 is success");
+            //事务2插入key3
+            let tab_txn2_clone = tab_txn2.clone();
+            let tab_txn2 = tab_txn2.clone();
+            let tab_txn1 = tab_txn1.clone();
+            let arr3 = arr3.clone();
+            let tab_txn = tab_txn.clone();
+            let arr = Arc::new(vec![item3.clone()]);
+            tab_txn2_clone.modify(arr.clone(), None, false, Arc::new(move |modify|{
+                match modify {
+                    Ok(_) => (),//插入数据成功
+                    Err(e) => panic!("{:?}", e),
+                };
+                //println!("tab_txn2 insert key3 is success");
 
-    //             let tab_txn1_clone = tab_txn1.clone();
-    //             let tab_txn1 = tab_txn1.clone();
-    //             let tab_txn2 = tab_txn2.clone();
-    //             let arr3 = arr3.clone();
-    //             let tab_txn = tab_txn.clone();
-    //             tab_txn1_clone.prepare(1000, Arc::new(move |prepare|{
-    //                 assert!(prepare.is_ok());  //事务1预提交成功
-    //                 //println!("tab_txn1 prepare is success");
+                let tab_txn1_clone = tab_txn1.clone();
+                let tab_txn1 = tab_txn1.clone();
+                let tab_txn2 = tab_txn2.clone();
+                let arr3 = arr3.clone();
+                let tab_txn = tab_txn.clone();
+                tab_txn1_clone.prepare(1000, Arc::new(move |prepare|{
+                    assert!(prepare.is_ok());  //事务1预提交成功
+                    //println!("tab_txn1 prepare is success");
 
-    //                 let tab_txn1 = tab_txn1.clone();
-    //                 let tab_txn2 = tab_txn2.clone();
-    //                 let tab_txn2_clone = tab_txn2.clone();
-    //                 let arr3 = arr3.clone();
-    //                 let tab_txn = tab_txn.clone();
-    //                 tab_txn2_clone.prepare(1000, Arc::new(move |prepare|{
-    //                     assert!(prepare.is_ok());  //事务2预提交成功
-    //                     //println!("tab_txn2 prepare is success");
+                    let tab_txn1 = tab_txn1.clone();
+                    let tab_txn2 = tab_txn2.clone();
+                    let tab_txn2_clone = tab_txn2.clone();
+                    let arr3 = arr3.clone();
+                    let tab_txn = tab_txn.clone();
+                    tab_txn2_clone.prepare(1000, Arc::new(move |prepare|{
+                        assert!(prepare.is_ok());  //事务2预提交成功
+                        //println!("tab_txn2 prepare is success");
                         
-    //                     let tab_txn1 = tab_txn1.clone();
-    //                     let tab_txn2 = tab_txn2.clone();
-    //                     let arr3 = arr3.clone();
-    //                     let tab_txn = tab_txn.clone();
-    //                     tab_txn1.commit(Arc::new(move |commit|{
-    //                         assert!(commit.is_ok());  //事务1提交成功
-    //                         //println!("tab_txn1 commit is success");
+                        let tab_txn1 = tab_txn1.clone();
+                        let tab_txn2 = tab_txn2.clone();
+                        let arr3 = arr3.clone();
+                        let tab_txn = tab_txn.clone();
+                        tab_txn1.commit(Arc::new(move |commit|{
+                            assert!(commit.is_ok());  //事务1提交成功
+                            //println!("tab_txn1 commit is success");
                             
-    //                         let tab_txn2 = tab_txn2.clone();
-    //                         let arr3 = arr3.clone();
-    //                         let tab_txn = tab_txn.clone();
-    //                         tab_txn2.commit(Arc::new(move |commit|{
-    //                             assert!(commit.is_ok());  //事务2提交成功
-    //                             //println!("tab_txn2 commit is success");
+                            let tab_txn2 = tab_txn2.clone();
+                            let arr3 = arr3.clone();
+                            let tab_txn = tab_txn.clone();
+                            tab_txn2.commit(Arc::new(move |commit|{
+                                assert!(commit.is_ok());  //事务2提交成功
+                                //println!("tab_txn2 commit is success");
 
-    //                             tab_txn.query(arr3.clone(), None, false, Arc::new(move |query|{
-    //                                 assert!(query.is_ok());  //查询数据成功
-    //                                 // let r = query.expect("");
-    //                                 // for v in r.iter(){
-    //                                 //     println!("-----------------------{}", String::from_utf8_lossy(v.value.as_ref().unwrap().as_slice()));
-    //                                 // }
-    //                             }));
-    //                         }));
-    //                     }));
-    //                 }));
-    //             }));
-    //         }));
-    //     }));
-    // }));
+                                tab_txn.query(arr3.clone(), None, false, Arc::new(move |query|{
+                                    assert!(query.is_ok());  //查询数据成功
+                                    // let r = query.expect("");
+                                    // for v in r.iter(){
+                                    //     println!("-----------------------{}", String::from_utf8_lossy(v.value.as_ref().unwrap().as_slice()));
+                                    // }
+                                }));
+                            }));
+                        }));
+                    }));
+                }));
+            }));
+        }));
+    }));
 
     thread::sleep(Duration::from_millis(3000));
 }
