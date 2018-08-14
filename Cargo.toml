@@ -6,6 +6,7 @@ authors = ["zmythleo <zmythleo@gmail.com>"]
 [lib]
 
 [dependencies]
+crc = "*"
 bytes = "*"
 lazy_static = "*"
 fnv = "1.0.3"

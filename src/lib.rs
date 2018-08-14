@@ -2,6 +2,7 @@
 #![feature(fnbox)]
 #![feature(integer_atomics)]
 #![feature(duration_extras)]
+#![feature(int_to_from_bytes)]
 #![feature(custom_derive,asm,box_syntax,box_patterns)]
 #![feature(pointer_methods)]
 #![feature(core_intrinsics)]
@@ -13,6 +14,7 @@
 
 #[allow(dead_code,unused_variables,non_snake_case,unused_parens,unused_assignments,unused_unsafe,unused_imports)]
 
+extern crate crc;
 extern crate core;
 extern crate fnv;
 extern crate bytes;
