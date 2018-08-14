@@ -11,14 +11,14 @@ use std::rc::Rc;
 use fnv::FnvHashMap;
 use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator};
 
-use pi_lib::sinfo::{StructInfo};
+use pi_lib::sinfo::{EnumType};
 use pi_lib::atom::{Atom};
 use pi_lib::guid::{Guid};
 use pi_lib::time::now_nanos;
 use pi_lib::bon::{ReadBuffer, WriteBuffer, Encode, Decode};
 use pi_base::task::TaskType;
 use pi_base::pi_base_impl::STORE_TASK_POOL;
-use pi_db::db::{Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog};
+use pi_db::db::{Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog, TabMeta};
 use pi_db::tabs::{TabLog, Tabs};
 
 /*
@@ -316,7 +316,7 @@ impl FileMetaTxn{
 
 impl MetaTxn for FileMetaTxn {
 	// 创建表、修改指定表的元数据
-	fn alter(&self, tab: &Atom, meta: Option<Arc<StructInfo>>, cb: TxCallback) -> DBResult{
+	fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult{
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -391,11 +391,11 @@ impl DB {
         let mut tabs: Tabs<FileTab> = Tabs::new();
         while it.valid() {
             let v = it.value().unwrap();
-            tabs.set_tab_meta(Atom::decode(&mut ReadBuffer::new(&it.key().unwrap(), 0)), Arc::new(StructInfo::decode(&mut ReadBuffer::new(&v, 0))));
+            tabs.set_tab_meta(Atom::decode(&mut ReadBuffer::new(&it.key().unwrap(), 0)), Arc::new(TabMeta::decode(&mut ReadBuffer::new(&v, 0))));
             it.next();
         }
 
-        tabs.set_tab_meta(Atom::from(SINFO), Arc::new(StructInfo::new(Atom::from(SINFO), 0))); //添加元信息表的元信息
+        tabs.set_tab_meta(Atom::from(SINFO), Arc::new(TabMeta::new(EnumType::Str, EnumType::Bool))); //添加元信息表的元信息
         let a = Arc::new(RwLock::new(tabs));
 		Ok(DB{
             name: name,
@@ -429,7 +429,7 @@ impl Ware for DB {
 		TIMEOUT
 	}
 	// 表的元信息
-	fn tab_info(&self, tab_name: &Atom) -> Option<Arc<StructInfo>> {
+	fn tab_info(&self, tab_name: &Atom) -> Option<Arc<TabMeta>> {
 		self.tabs.read().unwrap().get(tab_name)
 	}
 	// 获取当前表结构快照
@@ -447,15 +447,15 @@ impl WareSnapshot for DBSnapshot {
 		Box::new(self.1.borrow().list())
 	}
 	// 表的元信息
-	fn tab_info(&self, tab_name: &Atom) -> Option<Arc<StructInfo>> {
+	fn tab_info(&self, tab_name: &Atom) -> Option<Arc<TabMeta>> {
 		self.1.borrow().get(tab_name)
 	}
 	// 检查该表是否可以创建
-	fn check(&self, _tab: &Atom, _meta: &Option<Arc<StructInfo>>) -> SResult<()> {
+	fn check(&self, _tab: &Atom, _meta: &Option<Arc<TabMeta>>) -> SResult<()> {
 		Ok(())
 	}
 	// 新增 修改 删除 表
-	fn alter(&self, tab_name: &Atom, meta: Option<Arc<StructInfo>>) {
+	fn alter(&self, tab_name: &Atom, meta: Option<Arc<TabMeta>>) {
 		self.1.borrow_mut().alter(tab_name, meta)
 	}
 	// 创建指定表的表事务
@@ -574,6 +574,8 @@ use std::thread;
 use std::time::Duration;
 #[cfg(test)]
 use pi_base::worker_pool::WorkerPool;
+#[cfg(test)]
+use pi_lib::sinfo::StructInfo;
 
 #[test]
 fn test(){
@@ -589,7 +591,7 @@ fn test(){
 
     let meta_txn = snapshot.meta_txn(&guid);
 
-    let sinfo = Arc::new(StructInfo::new(tab_name.clone(), 8888));
+    let sinfo = Arc::new(TabMeta::new(EnumType::Str, EnumType::Struct(Arc::new(StructInfo::new(tab_name.clone(), 8888)))));
     snapshot.alter(&tab_name, Some(sinfo.clone()));
 
     let tab_txn1 = snapshot.tab_txn(&Atom::from(SINFO), &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
