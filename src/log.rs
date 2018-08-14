@@ -309,13 +309,13 @@ struct LogRW(Vec<FileInfo<AReader>>, Vec<FileInfo<AWriter>>);
 impl LogRW {
 	fn new(reader: &OrdMap<Tree<u64, (u32, AReader)>>, mut writer: Vec<FileInfo<AWriter>>) -> Self {
 		let mut vec = Vec::with_capacity(reader.size());
-		let mut f = |e: &Entry<u64, (u32, AReader)>| {
-			vec.push(FileInfo(e.0, (e.1).0, (e.1).1.clone()));
-		};
-		reader.select(None, false, &mut f);
-		// 对reader和writer按时间排序
-		vec.as_mut_slice().sort();
-		writer.as_mut_slice().sort();
+		// let mut f = |e: &Entry<u64, (u32, AReader)>| {
+		// 	vec.push(FileInfo(e.0, (e.1).0, (e.1).1.clone()));
+		// };
+		// reader.select(None, false, &mut f);
+		// // 对reader和writer按时间排序
+		// vec.as_mut_slice().sort();
+		// writer.as_mut_slice().sort();
 		LogRW(vec, writer)
 	}
 }

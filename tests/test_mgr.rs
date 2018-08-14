@@ -6,9 +6,9 @@ extern crate pi_base;
 use pi_store::db::{DB};
 use pi_lib::atom::Atom;
 use std::sync::Arc;
-use pi_db::db::{TabKV, Bin, SResult};
+use pi_db::db::{TabKV, Bin, SResult, TabMeta};
 use pi_db::mgr::Mgr;
-use pi_lib::sinfo::StructInfo;
+use pi_lib::sinfo::{StructInfo, EnumType};
 use pi_lib::guid::{ GuidGen};
 use std::thread;
 use std::time::Duration;
@@ -43,7 +43,7 @@ fn test_file_db_mgr(){
     let item2 = create_tabkv(ware_name.clone(), tab_name.clone(), key2.clone(), 0, Some(value2.clone()));
     let item3 = create_tabkv(ware_name.clone(), tab_name.clone(), key3.clone(), 0, Some(value3.clone()));
 
-    let sinfo = Arc::new(StructInfo::new(tab_name.clone(), 8888));
+    let sinfo = Arc::new(TabMeta::new(EnumType::Str, EnumType::Struct(Arc::new(StructInfo::new(tab_name.clone(), 8888)))));
 
     //  插入元信息
 	let tr = mgr.transaction(true);
