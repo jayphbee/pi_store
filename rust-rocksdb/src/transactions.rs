@@ -257,3 +257,11 @@ impl Drop for TXN_DB {
         }
     }
 }
+
+impl Drop for TXN {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_transaction_destroy(self.inner);
+        }
+    }
+}
