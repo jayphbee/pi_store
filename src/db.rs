@@ -391,7 +391,7 @@ impl DB {
         block.set_block_size(8000);
         block.set_lru_cache(0);
         block.set_bloom_filter(10, true);
-        block.set_cache_index_and_filter_blocks(true));
+        block.set_cache_index_and_filter_blocks(true)); 
         opts.set_block_based_table_factory(&block);
         opts.set_write_buffer_size(10*1024*1024);
         opts.create_if_missing(true);
