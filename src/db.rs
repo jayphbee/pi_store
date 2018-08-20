@@ -387,7 +387,7 @@ impl DB {
         let sinfo_path = root.clone() + SINFO;
         let mut opts = Options::default();
         let mut block = BlockBasedOptions::default();
-        block.set_block_size(8000);
+        block.set_block_size(128 * 1024);
         block.set_lru_cache(0);
         block.set_bloom_filter(10, true);
         block.set_cache_index_and_filter_blocks(true);
