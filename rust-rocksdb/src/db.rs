@@ -1203,11 +1203,11 @@ impl fmt::Debug for DB {
     }
 }
 
-impl Drop for ReadOptions {
-    fn drop(&mut self) {
-        unsafe { ffi::rocksdb_readoptions_destroy(self.inner) }
-    }
-}
+// impl Drop for ReadOptions {
+//     fn drop(&mut self) {
+//         unsafe { ffi::rocksdb_readoptions_destroy(self.inner) }
+//     }
+// }
 
 impl ReadOptions {
     // TODO add snapshot setting here
