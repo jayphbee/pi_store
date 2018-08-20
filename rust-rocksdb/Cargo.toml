@@ -10,3 +10,4 @@ homepage = "https://github.com/spacejam/rust-rocksdb"
 [dependencies]
 libc = "0.2"
 librocksdb-sys = { path = "librocksdb-sys" }
+lazy_static = "*"

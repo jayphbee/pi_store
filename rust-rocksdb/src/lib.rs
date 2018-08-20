@@ -52,6 +52,9 @@ extern crate librocksdb_sys as ffi;
 #[macro_use]
 mod ffi_util;
 
+#[macro_use]
+extern crate lazy_static;
+
 pub mod backup;
 mod comparator;
 pub mod merge_operator;

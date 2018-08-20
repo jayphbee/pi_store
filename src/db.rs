@@ -9,7 +9,7 @@ use std::boxed::FnBox;
 use std::rc::Rc;
 
 use fnv::FnvHashMap;
-use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator};
+use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator, BlockBasedOptions};
 
 use pi_lib::sinfo::{EnumType};
 use pi_lib::atom::{Atom};
@@ -55,6 +55,12 @@ pub struct FileTab(Arc<Mutex<FTab>>);
 impl Tab for FileTab {
     fn new(path: &Atom) -> Self {
 		let mut opts = Options::default();
+        let mut block = BlockBasedOptions::default();
+        block.set_block_size(8000);
+        block.set_lru_cache(0);
+        block.set_bloom_filter(10, true);
+        block.set_cache_index_and_filter_blocks(false);
+        opts.set_block_based_table_factory(&block);
         opts.create_if_missing(true);
 		FileTab(Arc::new(Mutex::new(
             FTab{
@@ -380,6 +386,12 @@ impl DB {
         let root = String::from(ROOT) + "/" + name.as_str() + "/"; //根路径 + 库名
         let sinfo_path = root.clone() + SINFO;
         let mut opts = Options::default();
+        let mut block = BlockBasedOptions::default();
+        block.set_block_size(8000);
+        block.set_lru_cache(0);
+        block.set_bloom_filter(10, true);
+        block.set_cache_index_and_filter_blocks(false);
+        opts.set_block_based_table_factory(&block);
         opts.create_if_missing(true);
         let db = match TXN_DB::open(&opts, &TransactionDBOptions::default(), &sinfo_path){
             Ok(v) => v,
