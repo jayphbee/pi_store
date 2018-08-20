@@ -56,21 +56,21 @@ impl Drop for WriteOptions {
     }
 }
 
-// impl Drop for TransactionDBOptions {
-//     fn drop(&mut self) {
-//         unsafe {
-//             ffi::rocksdb_transactiondb_options_destroy(self.inner);
-//         }
-//     }
-// }
+impl Drop for TransactionDBOptions {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_transactiondb_options_destroy(self.inner);
+        }
+    }
+}
 
-// impl Drop for TransactionOptions {
-//     fn drop(&mut self) {
-//         unsafe {
-//             ffi::rocksdb_transaction_options_destroy(self.inner);
-//         }
-//     }
-// }
+impl Drop for TransactionOptions {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_transaction_options_destroy(self.inner);
+        }
+    }
+}
 
 impl BlockBasedOptions {
     pub fn set_block_size(&mut self, size: usize) {
