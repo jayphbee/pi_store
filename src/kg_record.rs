@@ -8,6 +8,7 @@ use std::boxed::FnBox;
 use std::sync::{Arc, Weak, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::result::Result;
+use std::collections::hash_map::Entry;
 use std::cmp::{Ord, PartialOrd, Ordering as Order};
 use std::vec::Vec;
 use std::fs::{File, DirBuilder, rename, remove_file};
@@ -18,7 +19,7 @@ use std::mem;
 use fnv::FnvHashMap;
 use fnv::FnvHashSet;
 
-use pi_lib::ordmap::{OrdMap, ActionResult, Entry};
+use pi_lib::ordmap::{OrdMap, ActionResult};
 use pi_lib::asbtree::{Tree, new};
 use pi_lib::time::now_millis;
 use pi_lib::atom::Atom;
@@ -27,7 +28,7 @@ use pi_lib::data_view::{GetView, SetView};
 use pi_lib::bon::{ReadBuffer, WriteBuffer};
 use pi_lib::base58::{ToBase58, FromBase58};
 
-use pi_base::file::{AsyncFile, AsynFileOptions};
+use pi_base::file::{Shared, SharedFile, AsyncFile, AsynFileOptions};
 
 use log::{Bin, Log, SResult, LogResult, Callback, ReadCallback, Config as LogCfg};
 use kg_log::KGLog;
@@ -47,18 +48,44 @@ pub struct Record {
 }
 impl Record {
 	// 初始化记录文件，根据加载起来
-	pub fn new(node_file: AsyncFile, leaf_file: AsyncFile) -> Self {
-		Record {
-			node: NodeFile::new(node_file),
-			roots: FnvHashMap::with_capacity_and_hasher(0, Default::default()),
-			leaf: NodeFile::new(leaf_file),
-			cache: FnvHashMap::with_capacity_and_hasher(0, Default::default()),
-			waits: FnvHashMap::with_capacity_and_hasher(0, Default::default()),
-		}
+	pub fn new(node_file: PathBuf, leaf_file: PathBuf, cb: Box<FnBox(SResult<Self>)>) {
+		AsyncFile::open(node_file, AsynFileOptions::ReadAppend(8), Box::new(move |f: IoResult<AsyncFile>| match f {
+			Ok(file1) =>{
+				AsyncFile::open(leaf_file, AsynFileOptions::ReadAppend(8), Box::new(move |f: IoResult<AsyncFile>| match f {
+					Ok(file2) => cb(Ok(Record {
+						node: NodeFile::new(Arc::new(file1)),
+						roots: FnvHashMap::with_capacity_and_hasher(0, Default::default()),
+						leaf: NodeFile::new(Arc::new(file2)),
+						cache: FnvHashMap::with_capacity_and_hasher(0, Default::default()),
+						waits: FnvHashMap::with_capacity_and_hasher(0, Default::default()),
+					})),
+					Err(s) => cb(Err(s.to_string()))
+				}));
+			},
+			Err(s) => cb(Err(s.to_string()))
+		}));
 	}
 	// 初始化方法，根据所有子表的子节点集合加载子节点，返回子节点的位置表
-	pub fn init(record: Arc<RwLock<Record>>, nodes: Arc<FnvHashMap<u32, FnvHashSet<u32>>>, cb: Box<Fn(SResult<FnvHashMap<u32, Bin>>)>) {
-		
+	pub fn init(record: Arc<RwLock<Record>>, nodes: Arc<FnvHashMap<u32, FnvHashSet<u32>>>, cb: Box<FnBox(SResult<FnvHashMap<u32, Bin>>)>) {
+		let rfile = &record.write().unwrap().node;
+		let len = rfile.file_size as usize;
+		rfile.file.clone().pread(0, len, Box::new(move |f: SharedFile, r: IoResult<Vec<u8>>| match r {
+			Ok(vec_u8) => {
+				let mut map = FnvHashMap::with_capacity_and_hasher(0, Default::default());
+				for set in nodes.values() {
+					for pos in set.iter() {
+						match map.entry(*pos) {
+							Entry::Occupied(_) => continue,
+							er => {
+								er.or_insert(Arc::new(Vec::new()));
+							}
+						}
+					}
+				}
+				cb(Ok(map))
+			},
+			Err(s) => cb(Err(s.to_string()))
+		}));
 	}
 	// 获取子节点的空块索引数组
 	pub fn node_empty(&self) -> Arc<RwLock<Vec<u64>>>{
@@ -96,12 +123,12 @@ impl Record {
  * 子节点文件
  */
 struct NodeFile {
-	file: AsyncFile,
+	file: SharedFile,
 	file_size: u64,
 	emptys: Arc<RwLock<Vec<u64>>>, //空块索引数组
 }
 impl NodeFile {
-	fn new(file: AsyncFile) -> Self {
+	fn new(file: SharedFile) -> Self {
 		let size = file.get_size();
 		NodeFile {
 			file: file,

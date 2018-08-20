@@ -17,6 +17,7 @@ use std::io::Result as IoResult;
 use std::mem;
 
 use fnv::FnvHashMap;
+use fnv::FnvHashSet;
 
 use pi_lib::ordmap::{OrdMap, ActionResult, Entry};
 use pi_lib::asbtree::{Tree, new};
@@ -76,29 +77,22 @@ pub struct Tab {
 	pub root: Arc<Mutex<RootLog>>,
 	pub subs: SubTabMap,
 	pub record: Arc<RwLock<Record>>,
-	pub kg_log: KGLog,
+	//pub kg_log: KGLog,
 }
 
 impl Tab {
-	pub fn new(dir: Atom, cfg: Config, log_cfg: LogCfg, cb: Arc<Fn(SResult<Self>)>) -> Option<SResult<Self>> {
+	pub fn new(dir: Atom, cfg: Config, log_cfg: LogCfg, cb: Arc<Fn(SResult<Self>)>) -> Option<String> {
 		let path = Path::new(&**dir);
 		if !path.exists() {
 			DirBuilder::new().recursive(true).create(path).unwrap();
 		}else if !path.is_dir() {
-			return Some(Err("invalid kg dir".to_string()))
+			return Some("invalid kg dir".to_string())
 		}
 		let data_dir = path.join(KV_DATA);
 		if !data_dir.exists() {
 			DirBuilder::new().recursive(true).create(data_dir).unwrap();
 		}else if !data_dir.is_dir() {
-			return Some(Err("invalid kg data dir".to_string()))
-		}
-		let index_dir = path.join(KV_NODE);
-		let idir = Atom::from(index_dir.to_str().unwrap());
-		if !index_dir.exists() {
-			DirBuilder::new().recursive(true).create(index_dir).unwrap();
-		}else if !index_dir.is_dir() {
-			return Some(Err("invalid kg index dir".to_string()))
+			return Some("invalid kg data dir".to_string())
 		}
 		let mut roots: Vec<(u32, PathBuf)> = Vec::new();
 		// 分析目录下所有的根日志文件
@@ -132,16 +126,21 @@ impl Tab {
 		}
 		roots.as_mut_slice().sort();
 		let file = path.join(KV_RLOG);
-		// let tab = Tab{
-		// 	dir: dir.clone(),
-		// 	cfg: cfg,
-		// 	log_cfg: log_cfg,
-		// 	stat: Statistics::new(),
-		// 	root: Arc::new(Mutex::new(RLog::new(file.to_string_lossy().to_string(), 0))),
-		// 	subs: SubTabMap::new(),
-		// 	records: RecordMap::new(idir),
-		// };
-		// load_root(roots, file, tab, cb);
+		Record::new(path.join(KV_NODE), path.join(KV_LEAF), Box::new(move |r:SResult<Record>| match r {
+			Ok(rr) => {
+				let tab = Tab{
+					dir: dir.clone(),
+					cfg: cfg,
+					log_cfg: log_cfg,
+					stat: Statistics::new(),
+					root: Arc::new(Mutex::new(RootLog::new(file.to_string_lossy().to_string(), 0))),
+					subs: SubTabMap::new(),
+					record: Arc::new(RwLock::new(rr)),
+				};
+				init(roots, file, tab, cb);
+			},
+			Err(s) => cb(Err(s))
+		}));
 		None
 	}
 	pub fn dir(&self) -> &Atom {
@@ -157,12 +156,12 @@ impl Tab {
 		&self.stat
 	}
 	// 列出所有的子表编号
-	pub fn list_subs(&self) -> Vec<u16> {
+	pub fn list_subs(&self) -> Vec<u32> {
 		vec![]
 	}
 	// TODO 多子表按时间共同落地
-	pub fn collect(&self, subs: Vec<(u16, Vec<(Bin, Guid)>)>, log_file: u64, cb: Callback) {
-		// 每个子表循环，写入到记录文件中
+	pub fn collect(&self, log_file: u64, cb: Callback) {
+		// 每个子表循环，写入到记录文件中, subs: Vec<(u32, Vec<(Bin, Guid)>)>
 		// 每子表的根块写入根日志文件
 		// 通知日志生成索引
 	}
@@ -210,3 +209,45 @@ impl Statistics {
 
 
 //================================ 内部静态方法
+pub fn init<P: AsRef<Path> + Send + 'static>(vec: Vec<(u32, P)>, file: P, tab: Tab, cb: Arc<Fn(SResult<Tab>)>) {
+	RootLog::init(vec, file, tab.clone(), Box::new(move |r: SResult<(FnvHashMap<u32, FnvHashSet<u32>>, u32)>| match r {
+		Ok(rr) => next_init(tab, rr, cb),
+		Err(s) => cb(Err(s))
+	}));
+
+}
+
+
+// 加载全部的子节点，然后初始化子表
+fn next_init(tab:Tab, subtabs: (FnvHashMap<u32, FnvHashSet<u32>>, u32), cb: Arc<Fn(SResult<Tab>)>){
+	let tabs = Arc::new(subtabs.0);
+	let last = subtabs.1;
+	Record::init(tab.record.clone(), tabs.clone(), Box::new(move |r:SResult<FnvHashMap<u32, Bin>>| {
+		match r {
+			Ok(rr) => {
+				init_subtabs(&tab, &tabs, last, rr);
+				// TODO 从log中读取还未索引的Key Guid
+				cb(Ok(tab))
+			},
+			Err(s) => cb(Err(s.to_string()))
+		}
+	}))
+}
+
+// 初始化全部的子表
+fn init_subtabs(tab:&Tab, subtabs: &FnvHashMap<u32, FnvHashSet<u32>>, last: u32, nodes: FnvHashMap<u32, Bin>){
+	let mut sub_map = tab.subs.0.write().unwrap();
+	sub_map.1 = last;
+	let empty = tab.record.read().unwrap().node_empty();
+	for (id, pos_set) in subtabs.iter() {
+		let mut map = OrdMap::new(new());
+		for pos in pos_set.iter() {
+			// 获取子节点
+			let bin = nodes.get(pos).unwrap();
+			// 获取子节点的第一个键
+			let key = Arc::new(bin.get(..(tab.cfg.key_size as usize)).unwrap().to_vec());
+			map.insert(key, BinPos::new(empty.clone(), bin.clone(), *pos));
+		}
+		sub_map.0.insert(*id, SubTab::new(tab.clone(), *id, map));
+	}
+}

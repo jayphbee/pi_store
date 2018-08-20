@@ -77,11 +77,11 @@ impl SubTab {
 
 // 为了快速的寻找和插入删除新的子表，使用OrdMap
 #[derive(Clone)]
-pub struct SubTabMap(pub Arc<RwLock<OrdMap<Tree<u32, SubTab>>>>);
+pub struct SubTabMap(pub Arc<RwLock<(OrdMap<Tree<u32, SubTab>>, u32)>>);
 
 impl SubTabMap {
-	fn new() -> Self {
-		SubTabMap(Arc::new(RwLock::new(OrdMap::new(new()))))
+	pub fn new() -> Self {
+		SubTabMap(Arc::new(RwLock::new((OrdMap::new(new()), 1))))
 	}
 	// 创建一个新的子表
 	pub fn make(&self, key: Bin, callback: ReadCallback) -> Option<SResult<Bin>> {
