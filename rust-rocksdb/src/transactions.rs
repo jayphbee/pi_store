@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use {TXN_DB, DBVector, TXN, Error, Options, TransactionDBOptions, TransactionOptions, ReadOptions, ColumnFamily, WriteOptions, DBRawIterator};
 use ffi;
 use ffi::rocksdb_transaction_t;
@@ -9,9 +11,19 @@ use std::path::Path;
 use std::ptr;
 
 
+lazy_static! {
+	pub static ref OPEN_COUNT: Arc<Mutex<(usize, usize)>> = Arc::new(Mutex::new((0, 0)));
+}
+lazy_static! {
+	pub static ref DROP_COUNT: Arc<Mutex<(usize, usize)>> = Arc::new(Mutex::new((0, 0)));
+}
+
 impl TXN_DB {
     /// Open a database with the given database options and column family names/options.
     pub fn open<P: AsRef<Path>>(opts: &Options, txn_db_options: &TransactionDBOptions, path: P) -> Result<TXN_DB, Error> {
+        let mut xx = OPEN_COUNT.lock().unwrap();
+        xx.0 += 1;
+        println!("open--------------------------------------------------{}, {:?}",  xx.0, path.as_ref());
         let path = path.as_ref();
         let cpath = match CString::new(path.to_string_lossy().as_bytes()) {
             Ok(c) => c,
@@ -252,6 +264,9 @@ impl TXN {
 
 impl Drop for TXN_DB {
     fn drop(&mut self) {
+        let mut xx = DROP_COUNT.lock().unwrap();
+        xx.0 += 1;
+        println!("drop--------------------------------------------------{}, {:?}",  xx.0, self.path);
         unsafe {
             ffi::rocksdb_transactiondb_close(self.inner);
         }
