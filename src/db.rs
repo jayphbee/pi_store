@@ -390,7 +390,7 @@ impl DB {
         block.set_block_size(8000);
         block.set_lru_cache(0);
         block.set_bloom_filter(10, true);
-        block.set_cache_index_and_filter_blocks(false);
+        block.set_cache_index_and_filter_blocks(true));
         opts.set_block_based_table_factory(&block);
         opts.create_if_missing(true);
         let db = match TXN_DB::open(&opts, &TransactionDBOptions::default(), &sinfo_path){
