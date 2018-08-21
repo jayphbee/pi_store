@@ -89,13 +89,13 @@ pub struct DB {
 #[derive(Clone)]
 pub struct TXN_DB {
     inner: *mut ffi::rocksdb_transactiondb_t,
-    path: PathBuf
+    path: PathBuf,
 }
 
 #[derive(Clone)]
 pub struct TXN {
     inner: *mut ffi::rocksdb_transaction_t,
-    pub path: PathBuf
+    pub path: PathBuf,
 }
 
 /// A descriptor for a RocksDB column family.

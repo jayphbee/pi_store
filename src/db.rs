@@ -47,6 +47,11 @@ lazy_static! {
 pub struct FTab{
     pub tab: TXN_DB,//rocksdb中的TXN_DB，对应表
 	pub name: Atom,
+    pub opts: Options,
+    pub txn_db_opts: TransactionDBOptions,
+    pub write_opts: Arc<WriteOptions>,
+    pub read_opts: Arc<ReadOptions>,
+    pub txn_opts: Arc<TransactionOptions>,
 }
 
 #[derive(Clone)]
@@ -54,6 +59,7 @@ pub struct FileTab(Arc<Mutex<FTab>>);
 
 impl Tab for FileTab {
     fn new(path: &Atom) -> Self {
+        let txn_db_opts = TransactionDBOptions::default();
 		let mut opts = Options::default();
         let mut block = BlockBasedOptions::default();
         block.set_block_size(8000);
@@ -63,17 +69,28 @@ impl Tab for FileTab {
         opts.set_block_based_table_factory(&block);
         opts.set_write_buffer_size(10*1024*1024); //设置缓存大小为10M
         opts.create_if_missing(true);
+
+
+        let write_opts = WriteOptions::default();
+        let read_opts = ReadOptions::default();
+        let txn_opts = TransactionOptions::default();
+
 		FileTab(Arc::new(Mutex::new(
             FTab{
-                tab: TXN_DB::open(&opts, &TransactionDBOptions::default(), path.deref()).unwrap(),
+                tab: TXN_DB::open(&opts, &txn_db_opts, path.deref()).unwrap(),
                 name: path.clone(),
+                opts: opts,
+                txn_db_opts: txn_db_opts,
+                write_opts: Arc::new(write_opts),
+                read_opts: Arc::new(read_opts),
+                txn_opts: Arc::new(txn_opts),
             }
         )))
 	}
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
 		let tab = self.0.lock().unwrap();
-        let rocksdb_txn = TXN::begin(&tab.tab, &WriteOptions::default(), &TransactionOptions::default()).unwrap();
+        let rocksdb_txn = TXN::begin(&tab.tab, &tab.write_opts, &tab.txn_opts).unwrap();
         let mut txn_name = String::from("rocksdb_");
         txn_name.push_str(now_nanos().to_string().as_str());
         match rocksdb_txn.set_name(&txn_name){
@@ -88,6 +105,9 @@ impl Tab for FileTab {
             _writable: writable,
             rwlog: FnvHashMap::default(),
             state: TxState::Ok,
+            write_opts: tab.write_opts.clone(),
+            read_opts: tab.read_opts.clone(),
+            txn_opts: tab.txn_opts.clone(),
         }))
     }
 }
@@ -99,6 +119,9 @@ pub struct FTabTxn{
 	pub _writable: bool,
 	pub rwlog: FnvHashMap<Bin, RwLog>,
 	pub state: TxState,
+    pub write_opts: Arc<WriteOptions>,
+    pub read_opts: Arc<ReadOptions>,
+    pub txn_opts: Arc<TransactionOptions>,
 }
 
 #[derive(Clone)]
@@ -117,24 +140,24 @@ impl Txn for FileTabTxn{
     }
 	// 预提交一个事务
 	fn prepare(&self, _timeout:usize, cb: TxCallback) -> DBResult{
-        let sclone = self.0.clone();
-        sclone.borrow_mut().state = TxState::Preparing;
-        send_task(Box::new(move || {
-            let mut sclone = sclone.borrow_mut();
-            match sclone.txn.prepare() {
-                Ok(()) => {
-                    sclone.state = TxState::PreparOk;
-                    free(sclone);
-                    cb(Ok(()))
-                },
-                Err(e) => {
-                    sclone.state = TxState::PreparFail;
-                    free(sclone);
-                    cb(Err(e.to_string()))
-                },
-            }
-        }));
-        None
+        // let sclone = self.0.clone();
+        // sclone.borrow_mut().state = TxState::Preparing;
+        // send_task(Box::new(move || {
+        //     let mut sclone = sclone.borrow_mut();
+        //     match sclone.txn.prepare() {
+        //         Ok(()) => {
+        //             sclone.state = TxState::PreparOk;
+        //             free(sclone);
+        //             cb(Ok(()))
+        //         },
+        //         Err(e) => {
+        //             sclone.state = TxState::PreparFail;
+        //             free(sclone);
+        //             cb(Err(e.to_string()))
+        //         },
+        //     }
+        // }));
+        Some(Ok(()))
     }
 	// 提交一个事务
 	fn commit(&self, cb: TxCallback) -> CommitResult{
@@ -190,10 +213,11 @@ impl TabTxn for FileTabTxn{
         let sclone = self.0.clone();
         let func = move || {
             let mut value_arr = Vec::new();
+            let sclone = sclone.borrow_mut();
             for tabkv in arr.iter() {
-                let read_opts = ReadOptions::default();
+                
                 let mut value = None;
-                match sclone.borrow_mut().txn.get(&read_opts, tabkv.key.as_slice()) {
+                match sclone.txn.get(&sclone.read_opts, tabkv.key.as_slice()) {
                             Ok(None) => (),
                             Ok(v) => 
                                 {
@@ -202,6 +226,7 @@ impl TabTxn for FileTabTxn{
                                 },
                             Err(e) => 
                                 {
+                                    free(sclone);
                                     cb(Err(e.to_string()));
                                     return;
                                 },
@@ -216,6 +241,7 @@ impl TabTxn for FileTabTxn{
                     }
                 )
             }
+            free(sclone);
             cb(Ok(value_arr))
             
         };
@@ -256,8 +282,8 @@ impl TabTxn for FileTabTxn{
 	fn iter(&self,key: Option<Bin>,descending: bool,filter: Filter, cb: Arc<Fn(IterResult)>,) -> Option<IterResult> {
         let sclone = self.0.clone();
         let func = move || {
-            let read_opts = ReadOptions::default();
-            let mut rocksdb_iter = sclone.borrow_mut().txn.iter(&read_opts);
+            let sclone = sclone.borrow_mut();
+            let mut rocksdb_iter = sclone.txn.iter(&sclone.read_opts);
             if key == None {
                 if descending {
                     rocksdb_iter.seek_to_last();
@@ -281,8 +307,8 @@ impl TabTxn for FileTabTxn{
 	fn key_iter(&self, key: Option<Bin>,descending: bool,filter: Filter, cb: Arc<Fn(KeyIterResult)>,) -> Option<KeyIterResult> {
 		let sclone = self.0.clone();
         let func = move || {
-            let read_opts = ReadOptions::default();
-            let mut rocksdb_iter = sclone.borrow_mut().txn.iter(&read_opts);
+            let sclone = sclone.borrow_mut();
+            let mut rocksdb_iter = sclone.txn.iter(&sclone.read_opts);
             if key == None {
                 if descending {
                     rocksdb_iter.seek_to_last();

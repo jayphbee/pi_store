@@ -270,6 +270,7 @@ impl Drop for TXN_DB {
         unsafe {
             ffi::rocksdb_transactiondb_close(self.inner);
         }
+        println!("drop--------------------------------------------------ok");
     }
 }
 

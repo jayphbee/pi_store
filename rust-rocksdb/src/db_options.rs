@@ -32,45 +32,45 @@ pub fn new_cache(capacity: size_t) -> *mut ffi::rocksdb_cache_t {
 
 unsafe impl Send for Options {}
 
-// impl Drop for Options {
-//     fn drop(&mut self) {
-//         unsafe {
-//             ffi::rocksdb_options_destroy(self.inner);
-//         }
-//     }
-// }
+impl Drop for Options {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_options_destroy(self.inner);
+        }
+    }
+}
 
-// impl Drop for BlockBasedOptions {
-//     fn drop(&mut self) {
-//         unsafe {
-//             ffi::rocksdb_block_based_options_destroy(self.inner);
-//         }
-//     }
-// }
+impl Drop for BlockBasedOptions {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_block_based_options_destroy(self.inner);
+        }
+    }
+}
 
-// impl Drop for WriteOptions {
-//     fn drop(&mut self) {
-//         unsafe {
-//             ffi::rocksdb_writeoptions_destroy(self.inner);
-//         }
-//     }
-// }
+impl Drop for WriteOptions {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_writeoptions_destroy(self.inner);
+        }
+    }
+}
 
-// impl Drop for TransactionDBOptions {
-//     fn drop(&mut self) {
-//         unsafe {
-//             ffi::rocksdb_transactiondb_options_destroy(self.inner);
-//         }
-//     }
-// }
+impl Drop for TransactionDBOptions {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_transactiondb_options_destroy(self.inner);
+        }
+    }
+}
 
-// impl Drop for TransactionOptions {
-//     fn drop(&mut self) {
-//         unsafe {
-//             ffi::rocksdb_transaction_options_destroy(self.inner);
-//         }
-//     }
-// }
+impl Drop for TransactionOptions {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_transaction_options_destroy(self.inner);
+        }
+    }
+}
 
 impl BlockBasedOptions {
     pub fn set_block_size(&mut self, size: usize) {
