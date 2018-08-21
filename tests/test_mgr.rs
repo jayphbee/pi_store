@@ -72,7 +72,7 @@ fn test_file_db_mgr(){
             commit_back(r.unwrap());
         }
     });
-    //println!("alter_start");
+    println!("alter_start");
 	let r = tr.alter(&ware_name, &tab_name, Some(sinfo), alter_back.clone());
 	if r.is_some(){
 		alter_back(r.unwrap());
@@ -87,11 +87,11 @@ fn test_file_db_mgr(){
     let arr =  vec![item1.clone(), item2.clone(), item3.clone()];
     let write_back = Arc::new(move|r: SResult<()>|{
         assert!(r.is_ok());
-        //println!("write_success");
+        println!("write_success");
 
         let prepare_back = Arc::new(|r: SResult<()>|{
             assert!(r.is_ok());
-            //println!("write_prepare_success");
+            println!("write_prepare_success");
         });
         let r = tr1.prepare(prepare_back.clone());
         if r.is_some(){
@@ -101,7 +101,7 @@ fn test_file_db_mgr(){
 
         let commit_back = Arc::new(|r: SResult<()>|{
             assert!(r.is_ok());
-            //println!("write_commit_success");
+            println!("write_commit_success");
         });
         let r = tr1.commit(commit_back.clone());
         if r.is_some(){
@@ -133,7 +133,7 @@ fn test_file_db_mgr(){
 
         let prepare_back = Arc::new(|r: SResult<()>|{
             assert!(r.is_ok());
-            //println!("read_prepare_success");
+            println!("read_prepare_success");
         });
         let r = tr1.prepare(prepare_back.clone());
         if r.is_some(){
@@ -143,7 +143,7 @@ fn test_file_db_mgr(){
 
         let commit_back = Arc::new(|r: SResult<()>|{
             assert!(r.is_ok());
-            //println!("read_commit_success");
+            println!("read_commit_success");
         });
         let r = tr1.commit(commit_back.clone());
         if r.is_some(){
