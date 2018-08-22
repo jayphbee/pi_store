@@ -7,9 +7,11 @@ use std::ops::Deref;
 use std::cell::RefCell;
 use std::boxed::FnBox;
 use std::rc::Rc;
+use std::mem::replace;
 
 use fnv::FnvHashMap;
-use rocksdb::{TXN_DB, TXN, Options, TransactionDBOptions, TransactionOptions, ReadOptions, WriteOptions, DBRawIterator, BlockBasedOptions};
+use rocksdb::*;
+use rocksdb;
 
 use pi_lib::sinfo::{EnumType};
 use pi_lib::atom::{Atom};
@@ -45,82 +47,82 @@ lazy_static! {
 
 //对应接口的Tab 创建事务
 pub struct FTab{
-    pub tab: TXN_DB,//rocksdb中的TXN_DB，对应表
+    pub tab: rocksdb::DB,
 	pub name: Atom,
-    pub opts: Options,
-    pub txn_db_opts: TransactionDBOptions,
     pub write_opts: Arc<WriteOptions>,
     pub read_opts: Arc<ReadOptions>,
-    pub txn_opts: Arc<TransactionOptions>,
 }
 
 #[derive(Clone)]
-pub struct FileTab(Arc<Mutex<FTab>>);
+pub struct FileTab(Arc<FTab>);
 
 impl Tab for FileTab {
     fn new(path: &Atom) -> Self {
-        let txn_db_opts = TransactionDBOptions::default();
-		let mut opts = Options::default();
-        let mut block = BlockBasedOptions::default();
-        block.set_block_size(8000);
-        block.set_lru_cache(0);
-        block.set_bloom_filter(10, true);
-        block.set_cache_index_and_filter_blocks(false);
-        opts.set_block_based_table_factory(&block);
-        opts.create_if_missing(true);
-
-
+        let opts = get_default_options();
         let write_opts = WriteOptions::default();
         let read_opts = ReadOptions::default();
-        let txn_opts = TransactionOptions::default();
+        let mut wopts = WriteOptions::default();
+        wopts.set_sync(false);                                                                      //无需同步
+        wopts.disable_wal(false);                                                                   //需要写前导日志
 
-		FileTab(Arc::new(Mutex::new(
+        let db = match rocksdb::DB::open(&opts, path.deref()) {
+            Err(e) => {
+                match rocksdb::DB::repair(opts, path.deref()) {
+                    Err(e) => {
+                        panic!("!!!!!!db repair failed, err: {}", e.to_string());
+                    },
+                    Ok(_) => {
+                        let opts = get_default_options();
+                        match rocksdb::DB::open(&opts, path.deref()){
+                            Err(e) => {
+                                panic!("!!!!!!db repair ok, but can not open, err: {}", e.to_string());
+                            },
+                            Ok(v) => {
+                                v
+                            },
+                        }
+                    },
+                }
+            },
+            Ok(v) => {
+                v
+            },
+        };
+
+		FileTab(Arc::new(
             FTab{
-                tab: TXN_DB::open(&opts, &txn_db_opts, path.deref()).unwrap(),
+                tab: db,
                 name: path.clone(),
-                opts: opts,
-                txn_db_opts: txn_db_opts,
                 write_opts: Arc::new(write_opts),
                 read_opts: Arc::new(read_opts),
-                txn_opts: Arc::new(txn_opts),
             }
-        )))
+        ))
 	}
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-		let tab = self.0.lock().unwrap();
-        let rocksdb_txn = TXN::begin(&tab.tab, &tab.write_opts, &tab.txn_opts).unwrap();
-        let mut txn_name = String::from("rocksdb_");
-        txn_name.push_str(now_nanos().to_string().as_str());
-        match rocksdb_txn.set_name(&txn_name){
-            Ok(_) => (),
-            Err(e) => println!("{:?}", e)
-        }
-
+		let tab = &self.0;
 		Arc::new(FileTabTxn::new(FTabTxn{
             tab: self.clone(),
-            txn: rocksdb_txn,
             id: id.clone(),
+            batch: WriteBatch::default(),
             _writable: writable,
             rwlog: FnvHashMap::default(),
             state: TxState::Ok,
             write_opts: tab.write_opts.clone(),
             read_opts: tab.read_opts.clone(),
-            txn_opts: tab.txn_opts.clone(),
         }))
     }
 }
 
 pub struct FTabTxn{
     pub tab: FileTab,
-    pub txn: TXN,
+    pub batch: WriteBatch,
     pub id: Guid,
 	pub _writable: bool,
 	pub rwlog: FnvHashMap<Bin, RwLog>,
 	pub state: TxState,
     pub write_opts: Arc<WriteOptions>,
     pub read_opts: Arc<ReadOptions>,
-    pub txn_opts: Arc<TransactionOptions>,
 }
 
 #[derive(Clone)]
@@ -139,23 +141,7 @@ impl Txn for FileTabTxn{
     }
 	// 预提交一个事务
 	fn prepare(&self, _timeout:usize, cb: TxCallback) -> DBResult{
-        // let sclone = self.0.clone();
-        // sclone.borrow_mut().state = TxState::Preparing;
-        // send_task(Box::new(move || {
-        //     let mut sclone = sclone.borrow_mut();
-        //     match sclone.txn.prepare() {
-        //         Ok(()) => {
-        //             sclone.state = TxState::PreparOk;
-        //             free(sclone);
-        //             cb(Ok(()))
-        //         },
-        //         Err(e) => {
-        //             sclone.state = TxState::PreparFail;
-        //             free(sclone);
-        //             cb(Err(e.to_string()))
-        //         },
-        //     }
-        // }));
+        self.0.borrow_mut().state = TxState::Preparing;
         Some(Ok(()))
     }
 	// 提交一个事务
@@ -163,17 +149,18 @@ impl Txn for FileTabTxn{
         let sclone = self.0.clone();
         sclone.borrow_mut().state = TxState::Committing;
         send_task(Box::new(move || {
+            let batch = replace(&mut sclone.borrow_mut().batch, WriteBatch::default());
             let mut sclone = sclone.borrow_mut();
-            match sclone.txn.commit() {
-                Ok(()) => {
-                    sclone.state = TxState::Commited;
-                    free(sclone);
-                    cb(Ok(()))
-                },
+            match sclone.tab.0.tab.write_opt(batch, &sclone.write_opts) {
                 Err(e) => {
                     sclone.state = TxState::CommitFail;
                     free(sclone);
                     cb(Err(e.to_string()))
+                },
+                Ok(_) => {
+                    sclone.state = TxState::Commited;
+                    free(sclone);
+                    cb(Ok(()))
                 },
             }
         }));
@@ -183,22 +170,7 @@ impl Txn for FileTabTxn{
 	fn rollback(&self, cb: TxCallback) -> DBResult{
         let sclone = self.0.clone();
         sclone.borrow_mut().state = TxState::Rollbacking;
-        send_task(Box::new(move || {
-            let mut sclone = sclone.borrow_mut();
-            match sclone.txn.rollback() {
-                Ok(()) => {
-                    sclone.state = TxState::Rollbacked;
-                    free(sclone);
-                    cb(Ok(()))
-                },
-                Err(e) => {
-                    sclone.state = TxState::Rollbacking;
-                    free(sclone);
-                    cb(Err(e.to_string()))
-                },
-            }
-        }));
-        None
+        Some(Ok(()))
     }
 }
 
@@ -212,24 +184,21 @@ impl TabTxn for FileTabTxn{
         let sclone = self.0.clone();
         let func = move || {
             let mut value_arr = Vec::new();
-            let sclone = sclone.borrow_mut();
+            let sclone = sclone.borrow();
             for tabkv in arr.iter() {
-                
                 let mut value = None;
-                match sclone.txn.get(&sclone.read_opts, tabkv.key.as_slice()) {
-                            Ok(None) => (),
-                            Ok(v) => 
-                                {
-                                    value = Some(Arc::new(v.unwrap().to_utf8().unwrap().as_bytes().to_vec()));
-                                    ()
-                                },
-                            Err(e) => 
-                                {
-                                    free(sclone);
-                                    cb(Err(e.to_string()));
-                                    return;
-                                },
-                        }
+                match sclone.tab.0.tab.get(tabkv.key.as_slice()) {
+                    Ok(None) => (),
+                    Ok(v) => {
+                        value = Some(Arc::new(v.unwrap().to_utf8().unwrap().as_bytes().to_vec()));
+                        ()
+                    },
+                    Err(e) => {
+                        free(sclone);
+                        cb(Err(e.to_string()));
+                        return;
+                    },
+                }
                 value_arr.push(
                     TabKV{
                         ware:tabkv.ware.clone(),
@@ -251,27 +220,29 @@ impl TabTxn for FileTabTxn{
 	fn modify(&self, arr: Arc<Vec<TabKV>>, _lock_time: Option<usize>, _readonly: bool, cb: TxCallback) -> DBResult {
 		let sclone = self.0.clone();
         let func = move || {
+            let mut sclone = sclone.borrow_mut();
             for tabkv in arr.iter() {
                 if tabkv.value == None {
-                    match sclone.borrow_mut().txn.delete(&tabkv.key.as_slice()) {
-                    Ok(_) => (),
-                    Err(e) => 
-                        {   
+                    match sclone.tab.0.tab.delete(&tabkv.key.as_slice()) {
+                        Ok(_) => (),
+                        Err(e) =>{
+                            free(sclone);
                             cb(Err(e.to_string()));
                             return;
                         },
                     };
                 } else {
-                    match sclone.borrow_mut().txn.put(&tabkv.key.as_slice(), &tabkv.value.clone().unwrap().as_slice()) {
-                    Ok(_) => (),
-                    Err(e) =>
-                        {   
+                    match sclone.batch.put(&tabkv.key.as_slice(), &tabkv.value.clone().unwrap().as_slice()) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            free(sclone);
                             cb(Err(e.to_string()));
                             return;
                         },
                     };
                 }
             }
+            free(sclone);
             cb(Ok(()))
         };
         send_task(Box::new(func));
@@ -281,8 +252,7 @@ impl TabTxn for FileTabTxn{
 	fn iter(&self,key: Option<Bin>,descending: bool,filter: Filter, cb: Arc<Fn(IterResult)>,) -> Option<IterResult> {
         let sclone = self.0.clone();
         let func = move || {
-            let sclone = sclone.borrow_mut();
-            let mut rocksdb_iter = sclone.txn.iter(&sclone.read_opts);
+            let mut rocksdb_iter = sclone.borrow().tab.0.tab.raw_iterator();
             if key == None {
                 if descending {
                     rocksdb_iter.seek_to_last();
@@ -296,7 +266,6 @@ impl TabTxn for FileTabTxn{
                     rocksdb_iter.seek(key.unwrap().as_slice());
                 }
             }
-            free(sclone);
             cb(Ok(Box::new(FDBIterator::new(rocksdb_iter, descending, filter))))
         };
         send_task(Box::new(func));
@@ -306,8 +275,7 @@ impl TabTxn for FileTabTxn{
 	fn key_iter(&self, key: Option<Bin>,descending: bool,filter: Filter, cb: Arc<Fn(KeyIterResult)>,) -> Option<KeyIterResult> {
 		let sclone = self.0.clone();
         let func = move || {
-            let sclone = sclone.borrow_mut();
-            let mut rocksdb_iter = sclone.txn.iter(&sclone.read_opts);
+            let mut rocksdb_iter = sclone.borrow().tab.0.tab.raw_iterator();
             if key == None {
                 if descending {
                     rocksdb_iter.seek_to_last();
@@ -411,20 +379,32 @@ impl DB {
 	pub fn new(name: Atom) -> Result<Self, String>{
         let root = String::from(ROOT) + "/" + name.as_str() + "/"; //根路径 + 库名
         let sinfo_path = root.clone() + SINFO;
-        let mut opts = Options::default();
-        let mut block = BlockBasedOptions::default();
-        block.set_block_size(128 * 1024);
-        block.set_lru_cache(0);
-        block.set_bloom_filter(10, true);
-        block.set_cache_index_and_filter_blocks(true);
-        opts.set_block_based_table_factory(&block);
-        opts.create_if_missing(true);
-        let db = match TXN_DB::open(&opts, &TransactionDBOptions::default(), &sinfo_path){
-            Ok(v) => v,
-            Err(e) => return Err(e.to_string() + ",open db fail")
+        let opts = get_default_options();
+        let db = match rocksdb::DB::open(&opts, &sinfo_path) {
+            Err(e) => {
+                match rocksdb::DB::repair(opts, &sinfo_path) {
+                    Err(e) => {
+                        panic!("!!!!!!db repair failed, err: {}", e.to_string());
+                    },
+                    Ok(_) => {
+                        let opts = get_default_options();
+                        match rocksdb::DB::open(&opts, &sinfo_path){
+                            Err(e) => {
+                                panic!("!!!!!!db repair ok, but can not open, err: {}", e.to_string());
+                            },
+                            Ok(v) => {
+                                v
+                            },
+                        }
+                    },
+                }
+            },
+            Ok(v) => {
+                v
+            },
         };
-        let rocksdb_txn = TXN::begin(&db, &WriteOptions::default(), &TransactionOptions::default()).unwrap();
-        let mut it = rocksdb_txn.iter(&ReadOptions::default());
+
+        let mut it = db.raw_iterator();
         it.seek_to_first();
         let mut tabs: Tabs<FileTab> = Tabs::new();
         while it.valid() {
@@ -605,6 +585,46 @@ fn send_task(func: Box<FnBox()>){
 
 fn free<T>(_:T) {}
 
+fn get_default_options () -> Options {
+    let mut opts = Options::default();
+    //基础配置
+    opts.create_if_missing(true);                                                               //库不存在，则创建
+    opts.set_max_open_files(4096);                                                              //最大可以打开文件数，-1表示无限制，注意应小于linux当前shell配置的最大可以打开文件数
+    opts.set_max_background_flushes(2);                                                         //设置后台最大刷新线程数
+    opts.enable_statistics();                                                                   //允许统计数据库信息
+    opts.set_stats_dump_period_sec(300);                                                        //每5分钟将统计信息写入日志文件
+    //压缩配置
+    // opts.set_compression_type(DBCompressionType::Snappy);                                       //使用Snappy进行压缩
+    // opts.set_compression_per_level(&[
+    //     DBCompressionType::None,
+    //     DBCompressionType::None,
+    //     DBCompressionType::Snappy,
+    //     DBCompressionType::Snappy,
+    //     DBCompressionType::Snappy
+    // ]);                                                                                         //设置每级压缩，低级不压缩，高级使用Snappy压缩
+    // opts.set_compaction_readahead_size(2 * 1024 * 1024);                                        //压缩预读大小，HDD应该不小于2MB，以保证尽量顺序访问磁盘，SSD可以为0
+    opts.set_compaction_style(DBCompactionStyle::Universal);                                    //压缩样式
+    opts.set_max_background_compactions(2);                                                     //设置后台最大压缩线程数
+    //写相关配置
+    opts.set_use_fsync(true);                                                                   //设置落地时使用fsync还是fdatasync，设置为false将会提高落地效率，但在ext3中最好设置为true，以防止丢失数据
+    opts.set_allow_concurrent_memtable_write(false);                                            //设置是否允许并发写Memtable，一般关闭，因为当前兼容性不好
+    opts.set_write_buffer_size(0x2000000);                                                      //写缓冲大小，可以提高写性能，但会降低库打开性能，可在运行时改变
+    // opts.set_bytes_per_sync(1024 * 1024);                                                       //限制同步速度，这会在后台用异步线程将内存数据同步到文件
+    //文件配置
+    opts.set_max_bytes_for_level_base(256 * 1024 * 1024);                                       //设置L1的大小
+    opts.set_max_bytes_for_level_multiplier(1.0);                                               //设置multiplier
+    //WAL配置
+    // opts.set_wal_dir("./wal");                                                                  //设置wal的路径，默认和数据库同路径
+    opts.set_wal_recovery_mode(DBRecoveryMode::AbsoluteConsistency);                            //通过wal恢复的模式
+
+    let mut bopts = BlockBasedOptions::default();
+    bopts.set_block_size(16 * 1024 * 1024);                                                     //设置块大小
+    bopts.set_lru_cache(1024 * 1024);                                                           //设置块缓存大小
+    bopts.set_bloom_filter(10, false);                                                          //使用不基于块的Bloom过滤器
+    bopts.set_cache_index_and_filter_blocks(false);                                             //不缓存索引和过滤器块
+    opts
+}
+
 
 #[cfg(test)]
 use std::thread;
@@ -694,7 +714,7 @@ fn test(){
         let tab_txn = tab_txn.clone();
         let arr = Arc::new(vec![item1.clone()]);
         tab_txn2_clone.modify(arr.clone(), None, false, Arc::new(move|modify|{
-            assert!(modify.is_err());//插入数据不成功
+            assert!(modify.is_ok());//插入数据成功
             //println!("tab_txn2 insert key1 is fail");
 
             //事务2插入key3
