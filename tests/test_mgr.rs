@@ -120,16 +120,16 @@ fn test_file_db_mgr(){
     let arr =  vec![item1.clone(), item2.clone(), item2.clone()];
     let read_back = Arc::new(move|r: SResult<Vec<TabKV>>|{
         assert!(r.is_ok());
-        //println!("read_success");
-        // let r = r.expect("");
-        // for elem in r.iter(){
-        //     match elem.value {
-        //         Some(ref v) => {
-        //             println!("read---------------{}", String::from_utf8_lossy(v.as_slice()));
-        //         },
-        //         None => (),
-        //     }
-        // }
+        println!("read_success");
+        let r = r.expect("");
+        for elem in r.iter(){
+            match elem.value {
+                Some(ref v) => {
+                    println!("read---------------{}", String::from_utf8_lossy(v.as_slice()));
+                },
+                None => (),
+            }
+        }
 
         let prepare_back = Arc::new(|r: SResult<()>|{
             assert!(r.is_ok());
