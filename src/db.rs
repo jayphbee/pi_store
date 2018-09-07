@@ -607,10 +607,10 @@ fn get_default_options () -> Options {
     //写相关配置
     opts.set_use_fsync(true);                                                                   //设置落地时使用fsync还是fdatasync，设置为false将会提高落地效率，但在ext3中最好设置为true，以防止丢失数据
     opts.set_allow_concurrent_memtable_write(false);                                            //设置是否允许并发写Memtable，一般关闭，因为当前兼容性不好
-    opts.set_write_buffer_size(0x2000000);                                                      //写缓冲大小，可以提高写性能，但会降低库打开性能，可在运行时改变
+    opts.set_write_buffer_size(0x2000000);                                                        //写缓冲大小，可以提高写性能，但会降低库打开性能，可在运行时改变
     // opts.set_bytes_per_sync(1024 * 1024);                                                       //限制同步速度，这会在后台用异步线程将内存数据同步到文件
     //文件配置
-    opts.set_max_bytes_for_level_base(256 * 1024 * 1024);                                       //设置L1的大小
+    opts.set_max_bytes_for_level_base(256 * 1024 * 1024);                                        //设置L1的大小
     opts.set_max_bytes_for_level_multiplier(1.0);                                               //设置multiplier
     //WAL配置
     // opts.set_wal_dir("./wal");                                                                  //设置wal的路径，默认和数据库同路径
