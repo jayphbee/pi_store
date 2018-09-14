@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::string::String;
 use std::vec::Vec;
 use std::usize;
@@ -16,7 +16,6 @@ use rocksdb;
 use pi_lib::sinfo::{EnumType};
 use pi_lib::atom::{Atom};
 use pi_lib::guid::{Guid};
-use pi_lib::time::now_nanos;
 use pi_lib::bon::{ReadBuffer, WriteBuffer, Encode, Decode};
 use pi_base::task::TaskType;
 use pi_base::pi_base_impl::STORE_TASK_POOL;
@@ -63,10 +62,10 @@ impl Tab for FileTab {
         let read_opts = ReadOptions::default();
         let mut wopts = WriteOptions::default();
         wopts.set_sync(false);                                                                      //无需同步
-        wopts.disable_wal(false);                                                                   //需要写前导日志
+        wopts.disable_wal(false);                                                                    //需要写前导日志
 
         let db = match rocksdb::DB::open(&opts, path.deref()) {
-            Err(e) => {
+            Err(_e) => {
                 match rocksdb::DB::repair(opts, path.deref()) {
                     Err(e) => {
                         panic!("!!!!!!db repair failed, err: {}", e.to_string());
@@ -140,7 +139,7 @@ impl Txn for FileTabTxn{
         self.0.borrow().state.clone()
     }
 	// 预提交一个事务
-	fn prepare(&self, _timeout:usize, cb: TxCallback) -> DBResult{
+	fn prepare(&self, _timeout:usize, _cb: TxCallback) -> DBResult{
         self.0.borrow_mut().state = TxState::Preparing;
         Some(Ok(()))
     }
@@ -167,7 +166,7 @@ impl Txn for FileTabTxn{
         None
     }
 	// 回滚一个事务
-	fn rollback(&self, cb: TxCallback) -> DBResult{
+	fn rollback(&self, _cb: TxCallback) -> DBResult{
         let sclone = self.0.clone();
         sclone.borrow_mut().state = TxState::Rollbacking;
         Some(Ok(()))
@@ -190,7 +189,7 @@ impl TabTxn for FileTabTxn{
                 match sclone.tab.0.tab.get(tabkv.key.as_slice()) {
                     Ok(None) => (),
                     Ok(v) => {
-                        value = Some(Arc::new(v.unwrap().to_utf8().unwrap().as_bytes().to_vec()));
+                        value = Some(Arc::new(Vec::from(v.unwrap().deref())));
                         ()
                     },
                     Err(e) => {
@@ -381,7 +380,7 @@ impl DB {
         let sinfo_path = root.clone() + SINFO;
         let opts = get_default_options();
         let db = match rocksdb::DB::open(&opts, &sinfo_path) {
-            Err(e) => {
+            Err(_e) => {
                 match rocksdb::DB::repair(opts, &sinfo_path) {
                     Err(e) => {
                         panic!("!!!!!!db repair failed, err: {}", e.to_string());
