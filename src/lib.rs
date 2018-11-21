@@ -18,7 +18,9 @@ extern crate crc;
 extern crate core;
 extern crate fnv;
 extern crate bytes;
-extern crate rocksdb;
+// extern crate rocksdb;
+extern crate lmdb;
+extern crate tempdir;
 
 #[macro_use]
 extern crate lazy_static;
@@ -36,3 +38,4 @@ pub mod kg_root;
 pub mod kg_subtab;
 pub mod kg;
 pub mod db;
+pub mod lmdb_file;

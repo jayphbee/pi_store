@@ -10,8 +10,10 @@ crc = "*"
 bytes = "*"
 lazy_static = "*"
 fnv = "1.0.3"
+tempdir = "0.3"
 pi_vm = { path = "../pi_vm" }
 rocksdb = { path = "rust-rocksdb", version = "0.10.0" }
+lmdb = { path = "../lmdb-rs" }
 pi_db = {path = "../pi_db"}
 pi_lib = { path = "../pi_lib" }
 pi_base = { path = "../pi_base" }
