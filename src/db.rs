@@ -298,7 +298,7 @@ impl TabTxn for FileTabTxn{
 		None
 	}
 	// 表的大小
-	fn tab_size(&self, _cb: TxCallback) -> DBResult {
+	fn tab_size(&self, _cb: Arc<Fn(Result<usize, String>)>) -> Option<Result<usize, String>> {
 		None
 	}
 }
@@ -408,7 +408,7 @@ impl DB {
         let mut tabs: Tabs<FileTab> = Tabs::new();
         while it.valid() {
             let v = it.value().unwrap();
-            tabs.set_tab_meta(Atom::decode(&mut ReadBuffer::new(&it.key().unwrap(), 0)), Arc::new(TabMeta::decode(&mut ReadBuffer::new(&v, 0))));
+            tabs.set_tab_meta(Atom::decode(&mut ReadBuffer::new(&it.key().unwrap(), 0)).expect(""), Arc::new(TabMeta::decode(&mut ReadBuffer::new(&v, 0)).expect("")));
             it.next();
         }
 
