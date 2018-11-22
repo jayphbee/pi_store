@@ -727,7 +727,7 @@ fn read_log(data: &[u8], pos: usize, st_size: usize) -> (usize, u64) {
 	let time = Guid(data.get_lu128(pos)).time();
 	println!("!!!!!!read_log, guid time: {}", time);
 	let mut r = ReadBuffer::new(data, pos + 16);
-	let bon_len = r.read_lengthen() as usize;
+	let bon_len = r.read_lengthen().expect("") as usize;
 	(pos + 16 + r.head() + bon_len + st_size, time)
 }
 // 读取3字节的块长度
