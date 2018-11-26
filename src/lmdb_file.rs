@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{ Arc, RwLock };
 use std::rc::Rc;
 use std::path::Path;
 use std::mem::replace;
@@ -10,8 +10,10 @@ use fnv::FnvHashMap;
 use pi_base::pi_base_impl::STORE_TASK_POOL;
 use pi_base::task::TaskType;
 
+use pi_lib::sinfo::{EnumType};
 use pi_lib::atom::Atom;
 use pi_lib::guid::Guid;
+use pi_lib::bon::{ReadBuffer, WriteBuffer, Encode, Decode};
 use pi_db::db::{
     Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult,
     NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn,
@@ -19,14 +21,23 @@ use pi_db::db::{
     RwLog, TabMeta
 };
 
+use pi_db::tabs::{TabLog, Tabs};
+
 use lmdb::{
-    Environment, Database, WriteFlags, Error, Transaction, EnvironmentFlags, 
-    DatabaseFlags, RwTransaction, RoTransaction, RoCursor, Cursor
+    Environment, Database, WriteFlags, Error, Transaction, EnvironmentFlags,
+    DatabaseFlags, RwTransaction, RoTransaction, RoCursor, Cursor, RwCursor
 };
 
 const ASYNC_DB_TYPE: TaskType = TaskType::Sync;
 
 const DB_ROOT: &str = "_$lmdb";
+const SINFO: &str = "_$sinfo";
+
+const MDB_SET: u32 = 15;
+const MDB_PREV: u32 = 12;
+const MDB_NEXT: u32 = 8;
+
+const TIMEOUT: usize = 100;
 
 lazy_static! {
 	pub static ref DB_ASYNC_FILE_INFO: Atom = Atom::from("DB asyn file");
@@ -67,9 +78,15 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        let txn_ptr = Box::into_raw(Box::new(self.0.env.begin_rw_txn().unwrap())) as usize;
+        let txn_ptr = if writable {
+            Box::into_raw(Box::new(self.0.env.begin_rw_txn().unwrap())) as usize
+        } else {
+            Box::into_raw(Box::new(self.0.env.begin_ro_txn().unwrap())) as usize
+        };
+
 		Arc::new(LmdbTableTxn(Arc::new(RefCell::new(LmdbTableTxnWrapper {
             tab: self.clone(),
+            // TODO: record all txns built from this env and free them if this env becoames invalidate
             txn_ptr: txn_ptr,
             id: id.clone(),
             _writable: writable,
@@ -107,7 +124,7 @@ impl Txn for LmdbTableTxn {
         Some(Ok(()))
     }
 
-    fn commit(&self, cb: TxCallback) -> CommitResult {       
+    fn commit(&self, cb: TxCallback) -> CommitResult {
         Arc::clone(&self.0).borrow_mut().state = TxState::Committing;
         let lmdb_table_txn = self.0.clone();
         let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
@@ -134,7 +151,7 @@ impl Txn for LmdbTableTxn {
         let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
         txn.abort();
         lmdb_table_txn.borrow_mut().state = TxState::Rollbacked;
-        
+
         Some(Ok(()))
     }
 }
@@ -206,12 +223,25 @@ impl TabTxn for LmdbTableTxn {
     fn iter(&self,key: Option<Bin>,descending: bool,filter: Filter, cb: Arc<Fn(IterResult)>,) -> Option<IterResult> {
         let lmdb_table_txn = self.0.clone();
         let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
+
         send_task(Box::new(move || {
             let lmdb_table_txn_wrapper = lmdb_table_txn.borrow_mut();
             let lmdb_table = &lmdb_table_txn_wrapper.tab;
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
-            cb(Ok(Box::new(LmdbItemsIter::new(txn_ptr, key, lmdb_table_wrapper.db, descending, filter))))
+            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
+            let mut cursor = txn.open_rw_cursor(lmdb_table_wrapper.db).unwrap();
+
+            if let Some(k) = key.clone() {
+                // get mothod has side effect to advance cursor
+                cursor.get(Some(k.as_ref()), None, MDB_SET);
+            } else {
+                cursor.iter_start();
+            }
+
+            let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
+
+            cb(Ok(Box::new(LmdbItemsIter::new(cursor_ptr, lmdb_table_wrapper.db, descending, filter))))
         }));
 
         None
@@ -226,7 +256,18 @@ impl TabTxn for LmdbTableTxn {
             let lmdb_table = &lmdb_table_txn_wrapper.tab;
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
-            cb(Ok(Box::new(LmdbKeysIter::new(txn_ptr, key, lmdb_table_wrapper.db, descending, filter))))
+            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
+            let mut cursor = txn.open_rw_cursor(lmdb_table_wrapper.db).unwrap();
+
+            if let Some(k) = key.clone() {
+                cursor.get(Some(k.as_ref()), None, MDB_SET);
+            } else {
+                cursor.iter_start();
+            }
+
+            let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
+
+            cb(Ok(Box::new(LmdbKeysIter::new(cursor_ptr, lmdb_table_wrapper.db, descending, filter))))
         }));
         None
     }
@@ -235,15 +276,14 @@ impl TabTxn for LmdbTableTxn {
         None
     }
 
-    fn tab_size(&self, cb: Arc<Fn(SResult<usize>)>) -> Option<SResult<usize>> {
+    fn tab_size(&self, cb: TxCallback) -> DBResult {
         None
     }
 }
 
 /// lmdb iterator that navigate key and value
 pub struct LmdbItemsIter {
-    it_ptr: usize,
-    key: Option<Bin>,
+    cursor_ptr: Arc<RefCell<usize>>,
     db: Database,
     descending: bool,
     _filter: Filter
@@ -252,16 +292,15 @@ pub struct LmdbItemsIter {
 impl Drop for LmdbItemsIter {
     fn drop(&mut self) {
         unsafe {
-            Box::from_raw(self.it_ptr as *mut RoTransaction);
+            Box::from_raw(*self.cursor_ptr.borrow_mut() as *mut RoTransaction);
         };
     }
 }
 
 impl LmdbItemsIter {
-    pub fn new(it_ptr: usize, key: Option<Bin>, db: Database, descending: bool, _filter: Filter) -> Self {
+    pub fn new(cursor_ptr: usize, db: Database, descending: bool, _filter: Filter) -> Self {
         LmdbItemsIter {
-            it_ptr: it_ptr,
-            key: key,
+            cursor_ptr: Arc::new(RefCell::new(cursor_ptr)),
             db: db,
             descending: descending,
             _filter: _filter
@@ -274,31 +313,26 @@ impl Iter for LmdbItemsIter {
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
         let descending = self.descending;
-        let it_ptr = self.it_ptr;
+        let cursor_ptr = self.cursor_ptr.clone();
         let db = self.db;
-        let key = self.key.clone();
 
         send_task(Box::new(move || {
-            let mut txn = unsafe { Box::from_raw(it_ptr as *mut RwTransaction) };
-            let mut cursor = txn.open_rw_cursor(db).unwrap();
-            
-            if let Some(k) = key {
-                if descending {
+            // cast cursor_ptr to RwCursor
+            let mut cursor = unsafe { Box::from_raw(*cursor_ptr.borrow_mut() as *mut RwCursor) };
 
-                } else {
-
+            if descending {
+                match cursor.get(None, None, MDB_PREV) {
+                    Ok(v) => cb(Ok(Some((Arc::new(v.0.unwrap().to_vec()), Arc::new(v.1.to_vec()))))),
+                    Err(_) => cb(Ok(None))
                 }
             } else {
-                if descending {
-
-                } else {
-                    match cursor.iter_start().next() {
-                        Some(v) => cb(Ok(Some((Arc::new(v.0.to_vec()), Arc::new(v.1.to_vec()))))),
-                        None => cb(Ok(None))
-                    }
+                match cursor.get(None, None, MDB_NEXT) {
+                    Ok(v) => cb(Ok(Some((Arc::new(v.0.unwrap().to_vec()), Arc::new(v.1.to_vec()))))),
+                    Err(_) => cb(Ok(None))
                 }
             }
-            
+            // cast back cursor to usize
+            *cursor_ptr.borrow_mut() = unsafe { Box::into_raw(Box::new(cursor)) as usize };
         }));
 
         None
@@ -307,8 +341,7 @@ impl Iter for LmdbItemsIter {
 
 /// lmdb iterator that navigate only keys
 pub struct LmdbKeysIter {
-    it_ptr: usize,
-    key: Option<Bin>,
+    cursor_ptr:  Arc<RefCell<usize>>,
     db: Database,
     descending: bool,
     _filter: Filter
@@ -317,16 +350,15 @@ pub struct LmdbKeysIter {
 impl Drop for LmdbKeysIter {
     fn drop(&mut self) {
         unsafe {
-            Box::from_raw(self.it_ptr as *mut RoTransaction);
+            Box::from_raw(*self.cursor_ptr.borrow_mut() as *mut RoTransaction);
         };
     }
 }
 
 impl LmdbKeysIter {
-    pub fn new(it_ptr: usize, key: Option<Bin>, db: Database, descending: bool, _filter: Filter) -> Self {
+    pub fn new(cursor_ptr: usize, db: Database, descending: bool, _filter: Filter) -> Self {
         LmdbKeysIter {
-            it_ptr: it_ptr,
-            key: key,
+            cursor_ptr: Arc::new(RefCell::new(cursor_ptr)),
             db: db,
             descending: descending,
             _filter: _filter
@@ -340,33 +372,208 @@ impl Iter for LmdbKeysIter {
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
         let descending = self.descending;
         let db = self.db;
-        let it_ptr = self.it_ptr;
-        let key = self.key.clone();
-        
+        let cursor_ptr = self.cursor_ptr.clone();
+
         send_task(Box::new(move || {
-            let mut txn = unsafe { Box::from_raw(it_ptr as *mut RwTransaction) };
-            let mut cursor = txn.open_rw_cursor(db).unwrap();
+            // cast cursor_ptr to RwCursor
+            let mut cursor = unsafe { Box::from_raw(*cursor_ptr.borrow_mut() as *mut RwCursor) };
 
-            if let Some(k) = key {
-                if descending {
-
-                } else {
-
+            if descending {
+                match cursor.get(None, None, MDB_PREV) {
+                    Ok(v) => cb(Ok(Some(Arc::new(v.0.unwrap().to_vec())))),
+                    Err(_) => cb(Ok(None))
                 }
-
             } else {
-                if descending {
-
-                } else {
-                    match cursor.iter_start().next() {
-                        Some(v) => cb(Ok(Some(Arc::new(v.0.to_vec())))),
-                        None => cb(Ok(None))
-                    }
+                match cursor.get(None, None, MDB_NEXT) {
+                    Ok(v) => cb(Ok(Some(Arc::new(v.0.unwrap().to_vec())))),
+                    Err(_) => cb(Ok(None))
                 }
             }
+            // cast back cursor to usize
+            *cursor_ptr.borrow_mut() = unsafe { Box::into_raw(Box::new(cursor)) as usize };
         }));
         None
     }
+}
+
+#[derive(Clone)]
+pub struct LmdbMetaTxn(Arc<TabTxn>);
+
+impl LmdbMetaTxn{
+    //tab_txn 必须是Arc<FileTabTxn>
+    fn new(tab_txn: Arc<TabTxn>) -> LmdbMetaTxn {
+        LmdbMetaTxn(tab_txn)
+    }
+}
+
+impl MetaTxn for LmdbMetaTxn {
+	// 创建表、修改指定表的元数据
+	fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
+        let mut key = WriteBuffer::new();
+        tab.encode(&mut key);
+        let key = Arc::new(key.unwrap());
+
+        let value = match meta {
+            Some(v) => {
+                let mut value = WriteBuffer::new();
+                v.encode(&mut value);
+                Some(Arc::new(value.unwrap()))
+            },
+            None => None,
+        };
+
+        let tabkv = TabKV{
+            ware: Atom::from(""),
+            tab: Atom::from(""),
+            key: key,
+            index: 0,
+            value: value,
+        };
+        self.0.modify(Arc::new(vec![tabkv]), None, false, cb)
+	}
+
+	// 快照拷贝表
+	fn snapshot(&self, _tab: &Atom, _from: &Atom, _cb: TxCallback) -> DBResult{
+		Some(Ok(()))
+	}
+	// 修改指定表的名字
+	fn rename(&self, _tab: &Atom, _new_name: &Atom, _cb: TxCallback) -> DBResult {
+		Some(Ok(()))
+	}
+}
+
+impl Txn for LmdbMetaTxn {
+	// 获得事务的状态
+	fn get_state(&self) -> TxState {
+        self.0.get_state()
+	}
+	// 预提交一个事务
+	fn prepare(&self, timeout: usize, cb: TxCallback) -> DBResult {
+		self.0.prepare(timeout, cb)
+	}
+	// 提交一个事务
+	fn commit(&self, cb: TxCallback) -> CommitResult {
+		self.0.commit(cb)
+	}
+	// 回滚一个事务
+	fn rollback(&self, cb: TxCallback) -> DBResult {
+		self.0.rollback(cb)
+	}
+}
+
+#[derive(Clone)]
+pub struct LmdbWareHouse {
+    name: Atom,
+    tabs: Arc<RwLock<Tabs<LmdbTable>>>
+}
+
+impl LmdbWareHouse {
+
+	pub fn restore_table_meta_info(name: Atom) -> Result<Self, String> {
+        let root = String::from(DB_ROOT) + "/" + name.as_str() + "/";
+        let sinfo_path = root.clone() + SINFO;
+
+        let env = Environment::new().open(Path::new(&name.to_string())).unwrap();
+        let db = env.open_db(Some(&sinfo_path)).unwrap();
+        let txn = env.begin_ro_txn().unwrap();
+        let mut cursor = txn.open_ro_cursor(db).unwrap();
+        let mut tab_iter = cursor.iter();
+
+        let mut tabs: Tabs<LmdbTable> = Tabs::new();
+
+        while let Some(kv) = tab_iter.next() {
+            tabs.set_tab_meta(
+                Atom::decode(&mut ReadBuffer::new(kv.0, 0)),
+                Arc::new(TabMeta::decode(&mut ReadBuffer::new(kv.1, 0)))
+            );
+        }
+
+        tabs.set_tab_meta(Atom::from(SINFO), Arc::new(TabMeta::new(EnumType::Str, EnumType::Bool)));
+
+        Ok( LmdbWareHouse {
+            name: name,
+            tabs: Arc::new(RwLock::new(tabs))
+        })
+	}
+}
+
+impl OpenTab for LmdbWareHouse {
+	// 打开指定的表，表必须有meta
+	fn open<'a, T: Tab>(&self, tab: &Atom, _cb: Box<Fn(SResult<T>) + 'a>) -> Option<SResult<T>> {
+        let name = String::from(DB_ROOT) + "/" + &self.name + "/" + tab;
+		Some(Ok(T::new(&Atom::from(name))))
+	}
+}
+
+impl Ware for LmdbWareHouse {
+	// 拷贝全部的表
+	fn tabs_clone(&self) -> Arc<Ware> {
+	    Arc::new(LmdbWareHouse {
+            name: self.name.clone(),
+            tabs:Arc::new(RwLock::new(self.tabs.read().unwrap().clone_map()))
+        })
+	}
+	// 列出全部的表
+	fn list(&self) -> Box<Iterator<Item=Atom>> {
+		Box::new(self.tabs.read().unwrap().list())
+	}
+	// 获取该库对预提交后的处理超时时间, 事务会用最大超时时间来预提交
+	fn timeout(&self) -> usize {
+		TIMEOUT
+	}
+	// 表的元信息
+	fn tab_info(&self, tab_name: &Atom) -> Option<Arc<TabMeta>> {
+		self.tabs.read().unwrap().get(tab_name)
+	}
+	// 获取当前表结构快照
+	fn snapshot(&self) -> Arc<WareSnapshot> {
+		Arc::new(LmdbSnapshot(self.clone(), RefCell::new(self.tabs.read().unwrap().snapshot())))
+	}
+}
+
+/// LMDB manager
+pub struct LmdbSnapshot(
+    LmdbWareHouse,
+    RefCell<TabLog<LmdbTable>>
+);
+
+impl WareSnapshot for LmdbSnapshot {
+	// 列出全部的表
+	fn list(&self) -> Box<Iterator<Item=Atom>> {
+		Box::new(self.1.borrow().list())
+	}
+	// 表的元信息
+	fn tab_info(&self, tab_name: &Atom) -> Option<Arc<TabMeta>> {
+		self.1.borrow().get(tab_name)
+	}
+	// 检查该表是否可以创建
+	fn check(&self, _tab: &Atom, _meta: &Option<Arc<TabMeta>>) -> SResult<()> {
+		Ok(())
+	}
+	// 新增 修改 删除 表
+	fn alter(&self, tab_name: &Atom, meta: Option<Arc<TabMeta>>) {
+		self.1.borrow_mut().alter(tab_name, meta)
+	}
+	// 创建指定表的表事务
+	fn tab_txn(&self, tab_name: &Atom, id: &Guid, writable: bool, cb: Box<Fn(SResult<Arc<TabTxn>>)>) -> Option<SResult<Arc<TabTxn>>> {
+		self.1.borrow().build(&self.0, tab_name, id, writable, cb)
+	}
+	// 创建一个meta事务
+	fn meta_txn(&self, id: &Guid) -> Arc<MetaTxn> {
+        Arc::new(LmdbMetaTxn::new(self.tab_txn(&Atom::from(SINFO), id, true, Box::new(|_r|{})).unwrap().expect("meta_txn")))
+	}
+	// 元信息预提交
+	fn prepare(&self, id: &Guid) -> SResult<()> {
+		(self.0).tabs.write().unwrap().prepare(id, &mut self.1.borrow_mut())
+	}
+	// 元信息提交
+	fn commit(&self, id: &Guid) {
+		(self.0).tabs.write().unwrap().commit(id)
+	}
+	// 回滚
+	fn rollback(&self, id: &Guid) {
+		(self.0).tabs.write().unwrap().rollback(id)
+	}
 }
 
 fn send_task(func: Box<FnBox()>) {
