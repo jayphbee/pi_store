@@ -36,6 +36,7 @@ const SINFO: &str = "_$sinfo";
 const MDB_SET: u32 = 15;
 const MDB_PREV: u32 = 12;
 const MDB_NEXT: u32 = 8;
+const MDB_FIRST: u32 = 0;
 
 const TIMEOUT: usize = 100;
 
@@ -229,14 +230,14 @@ impl TabTxn for LmdbTableTxn {
             let lmdb_table = &lmdb_table_txn_wrapper.tab;
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
-            let mut cursor = txn.open_rw_cursor(lmdb_table_wrapper.db).unwrap();
+            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RoTransaction) };
+            let mut cursor = txn.open_ro_cursor(lmdb_table_wrapper.db).unwrap();
 
             if let Some(k) = key.clone() {
                 // get mothod has side effect to advance cursor
                 cursor.get(Some(k.as_ref()), None, MDB_SET);
             } else {
-                cursor.iter_start();
+                cursor.get(None, None, MDB_FIRST);
             }
 
             let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
@@ -256,13 +257,13 @@ impl TabTxn for LmdbTableTxn {
             let lmdb_table = &lmdb_table_txn_wrapper.tab;
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
-            let mut cursor = txn.open_rw_cursor(lmdb_table_wrapper.db).unwrap();
+            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RoTransaction) };
+            let mut cursor = txn.open_ro_cursor(lmdb_table_wrapper.db).unwrap();
 
             if let Some(k) = key.clone() {
                 cursor.get(Some(k.as_ref()), None, MDB_SET);
             } else {
-                cursor.iter_start();
+                cursor.get(None, None, MDB_FIRST);
             }
 
             let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
