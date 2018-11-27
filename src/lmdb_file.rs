@@ -36,6 +36,7 @@ const ASYNC_DB_TYPE: TaskType = TaskType::Sync;
 
 const DB_ROOT: &str = "_$lmdb";
 const SINFO: &str = "_$sinfo";
+const MAX_DBS_PER_ENV: u32 = 1024;
 
 const MDB_SET: u32 = 15;
 const MDB_PREV: u32 = 12;
@@ -512,12 +513,10 @@ pub struct LmdbWareHouse {
 
 impl LmdbWareHouse {
 
-	pub fn restore_table_meta_info(name: Atom) -> Result<Self, String> {
-        let root = String::from(DB_ROOT) + "/" + name.as_str() + "/";
-        let sinfo_path = root.clone() + SINFO;
+	pub fn new(name: Atom) -> Result<Self, String> {
 
-        let env = Environment::new().open(Path::new(&name.to_string())).unwrap();
-        let db = env.open_db(Some(&sinfo_path)).unwrap();
+        let env = Environment::new().set_max_dbs(MAX_DBS_PER_ENV).open(Path::new(DB_ROOT)).unwrap();
+        let db = env.open_db(Some(&name.to_string())).unwrap();
         let txn = env.begin_ro_txn().unwrap();
         let mut cursor = txn.open_ro_cursor(db).unwrap();
         let mut tab_iter = cursor.iter();
@@ -543,8 +542,7 @@ impl LmdbWareHouse {
 impl OpenTab for LmdbWareHouse {
 	// 打开指定的表，表必须有meta
 	fn open<'a, T: Tab>(&self, tab: &Atom, _cb: Box<Fn(SResult<T>) + 'a>) -> Option<SResult<T>> {
-        let name = String::from(DB_ROOT) + "/" + &self.name + "/" + tab;
-		Some(Ok(T::new(&Atom::from(name))))
+        Some(Ok(T::new(tab)))
 	}
 }
 
