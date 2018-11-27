@@ -1,4 +1,5 @@
 use std::sync::{ Arc, RwLock };
+use std::sync::atomic::{ AtomicUsize, Ordering };
 use std::rc::Rc;
 use std::path::Path;
 use std::mem::replace;
@@ -37,6 +38,7 @@ const MDB_SET: u32 = 15;
 const MDB_PREV: u32 = 12;
 const MDB_NEXT: u32 = 8;
 const MDB_FIRST: u32 = 0;
+const MDB_LAST: u32 = 6;
 
 const TIMEOUT: usize = 100;
 
@@ -237,7 +239,11 @@ impl TabTxn for LmdbTableTxn {
                 // get mothod has side effect to advance cursor
                 cursor.get(Some(k.as_ref()), None, MDB_SET);
             } else {
-                cursor.get(None, None, MDB_FIRST);
+                if descending {
+                    cursor.get(None, None, MDB_FIRST);
+                } else {
+                    cursor.get(None, None, MDB_LAST);
+                }
             }
 
             let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
@@ -263,7 +269,11 @@ impl TabTxn for LmdbTableTxn {
             if let Some(k) = key.clone() {
                 cursor.get(Some(k.as_ref()), None, MDB_SET);
             } else {
-                cursor.get(None, None, MDB_FIRST);
+                if descending {
+                    cursor.get(None, None, MDB_FIRST);
+                } else {
+                    cursor.get(None, None, MDB_LAST);
+                }
             }
 
             let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
@@ -284,7 +294,7 @@ impl TabTxn for LmdbTableTxn {
 
 /// lmdb iterator that navigate key and value
 pub struct LmdbItemsIter {
-    cursor_ptr: Arc<RefCell<usize>>,
+    cursor_ptr: Arc<AtomicUsize>,
     db: Database,
     descending: bool,
     _filter: Filter
@@ -293,7 +303,7 @@ pub struct LmdbItemsIter {
 impl Drop for LmdbItemsIter {
     fn drop(&mut self) {
         unsafe {
-            Box::from_raw(*self.cursor_ptr.borrow_mut() as *mut RoTransaction);
+            Box::from_raw(self.cursor_ptr.load(Ordering::SeqCst) as *mut RoTransaction);
         };
     }
 }
@@ -301,7 +311,7 @@ impl Drop for LmdbItemsIter {
 impl LmdbItemsIter {
     pub fn new(cursor_ptr: usize, db: Database, descending: bool, _filter: Filter) -> Self {
         LmdbItemsIter {
-            cursor_ptr: Arc::new(RefCell::new(cursor_ptr)),
+            cursor_ptr: Arc::new(AtomicUsize::new(cursor_ptr)),
             db: db,
             descending: descending,
             _filter: _filter
@@ -318,22 +328,22 @@ impl Iter for LmdbItemsIter {
         let db = self.db;
 
         send_task(Box::new(move || {
-            // cast cursor_ptr to RwCursor
-            let mut cursor = unsafe { Box::from_raw(*cursor_ptr.borrow_mut() as *mut RwCursor) };
+            // cast cursor_ptr to RoCursor
+            let mut cursor = unsafe { Box::from_raw(cursor_ptr.load(Ordering::SeqCst) as *mut RoCursor) };
 
             if descending {
-                match cursor.get(None, None, MDB_PREV) {
-                    Ok(v) => cb(Ok(Some((Arc::new(v.0.unwrap().to_vec()), Arc::new(v.1.to_vec()))))),
-                    Err(_) => cb(Ok(None))
-                }
-            } else {
                 match cursor.get(None, None, MDB_NEXT) {
                     Ok(v) => cb(Ok(Some((Arc::new(v.0.unwrap().to_vec()), Arc::new(v.1.to_vec()))))),
                     Err(_) => cb(Ok(None))
                 }
+            } else {
+                match cursor.get(None, None, MDB_PREV) {
+                    Ok(v) => cb(Ok(Some((Arc::new(v.0.unwrap().to_vec()), Arc::new(v.1.to_vec()))))),
+                    Err(_) => cb(Ok(None))
+                }
             }
-            // cast back cursor to usize
-            *cursor_ptr.borrow_mut() = unsafe { Box::into_raw(Box::new(cursor)) as usize };
+            // cast back cursor to AtomicUsize
+            cursor_ptr.store(unsafe { Box::into_raw(Box::new(cursor)) as usize }, Ordering::SeqCst);
         }));
 
         None
@@ -342,7 +352,7 @@ impl Iter for LmdbItemsIter {
 
 /// lmdb iterator that navigate only keys
 pub struct LmdbKeysIter {
-    cursor_ptr:  Arc<RefCell<usize>>,
+    cursor_ptr:  Arc<AtomicUsize>,
     db: Database,
     descending: bool,
     _filter: Filter
@@ -351,7 +361,7 @@ pub struct LmdbKeysIter {
 impl Drop for LmdbKeysIter {
     fn drop(&mut self) {
         unsafe {
-            Box::from_raw(*self.cursor_ptr.borrow_mut() as *mut RoTransaction);
+            Box::from_raw(self.cursor_ptr.load(Ordering::SeqCst) as *mut RoTransaction);
         };
     }
 }
@@ -359,7 +369,7 @@ impl Drop for LmdbKeysIter {
 impl LmdbKeysIter {
     pub fn new(cursor_ptr: usize, db: Database, descending: bool, _filter: Filter) -> Self {
         LmdbKeysIter {
-            cursor_ptr: Arc::new(RefCell::new(cursor_ptr)),
+            cursor_ptr: Arc::new(AtomicUsize::new(cursor_ptr)),
             db: db,
             descending: descending,
             _filter: _filter
@@ -376,22 +386,22 @@ impl Iter for LmdbKeysIter {
         let cursor_ptr = self.cursor_ptr.clone();
 
         send_task(Box::new(move || {
-            // cast cursor_ptr to RwCursor
-            let mut cursor = unsafe { Box::from_raw(*cursor_ptr.borrow_mut() as *mut RwCursor) };
+            // cast cursor_ptr to RoCursor
+            let mut cursor = unsafe { Box::from_raw(cursor_ptr.load(Ordering::SeqCst) as *mut RoCursor) };
 
             if descending {
-                match cursor.get(None, None, MDB_PREV) {
-                    Ok(v) => cb(Ok(Some(Arc::new(v.0.unwrap().to_vec())))),
-                    Err(_) => cb(Ok(None))
-                }
-            } else {
                 match cursor.get(None, None, MDB_NEXT) {
                     Ok(v) => cb(Ok(Some(Arc::new(v.0.unwrap().to_vec())))),
                     Err(_) => cb(Ok(None))
                 }
+            } else {
+                match cursor.get(None, None, MDB_PREV) {
+                    Ok(v) => cb(Ok(Some(Arc::new(v.0.unwrap().to_vec())))),
+                    Err(_) => cb(Ok(None))
+                }
             }
-            // cast back cursor to usize
-            *cursor_ptr.borrow_mut() = unsafe { Box::into_raw(Box::new(cursor)) as usize };
+            // cast back cursor to AtomicUsize
+            cursor_ptr.store(unsafe { Box::into_raw(Box::new(cursor)) as usize }, Ordering::SeqCst);
         }));
         None
     }
