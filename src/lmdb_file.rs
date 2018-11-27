@@ -512,18 +512,18 @@ pub struct LmdbWareHouse {
 }
 
 impl LmdbWareHouse {
-
+    // retrive meta table info of a DB
 	pub fn new(name: Atom) -> Result<Self, String> {
-
+        // find meta table info in DB_ROOT path
         let env = Environment::new().set_max_dbs(MAX_DBS_PER_ENV).open(Path::new(DB_ROOT)).unwrap();
-        let db = env.open_db(Some(&name.to_string())).unwrap();
+        let db = env.open_db(Some(SINFO)).unwrap();
         let txn = env.begin_ro_txn().unwrap();
         let mut cursor = txn.open_ro_cursor(db).unwrap();
-        let mut tab_iter = cursor.iter();
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
-        while let Some(kv) = tab_iter.next() {
+        println!("how many tables: {}", cursor.iter().count());
+        for kv in cursor.iter() {
             tabs.set_tab_meta(
                 Atom::decode(&mut ReadBuffer::new(kv.0, 0)),
                 Arc::new(TabMeta::decode(&mut ReadBuffer::new(kv.1, 0)))
