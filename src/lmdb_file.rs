@@ -5,6 +5,7 @@ use std::path::Path;
 use std::mem::replace;
 use std::cell::RefCell;
 use std::boxed::FnBox;
+use std::slice::from_raw_parts;
 
 use fnv::FnvHashMap;
 
@@ -26,7 +27,9 @@ use pi_db::tabs::{TabLog, Tabs};
 
 use lmdb::{
     Environment, Database, WriteFlags, Error, Transaction, EnvironmentFlags,
-    DatabaseFlags, RwTransaction, RoTransaction, RoCursor, Cursor, RwCursor
+    DatabaseFlags, RwTransaction, RoTransaction, RoCursor, Cursor, RwCursor,
+
+    mdb_set_compare, MDB_txn, MDB_dbi, MDB_val, MDB_cmp_func
 };
 
 const ASYNC_DB_TYPE: TaskType = TaskType::Sync;
@@ -82,9 +85,19 @@ impl Tab for LmdbTable {
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
         let txn_ptr = if writable {
-            Box::into_raw(Box::new(self.0.env.begin_rw_txn().unwrap())) as usize
+            let rw_txn = self.0.env.begin_rw_txn().unwrap();
+            // set comparator function
+            unsafe {
+                mdb_set_compare(rw_txn.txn(), self.0.db.dbi(), mdb_cmp_func as *mut MDB_cmp_func);
+            }
+            Box::into_raw(Box::new(rw_txn)) as usize
         } else {
-            Box::into_raw(Box::new(self.0.env.begin_ro_txn().unwrap())) as usize
+            let ro_txn = self.0.env.begin_ro_txn().unwrap();
+            // set comparator function
+            unsafe {
+                mdb_set_compare(ro_txn.txn(), self.0.db.dbi(), mdb_cmp_func as *mut MDB_cmp_func);
+            }
+            Box::into_raw(Box::new(ro_txn)) as usize
         };
 
 		Arc::new(LmdbTableTxn(Arc::new(RefCell::new(LmdbTableTxnWrapper {
@@ -95,6 +108,25 @@ impl Tab for LmdbTable {
             _writable: writable,
             state: TxState::Ok
         }))))
+    }
+}
+
+// comprator function
+fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
+    unsafe {
+        let buf1 = from_raw_parts::<u8>((*a).mv_data as *const u8, (*a).mv_size);
+        let buf2 = from_raw_parts::<u8>((*b).mv_data as *const u8, (*b).mv_size);
+
+        let b1 = ReadBuffer::new(buf1, 0);
+        let b2 = ReadBuffer::new(buf2, 0);
+
+        if b1 > b2 {
+            1
+        } else if b1 == b2 {
+            0
+        } else {
+            -1
+        }
     }
 }
 
