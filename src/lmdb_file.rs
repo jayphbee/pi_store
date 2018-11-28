@@ -320,7 +320,7 @@ impl TabTxn for LmdbTableTxn {
         None
     }
 
-    fn tab_size(&self, cb: TxCallback) -> DBResult {
+    fn tab_size(&self, cb: Arc<Fn(SResult<usize>)>) -> Option<SResult<usize>> {
         None
     }
 }
@@ -525,8 +525,8 @@ impl LmdbWareHouse {
         println!("how many tables: {}", cursor.iter().count());
         for kv in cursor.iter() {
             tabs.set_tab_meta(
-                Atom::decode(&mut ReadBuffer::new(kv.0, 0)),
-                Arc::new(TabMeta::decode(&mut ReadBuffer::new(kv.1, 0)))
+                Atom::decode(&mut ReadBuffer::new(kv.0, 0)).unwrap(),
+                Arc::new(TabMeta::decode(&mut ReadBuffer::new(kv.1, 0)).unwrap())
             );
         }
 
