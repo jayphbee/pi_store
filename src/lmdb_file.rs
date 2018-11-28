@@ -207,7 +207,7 @@ impl TabTxn for LmdbTableTxn {
             let lmdb_table = &lmdb_table_txn_wrapper.tab;
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
+            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RoTransaction) };
 
             for kv in arr.iter() {
                 if let Ok(v) = txn.get(lmdb_table_wrapper.db, kv.key.as_ref()) {
