@@ -5,16 +5,16 @@
  * 由外部驱动来建索引及重命名，这样可以用作索引完成的标志。
  * 加载时，先遍历目录，然后倒序加载日志文件，直到找到索引的日志文件。
  * 日志命名为： {time}.{mcount}  time为64位时间的base58，mcount为修改次数。 mcount为0表示还没建索引。1表示已建索引。每次读取日志文件时，只处理最大修改次数的，删除其余的。
- * 
+ *
  * 日志需要建立索引。先修改头部的索引位置。然后创建索引。 // 一般总是用Guid来查询，所以不太需要有GuidBloom过滤器。
  * 为了自己管理缓冲，使用O_DIRECT 直接读写文件。元数据保留块索引数组。有块缓存，缓存单个的数据块。根据内存需要可单独加载和释放。缓存数据块时，可以按4k左右的大小建立简单索引。
  * 读写模式下： Ver(2字节), 配置(2字节), 整理时间-秒-总为0(4字节), 索引位置-总为0(4字节), 块索引数组长度-总为0(2字节), [{块长-块结束时写入(3字节), CRC32-块结束时写入(4字节), [{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(2字节，可选，整理时删除)}...], }...]=数据块数组(块与块可能会出现Guid交叠)
  * 只读模式下： Ver(2字节), 配置-描述是否有子表编号(2字节), 整理时间-秒(4字节), 索引位置(4字节), 块索引数组长度(2字节), [块长(3字节), CRC32(4字节), {[{Guid(16字节), Bon长度(变长1-4字节), Bon格式数据，子表编号(4字节，可选，整理时删除)}...], }...]=数据块数组, 0xFFFFFF(3字节表示为索引), CRC32(4字节), [{MinGuidTime(8字节), MaxGuidTime(8字节), Pos(4字节), Count(4字节)}...]=块索引数组
  *
- * 管理器用sbtree记录每个文件名对应的元信息(时间和修改次数) 
- * 
+ * 管理器用sbtree记录每个文件名对应的元信息(时间和修改次数)
+ *
  * 使用direct IO和pread来提升性能
- * 
+ *
  */
 
 use std::boxed::FnBox;
@@ -220,7 +220,7 @@ impl Log {
 		if is_timeout_guid(&(self.rw.read().unwrap().1)[0], &guid) {
 			return Err("guid too old".to_string());
 		}
-		
+
 		let file_result = ((self.rw.write().unwrap().1).last().unwrap().2).0.lock().unwrap().reader.file.file.clone(); //立即释放锁
 		match file_result {
 			Ok(ref f) => {
@@ -727,7 +727,7 @@ fn read_log(data: &[u8], pos: usize, st_size: usize) -> (usize, u64) {
 	let time = Guid(data.get_lu128(pos)).time();
 	println!("!!!!!!read_log, guid time: {}", time);
 	let mut r = ReadBuffer::new(data, pos + 16);
-	let bon_len = r.read_lengthen().expect("") as usize;
+	let bon_len = r.read_lengthen() as usize;
 	(pos + 16 + r.head() + bon_len + st_size, time)
 }
 // 读取3字节的块长度
@@ -913,7 +913,7 @@ fn write_tmp_index(awriter: AWriter, last: usize, guid: Guid, data: Bin, callbac
 		}
 		last_tmp_index.max = max;
 		last_tmp_index.count += 1;
-		
+
 		bin = (&writer.block.data[last..len]).to_vec();
 	}
 	println!("!!!!!!file pos: {}, len: {}", file_pos, bin.len());
@@ -923,9 +923,9 @@ fn write_tmp_index(awriter: AWriter, last: usize, guid: Guid, data: Bin, callbac
 //异步保存日志数据，并调用用户回调
 fn save_log(awriter: AWriter, mut file_pos: u64, max: u64, mut bin: Vec<u8>, callback: Callback) -> SResult<()> {
 	let mut writer = awriter.0.lock().unwrap(); //退出函数时释放互斥锁
-	if writer.reader.info.min == u64::max_value() 
-		&& writer.reader.info.max == 0 
-		&& writer.info.min == u64::max_value() 
+	if writer.reader.info.min == u64::max_value()
+		&& writer.reader.info.max == 0
+		&& writer.info.min == u64::max_value()
 		&& writer.info.max == 0 {
 			//当前文件的首个块的首个日志，填充文件头数据
 			let size = FILE_HEADE_SIZE + BLOCK_HEAD_SIZE;
@@ -1023,7 +1023,7 @@ fn handle_create_rw_file(log: Log, guid: Guid, data: Bin, st_key: u32, callback:
 	//增加新的读写文件
 	let awriter = AWriter::new(reader);
 	(&mut log.rw.write().unwrap().1).push(FileInfo(open_time, 0, awriter.clone())); //重复获得写锁，加入后立即释放
-	
+
 	//创建新的读写文件，并处理读写文件初始化队列中的用户回调
 	let cb1 = Box::new(move |result: IoResult<AsyncFile>| {
 		let mut writer = awriter.0.lock().unwrap(); //锁将在处理初始化等待队列后释放
