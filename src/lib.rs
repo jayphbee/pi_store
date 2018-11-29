@@ -39,3 +39,4 @@ pub mod kg_subtab;
 pub mod kg;
 pub mod db;
 pub mod lmdb_file;
+pub mod pool;
