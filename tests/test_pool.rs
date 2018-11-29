@@ -31,7 +31,7 @@ use lmdb::{
 
 #[test]
 fn test_new_txn() {
-    let mut p = ThreadPool::with_capacity(4);
+    let mut p = ThreadPool::with_capacity(10);
     let tx = p.pop().unwrap();
 
     let env = Arc::new(Environment::new()
@@ -39,10 +39,11 @@ fn test_new_txn() {
                 .set_max_dbs(1024)
                 .open(Path::new("_$lmdb"))
                 .unwrap());
+    thread::sleep_ms(1000);
     
     let _ = env.create_db(Some("test"), DatabaseFlags::empty());
 
-    assert_eq!(p.idle_threads(), 3);
+    // assert_eq!(p.idle_threads(), 3);
 
     //test new tab txn
     assert_eq!(tx.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
@@ -69,9 +70,15 @@ fn test_new_txn() {
     }))).is_ok();
     thread::sleep_ms(1000);
 
+    p.push(tx);
+    let tx1 = p.pop().unwrap();
+
+    assert_eq!(tx1.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
+    thread::sleep_ms(1000);
+
     // test query
-    tx.send(LmdbMessage::Query(env.clone(), "test".to_string(), items.clone(), Arc::new(move |q| {
-        q.is_err();
+    tx1.send(LmdbMessage::Query(env.clone(), "test".to_string(), items.clone(), Arc::new(move |q| {
+        // q.is_err();
     })));
     thread::sleep_ms(1000);
 }

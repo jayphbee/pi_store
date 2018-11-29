@@ -46,8 +46,11 @@ impl ThreadPool {
         for i in 0..cap {
             let (tx, rx) = channel();
             thread::spawn(move || {
+                println!("create thread with thread id {:?}", thread::current().id());
+
                 let mut rw_txn_ptr: usize = 0;
                 let mut ro_txn_ptr: usize = 0;
+
                 loop {
                     match rx.recv() {
                         // This is the very first message should be sent before any database operation, or will be crashed.
@@ -56,14 +59,13 @@ impl ThreadPool {
                                 rw_txn_ptr = unsafe {
                                     Box::into_raw(Box::new(db_env.begin_rw_txn().unwrap())) as usize
                                 };
-                                println!("rw_txn_ptr: {}", rw_txn_ptr);
+                                println!("create rw txn in thread: {:?} rw_txn_ptr: {}", thread::current().id(), rw_txn_ptr);
                             } else {
                                 ro_txn_ptr = unsafe {
                                     Box::into_raw(Box::new(db_env.begin_ro_txn().unwrap())) as usize
                                 };
                                 println!("ro_txn_ptr: {}", ro_txn_ptr);
                             }
-                            println!("{:?}", thread::current().id());
                         },
 
                         Ok(LmdbMessage::Query(db_env, db_name, keys, cb)) => {
@@ -75,9 +77,12 @@ impl ThreadPool {
                                 Box::from_raw(rw_txn_ptr as *mut RwTransaction)
                             };
 
+                            println!("query in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
+
                             for kv in keys.iter() {
                                 println!("in querey");
-                                match rw_txn.get(db, b"hello") {
+
+                                match rw_txn.get(db, kv.key.as_ref()) {
                                     Ok(v) => {
                                         println!("susccess query");
                                         values.push(TabKV {
@@ -124,11 +129,11 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::Modify(db_env, db_name, keys, cb)) => {
                             let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
-
+                println!("create thread with thread id {:?}", thread::current().id());
                             let mut rw_txn = unsafe {
                                 Box::from_raw(rw_txn_ptr as *mut RwTransaction)
                             };
-
+                            println!("modify in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {
                                     match rw_txn.put(db, kv.key.as_ref(), kv.clone().value.unwrap().as_ref(), WriteFlags::empty()) {
@@ -157,6 +162,7 @@ impl ThreadPool {
                             let mut rw_txn = unsafe {
                                 Box::from_raw(rw_txn_ptr as *mut RwTransaction)
                             };
+                            println!("commit in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
                             match rw_txn.commit() {
                                 Ok(_) => {
                                     cb(Ok(()));
@@ -184,7 +190,6 @@ impl ThreadPool {
                         },
                     }
                 }
-                println!("create thread {}", i);
             });
             senders.push(tx);
         }
