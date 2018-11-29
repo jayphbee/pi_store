@@ -69,15 +69,17 @@ impl ThreadPool {
                         Ok(LmdbMessage::Query(db_env, db_name, keys, cb)) => {
                             let mut values = Vec::new();
                             // let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
-                            let db = db_env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
+                            let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
 
-                            let ro_txn = unsafe {
-                                Box::from_raw(ro_txn_ptr as *mut RoTransaction)
+                            let rw_txn = unsafe {
+                                Box::from_raw(rw_txn_ptr as *mut RwTransaction)
                             };
 
                             for kv in keys.iter() {
-                                match ro_txn.get(db, b"hello") {
+                                println!("in querey");
+                                match rw_txn.get(db, b"hello") {
                                     Ok(v) => {
+                                        println!("susccess query");
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
                                             tab: kv.tab.clone(),
@@ -121,11 +123,7 @@ impl ThreadPool {
                         },
 
                         Ok(LmdbMessage::Modify(db_env, db_name, keys, cb)) => {
-                            // let db = db_env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
-                            // let mut txn = db_env.begin_rw_txn().unwrap();
-                            // txn.put(db, b"key1", b"val1", WriteFlags::empty()).is_err();
-                            // println!("value: {:?}", txn.get(db, b"key1"));
-                            let db = db_env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
+                            let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
 
                             let mut rw_txn = unsafe {
                                 Box::from_raw(rw_txn_ptr as *mut RwTransaction)
@@ -133,9 +131,7 @@ impl ThreadPool {
 
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {
-                                    println!("insert");
-                                    // match rw_txn.put(db, kv.key.as_ref(), kv.clone().value.unwrap().as_ref(), WriteFlags::empty()) {
-                                    match rw_txn.put(db, b"key1", b"val1", WriteFlags::empty()) {
+                                    match rw_txn.put(db, kv.key.as_ref(), kv.clone().value.unwrap().as_ref(), WriteFlags::empty()) {
                                         Ok(_) => {
                                             println!("insert {:?} success", kv.clone().key.as_ref());
                                         }
@@ -154,7 +150,6 @@ impl ThreadPool {
                                     };
                                 }
                             }
-                            println!("in modify");
                         },
 
                         // only commit rw txn
@@ -163,8 +158,14 @@ impl ThreadPool {
                                 Box::from_raw(rw_txn_ptr as *mut RwTransaction)
                             };
                             match rw_txn.commit() {
-                                Ok(_) => cb(Ok(())),
-                                Err(e) => cb(Err(e.to_string()))
+                                Ok(_) => {
+                                    cb(Ok(()));
+                                    println!("commit success");
+                                },
+                                Err(e) => {
+                                    cb(Err(e.to_string()));
+                                    println!("commit failed: {:?}", e);
+                                }
                             }
                             println!("receive commit");
                         },
