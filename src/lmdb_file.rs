@@ -38,11 +38,11 @@ const DB_ROOT: &str = "_$lmdb";
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
 
-const MDB_SET: u32 = 15;
-const MDB_PREV: u32 = 12;
-const MDB_NEXT: u32 = 8;
-const MDB_FIRST: u32 = 0;
-const MDB_LAST: u32 = 6;
+pub const MDB_SET: u32 = 15;
+pub const MDB_PREV: u32 = 12;
+pub const MDB_NEXT: u32 = 8;
+pub const MDB_FIRST: u32 = 0;
+pub const MDB_LAST: u32 = 6;
 
 const TIMEOUT: usize = 100;
 
