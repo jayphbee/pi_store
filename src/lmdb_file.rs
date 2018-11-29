@@ -68,6 +68,8 @@ pub struct LmdbTable(Arc<LmdbTableWrapper>);
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
         let env = Environment::new()
+            // see doc: https://docs.rs/lmdb/0.8.0/lmdb/struct.EnvironmentFlags.html#associatedconstant.NO_TLS
+            .set_flags(EnvironmentFlags::NO_TLS)
             .set_max_dbs(1024)
             .open(Path::new(DB_ROOT))
             .expect("Open lmdb environment failed");
@@ -166,16 +168,20 @@ impl Txn for LmdbTableTxn {
         let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
         send_task(Box::new(move || {
             let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction)};
+            println!("commit txn {:?}", txn.txn());
             match txn.commit() {
                 Ok(_) => {
+                    println!("txn commit successed");
                     lmdb_table_txn.borrow_mut().state = TxState::Commited;
                     cb(Ok(()))
                 },
                 Err(e) => {
+                    println!("txn commit failed with error {:?}", e.clone().to_string());
                     lmdb_table_txn.borrow_mut().state = TxState::CommitFail;
                     cb(Err(e.to_string()))
                 }
-            }
+            };
+            println!("after commit");
         }));
 
         None
@@ -186,6 +192,7 @@ impl Txn for LmdbTableTxn {
         let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
         let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
         txn.abort();
+        println!("transaction rollbacked");
         lmdb_table_txn.borrow_mut().state = TxState::Rollbacked;
 
         Some(Ok(()))
@@ -202,28 +209,32 @@ impl TabTxn for LmdbTableTxn {
         let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
         send_task(Box::new(move || {
             let mut value = Vec::new();
-
             let lmdb_table_txn_wrapper = lmdb_table_txn.borrow_mut();
             let lmdb_table = &lmdb_table_txn_wrapper.tab;
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RoTransaction) };
-
+            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
             for kv in arr.iter() {
-                if let Ok(v) = txn.get(lmdb_table_wrapper.db, kv.key.as_ref()) {
-                    value.push(
-                        TabKV {
-                            ware: kv.ware.clone(),
-                            tab: kv.tab.clone(),
-                            key: kv.key.clone(),
-                            index: kv.index,
-                            value: Some(Arc::new(Vec::from(v)))
-                        }
-                    );
-                } else {
-                    return cb(Err("query failed".to_string()));
+                match txn.get(lmdb_table_wrapper.db, kv.key.as_ref()) {
+                    Ok(v) => {
+                        println!("query get value {:?}", v.clone());
+                        value.push(
+                            TabKV {
+                                ware: kv.ware.clone(),
+                                tab: kv.tab.clone(),
+                                key: kv.key.clone(),
+                                index: kv.index,
+                                value: Some(Arc::new(Vec::from(v)))
+                            }
+                        )
+                    },
+                    Err(e) => {
+                        println!("query key: {:?}, error: {:?}", kv.key.clone().as_ref(), e.to_string());
+                        return cb(Err(e.to_string()));
+                    }
                 }
             }
+            println!("after query");
             cb(Ok(value))
         }));
         None
@@ -238,20 +249,25 @@ impl TabTxn for LmdbTableTxn {
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
             let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
-
+            println!("modify txn: {:?}", txn.txn());
             for kv in arr.iter() {
                 if let Some(_) = kv.value {
                     match txn.put(lmdb_table_wrapper.db, kv.key.as_ref(), kv.clone().value.unwrap().as_ref(), WriteFlags::empty()) {
-                        Ok(_) => (),
-                        Err(e) => return cb(Err(e.to_string()))
+                        Ok(_) => {
+                            println!("insert {:?} success",kv.clone().key.as_ref());
+                        }
+                        Err(e) => return cb(Err("insert failed".to_string()))
                     };
                 } else {
                     match txn.del(lmdb_table_wrapper.db, kv.key.as_ref(), None) {
-                        Ok(_) => (),
-                        Err(e) => return cb(Err(e.to_string()))
+                        Ok(_) => {
+                            println!("delete {:?} success",kv.clone().key.as_ref());
+                        }
+                        Err(e) => return cb(Err("delete failed".to_string()))
                     };
                 }
             }
+            println!("after modify");
         }));
         None
     }
@@ -265,8 +281,10 @@ impl TabTxn for LmdbTableTxn {
             let lmdb_table = &lmdb_table_txn_wrapper.tab;
             let lmdb_table_wrapper = lmdb_table.0.clone();
 
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RoTransaction) };
-            let mut cursor = txn.open_ro_cursor(lmdb_table_wrapper.db).unwrap();
+            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
+            println!("iter txn {:?}", txn.txn());
+
+            let mut cursor = txn.open_rw_cursor(lmdb_table_wrapper.db).expect("open rw cursor failed");
 
             if let Some(k) = key.clone() {
                 // get mothod has side effect to advance cursor
@@ -280,6 +298,7 @@ impl TabTxn for LmdbTableTxn {
             }
 
             let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
+            println!("after iter");
 
             cb(Ok(Box::new(LmdbItemsIter::new(cursor_ptr, lmdb_table_wrapper.db, descending, filter))))
         }));
