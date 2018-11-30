@@ -80,18 +80,16 @@ impl ThreadPool {
                             println!("query in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
 
                             for kv in keys.iter() {
-                                println!("in querey");
-
                                 match rw_txn.get(db, kv.key.as_ref()) {
                                     Ok(v) => {
-                                        println!("susccess query");
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
                                             tab: kv.tab.clone(),
                                             key: kv.key.clone(),
                                             index: kv.index,
                                             value: Some(Arc::new(Vec::from(v)))
-                                        })
+                                        });
+                                        println!("query success: {:?}", values);
                                     },
                                     Err(e) => {
                                         println!("query failed {:?}", e);
@@ -99,7 +97,6 @@ impl ThreadPool {
                                     }
                                 }
                             }
-                            println!("query value: {:?}", values);
                             cb(Ok(values));
                         },
 
@@ -181,7 +178,7 @@ impl ThreadPool {
                                 Box::from_raw(rw_txn_ptr as *mut RwTransaction)
                             };
                             rw_txn.abort();
-                            println!("receive rollback");
+                            println!("rollback in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
                         },
 
                         Err(e) => {

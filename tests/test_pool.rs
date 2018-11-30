@@ -79,6 +79,12 @@ fn test_new_txn() {
     })));
     thread::sleep_ms(1000);
 
+    // test rollback
+    tx1.send(LmdbMessage::Rollback(env.clone(), "test".to_string(), Arc::new(move |q| {
+        println!("queried value: {:?}", q);
+    })));
+    thread::sleep_ms(1000);
+
     p.push(tx);
     p.push(tx1);
 
