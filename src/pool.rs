@@ -23,12 +23,18 @@ use pi_db::db::{
 
 pub enum LmdbMessage {
     NewTxn(Arc<Environment>, String, bool),
-    Query(Arc<Environment>, String, Arc<Vec<TabKV>>, TxQueryCallback),
+    Query(String, Arc<Vec<TabKV>>, TxQueryCallback),
     IterItems(Arc<Environment>, String, bool, Option<Bin>, Arc<Fn(IterResult)>),
-    IterKeys(Arc<Environment>, String, bool, Option<Bin>, Arc<Fn(KeyIterResult)>),
-    Modify(Arc<Environment>, String, Arc<Vec<TabKV>>, TxCallback),
-    Commit(Arc<Environment>, String, TxCallback),
-    Rollback(Arc<Environment>, String, TxCallback),
+    IterKeys(Arc<Environment>, String, Arc<Fn(KeyIterResult)>),
+    Modify(String, Arc<Vec<TabKV>>, TxCallback),
+    Commit(String, TxCallback),
+    Rollback(String, TxCallback),
+}
+
+#[derive(Debug, Clone)]
+pub enum TxnType {
+    ReadWrite,
+    ReadOnly
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -40,16 +46,21 @@ pub struct ThreadPool {
 }
 
 impl ThreadPool {
-    pub fn with_capacity(cap: usize) -> Self {
+    pub fn with_capacity(cap: usize, env: Arc::<Environment>) -> Self {
         let mut senders = Vec::new();
 
         for i in 0..cap {
+            let clone_env = env.clone();
             let (tx, rx) = channel();
+
             thread::spawn(move || {
                 println!("create thread with thread id {:?}", thread::current().id());
 
                 let mut rw_txn_ptr: usize = 0;
                 let mut ro_txn_ptr: usize = 0;
+
+                let env = clone_env;
+                let mut thread_local_txn: Option<RwTransaction> = None;
 
                 loop {
                     match rx.recv() {
@@ -85,18 +96,18 @@ impl ThreadPool {
                             }
                         },
 
-                        Ok(LmdbMessage::Query(db_env, db_name, keys, cb)) => {
+                        Ok(LmdbMessage::Query(db_name, keys, cb)) => {
                             let mut values = Vec::new();
-                            let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
+                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
 
-                            let rw_txn = unsafe {
-                                Box::from_raw(rw_txn_ptr as *mut RwTransaction)
-                            };
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                            }
 
-                            println!("query in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
+                            let txn = thread_local_txn.take().unwrap();
 
                             for kv in keys.iter() {
-                                match rw_txn.get(db, kv.key.as_ref()) {
+                                match txn.get(db, kv.key.as_ref()) {
                                     Ok(v) => {
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
@@ -114,12 +125,6 @@ impl ThreadPool {
                                 }
                             }
                             cb(Ok(values));
-
-                            // let txn = db_env.begin_ro_txn().unwrap();
-                            // match txn.get(db, b"hello1") {
-                            //     Ok(v) => println!("query hello1: {:?}", v),
-                            //     Err(e) => println!("query error: {:?}", e.to_string())
-                            // }
                         },
 
                         Ok(LmdbMessage::IterItems(db_env, db_name, descending, key, cb)) => {
@@ -142,16 +147,37 @@ impl ThreadPool {
                             println!("iter items");
                         },
 
-                        Ok(LmdbMessage::IterKeys(db_env, db_name, descending, key, cb)) => {
-                            println!("iter keys");
+                        Ok(LmdbMessage::IterKeys(db_env, db_name, cb)) => {
+                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                            }
+
+                            thread_local_txn.as_mut().unwrap().put(db, b"foo", b"bar", WriteFlags::empty());
+                            thread_local_txn.as_mut().unwrap().put(db, b"foo1", b"bar1", WriteFlags::empty());
+
+                            let txn = thread_local_txn.take();
+
+                            match txn.unwrap().commit() {
+                                Ok(_) => {
+                                    println!("gtxn commit success: {:?}", thread_local_txn);
+                                },
+                                Err(_) => {
+                                    println!("gtxn commit failed");
+                                }
+                            }
                         },
 
-                        Ok(LmdbMessage::Modify(db_env, db_name, keys, cb)) => {
-                            let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
-                            let mut rw_txn = unsafe {
-                                Box::from_raw(rw_txn_ptr as *mut RwTransaction)
-                            };
-                            println!("modify in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
+                        Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
+                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                            }
+
+                            let mut rw_txn = thread_local_txn.take().unwrap();
+
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {
                                     match rw_txn.put(db, kv.key.as_ref(), kv.clone().value.unwrap().as_ref(), WriteFlags::empty()) {
@@ -173,35 +199,18 @@ impl ThreadPool {
                                     };
                                 }
                             }
-
-                            // let mut txn = db_env.begin_rw_txn().unwrap();
-
-                            // txn.put(db, b"hello1", b"world1", WriteFlags::empty());
-                            // txn.put(db, b"hello2", b"world2", WriteFlags::empty());
-                            // txn.put(db, b"hello3", b"world3", WriteFlags::empty());
-                            // match txn.commit() {
-                            //     Ok(_) => println!("commit success"),
-                            //     Err(e) => println!("error: {:?}", e.to_string()),
-                            // }
-
-                            // txn = db_env.begin_rw_txn().unwrap();
-                            // match txn.del(db, b"hello1", None) {
-                            //     Ok(_) => println!("del success"),
-                            //     Err(e) => println!("del failed {:?}", e.to_string()),
-                            // }
-
-                            // match txn.commit() {
-                            //     Ok(_) => println!("commit del success"),
-                            //     Err(e) => println!("{:?}", e.to_string()),
-                            // }
                         },
 
                         // only commit rw txn
-                        Ok(LmdbMessage::Commit(db_env, db_name, cb)) => {
-                            let mut rw_txn = unsafe {
-                                Box::from_raw(rw_txn_ptr as *mut RwTransaction)
-                            };
-                            println!("commit in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
+                        Ok(LmdbMessage::Commit(db_name, cb)) => {
+                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                            }
+
+                            let mut rw_txn = thread_local_txn.take().unwrap();
+
                             match rw_txn.commit() {
                                 Ok(_) => {
                                     cb(Ok(()));
@@ -215,10 +224,15 @@ impl ThreadPool {
                         },
 
                         // only abort tw txn
-                        Ok(LmdbMessage::Rollback(db_env, db_name, cb)) => {
-                            let mut rw_txn = unsafe {
-                                Box::from_raw(rw_txn_ptr as *mut RwTransaction)
-                            };
+                        Ok(LmdbMessage::Rollback(db_name, cb)) => {
+                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                            }
+
+                            let mut rw_txn = thread_local_txn.take().unwrap();
+
                             rw_txn.abort();
                             println!("rollback in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
                             cb(Ok(()));
