@@ -147,7 +147,7 @@ impl ThreadPool {
                                         Ok(_) => {
                                             println!("delete {:?} success", kv.clone().key.as_ref());
                                         }
-                                        Err(e) => return cb(Err("delete failed".to_string()))
+                                        Err(e) => return cb(Err(e.to_string()))
                                     };
                                 }
                             }
