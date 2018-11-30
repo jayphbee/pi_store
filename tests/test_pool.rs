@@ -43,7 +43,7 @@ fn test_new_txn() {
 
     let _ = env.create_db(Some("test"), DatabaseFlags::empty());
 
-    //test new tab txn
+    // test new tab txn
     assert_eq!(tx.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
     thread::sleep_ms(1000);
 

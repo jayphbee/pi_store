@@ -55,9 +55,26 @@ impl ThreadPool {
                     match rx.recv() {
                         // This is the very first message should be sent before any database operation, or will be crashed.
                         Ok(LmdbMessage::NewTxn(db_env, db_name, writable)) => {
+                            let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
                             if writable {
                                 rw_txn_ptr = unsafe {
-                                    Box::into_raw(Box::new(db_env.begin_rw_txn().unwrap())) as usize
+                                    match db_env.begin_rw_txn() {
+                                        Ok(mut txn) => {
+                                            match txn.put(db, b"foo", b"bar", WriteFlags::empty()) {
+                                                Ok(_) => println!("NewTxn write success"),
+                                                Err(e) => println!("Netxn write failed: {:?}", e)
+                                            }
+                                            let boxed = Box::into_raw(Box::new(txn)) as usize;
+                                            println!("after boxed: {:?}", boxed);
+                                            boxed
+                                        },
+                                        Err(e) => {
+                                            println!("falid to create txn");
+                                            0
+                                        }
+                                    }
+
+                                    // Box::into_raw(Box::new(db_env.begin_rw_txn().unwrap())) as usize
                                 };
                                 println!("create rw txn in thread: {:?} rw_txn_ptr: {}", thread::current().id(), rw_txn_ptr);
                             } else {
@@ -70,7 +87,6 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::Query(db_env, db_name, keys, cb)) => {
                             let mut values = Vec::new();
-                            // let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
                             let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
 
                             let rw_txn = unsafe {
@@ -98,6 +114,12 @@ impl ThreadPool {
                                 }
                             }
                             cb(Ok(values));
+
+                            // let txn = db_env.begin_ro_txn().unwrap();
+                            // match txn.get(db, b"hello1") {
+                            //     Ok(v) => println!("query hello1: {:?}", v),
+                            //     Err(e) => println!("query error: {:?}", e.to_string())
+                            // }
                         },
 
                         Ok(LmdbMessage::IterItems(db_env, db_name, descending, key, cb)) => {
@@ -151,6 +173,27 @@ impl ThreadPool {
                                     };
                                 }
                             }
+
+                            // let mut txn = db_env.begin_rw_txn().unwrap();
+
+                            // txn.put(db, b"hello1", b"world1", WriteFlags::empty());
+                            // txn.put(db, b"hello2", b"world2", WriteFlags::empty());
+                            // txn.put(db, b"hello3", b"world3", WriteFlags::empty());
+                            // match txn.commit() {
+                            //     Ok(_) => println!("commit success"),
+                            //     Err(e) => println!("error: {:?}", e.to_string()),
+                            // }
+
+                            // txn = db_env.begin_rw_txn().unwrap();
+                            // match txn.del(db, b"hello1", None) {
+                            //     Ok(_) => println!("del success"),
+                            //     Err(e) => println!("del failed {:?}", e.to_string()),
+                            // }
+
+                            // match txn.commit() {
+                            //     Ok(_) => println!("commit del success"),
+                            //     Err(e) => println!("{:?}", e.to_string()),
+                            // }
                         },
 
                         // only commit rw txn
@@ -166,7 +209,7 @@ impl ThreadPool {
                                 },
                                 Err(e) => {
                                     cb(Err(e.to_string()));
-                                    println!("commit failed: {:?}", e);
+                                    println!("commit failed: {}", e);
                                 }
                             }
                         },
