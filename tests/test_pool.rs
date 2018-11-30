@@ -75,7 +75,7 @@ fn test_new_txn() {
 
     // test query
     tx1.send(LmdbMessage::Query(env.clone(), "test".to_string(), items.clone(), Arc::new(move |q| {
-        // q.is_err();
+        println!("queried value: {:?}", q);
     })));
     thread::sleep_ms(1000);
 

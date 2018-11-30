@@ -64,7 +64,7 @@ impl ThreadPool {
                                 ro_txn_ptr = unsafe {
                                     Box::into_raw(Box::new(db_env.begin_ro_txn().unwrap())) as usize
                                 };
-                                println!("ro_txn_ptr: {}", ro_txn_ptr);
+                                println!("create ro txn in thread: {:?} ro_txn_ptr: {}", thread::current().id(), ro_txn_ptr);
                             }
                         },
 
@@ -129,7 +129,6 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::Modify(db_env, db_name, keys, cb)) => {
                             let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
-                println!("create thread with thread id {:?}", thread::current().id());
                             let mut rw_txn = unsafe {
                                 Box::from_raw(rw_txn_ptr as *mut RwTransaction)
                             };
