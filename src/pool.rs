@@ -179,11 +179,13 @@ impl ThreadPool {
                             };
                             rw_txn.abort();
                             println!("rollback in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
+                            cb(Ok(()));
                         },
 
                         Err(e) => {
                             // unexpected message, do nothing
                         },
+
                     }
                 }
             });
