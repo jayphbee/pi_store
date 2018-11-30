@@ -40,10 +40,8 @@ fn test_new_txn() {
                 .open(Path::new("_$lmdb"))
                 .unwrap());
     thread::sleep_ms(1000);
-    
-    let _ = env.create_db(Some("test"), DatabaseFlags::empty());
 
-    // assert_eq!(p.idle_threads(), 3);
+    let _ = env.create_db(Some("test"), DatabaseFlags::empty());
 
     //test new tab txn
     assert_eq!(tx.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
@@ -66,11 +64,10 @@ fn test_new_txn() {
 
     //test commit
     tx.send(LmdbMessage::Commit(env.clone(), "test".to_string(), Arc::new(move |c| {
-        c.is_err();
+        // c.is_err();
     }))).is_ok();
     thread::sleep_ms(1000);
 
-    p.push(tx);
     let tx1 = p.pop().unwrap();
 
     assert_eq!(tx1.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
@@ -81,6 +78,11 @@ fn test_new_txn() {
         // q.is_err();
     })));
     thread::sleep_ms(1000);
+
+    p.push(tx);
+    p.push(tx1);
+
+    assert_eq!(p.idle_threads(), 10);
 }
 
 fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>,) -> TabKV {
