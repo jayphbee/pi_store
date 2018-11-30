@@ -169,7 +169,6 @@ impl ThreadPool {
                                     println!("commit failed: {:?}", e);
                                 }
                             }
-                            println!("receive commit");
                         },
 
                         // only abort tw txn
