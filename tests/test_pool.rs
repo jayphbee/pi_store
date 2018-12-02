@@ -50,11 +50,11 @@ fn test_new_txn() {
     // thread::sleep_ms(1000);
 
     let mut wb1 = WriteBuffer::new();
-    wb1.write_utf8("key1");
+    wb1.write_utf8("key2");
     let tab_name = Atom::from("player");
     let ware_name = Atom::from("file_test");
     let k1 = Arc::new(wb1.get_byte().to_vec());
-    let value1 = Arc::new(Vec::from(String::from("value1").as_bytes()));
+    let value1 = Arc::new(Vec::from(String::from("value2").as_bytes()));
     let item1 = create_tabkv(ware_name.clone(), tab_name.clone(), k1.clone(), 0, Some(value1.clone()));
     let items =  Arc::new(vec![item1.clone()]);
 
@@ -64,28 +64,32 @@ fn test_new_txn() {
     })));
     thread::sleep_ms(1000);
 
-    // //test commit
-    // tx.send(LmdbMessage::Commit("test".to_string(), Arc::new(move |c| {
-    //     // c.is_err();
-    // }))).is_ok();
-    // thread::sleep_ms(1000);
+    //test commit
+    tx.send(LmdbMessage::Commit("test".to_string(), Arc::new(move |c| {
+        // c.is_err();
+    }))).is_ok();
+    thread::sleep_ms(1000);
+
+    // test iter items
+    tx.send(LmdbMessage::IterItems("test".to_string(), true, None, Arc::new(move |it| {})));
+    thread::sleep_ms(1000);
 
     // let tx1 = p.pop().unwrap();
 
     // assert_eq!(tx1.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
     // thread::sleep_ms(1000);
 
-    // // test query
-    // tx.send(LmdbMessage::Query("test".to_string(), items.clone(), Arc::new(move |q| {
-    //     println!("queried value: {:?}", q);
-    // })));
-    // thread::sleep_ms(1000);
-
-    // test rollback
-    tx.send(LmdbMessage::Rollback("test".to_string(), Arc::new(move |q| {
+    // test query
+    tx.send(LmdbMessage::Query("test".to_string(), items.clone(), Arc::new(move |q| {
         println!("queried value: {:?}", q);
     })));
     thread::sleep_ms(1000);
+
+    // // test rollback
+    // tx.send(LmdbMessage::Rollback("test".to_string(), Arc::new(move |q| {
+    //     println!("rollbacked");
+    // })));
+    // thread::sleep_ms(1000);
 
     // p.push(tx);
     // p.push(tx1);

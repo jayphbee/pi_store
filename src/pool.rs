@@ -24,8 +24,8 @@ use pi_db::db::{
 pub enum LmdbMessage {
     NewTxn(Arc<Environment>, String, bool),
     Query(String, Arc<Vec<TabKV>>, TxQueryCallback),
-    IterItems(Arc<Environment>, String, bool, Option<Bin>, Arc<Fn(IterResult)>),
-    IterKeys(Arc<Environment>, String, Arc<Fn(KeyIterResult)>),
+    IterItems(String, bool, Option<Bin>, Arc<Fn(IterResult)>),
+    IterKeys(String, Arc<Fn(KeyIterResult)>),
     Modify(String, Arc<Vec<TabKV>>, TxCallback),
     Commit(String, TxCallback),
     Rollback(String, TxCallback),
@@ -54,11 +54,6 @@ impl ThreadPool {
             let (tx, rx) = channel();
 
             thread::spawn(move || {
-                println!("create thread with thread id {:?}", thread::current().id());
-
-                let mut rw_txn_ptr: usize = 0;
-                let mut ro_txn_ptr: usize = 0;
-
                 let env = clone_env;
                 let mut thread_local_txn: Option<RwTransaction> = None;
 
@@ -66,34 +61,7 @@ impl ThreadPool {
                     match rx.recv() {
                         // This is the very first message should be sent before any database operation, or will be crashed.
                         Ok(LmdbMessage::NewTxn(db_env, db_name, writable)) => {
-                            let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
-                            if writable {
-                                rw_txn_ptr = unsafe {
-                                    match db_env.begin_rw_txn() {
-                                        Ok(mut txn) => {
-                                            match txn.put(db, b"foo", b"bar", WriteFlags::empty()) {
-                                                Ok(_) => println!("NewTxn write success"),
-                                                Err(e) => println!("Netxn write failed: {:?}", e)
-                                            }
-                                            let boxed = Box::into_raw(Box::new(txn)) as usize;
-                                            println!("after boxed: {:?}", boxed);
-                                            boxed
-                                        },
-                                        Err(e) => {
-                                            println!("falid to create txn");
-                                            0
-                                        }
-                                    }
-
-                                    // Box::into_raw(Box::new(db_env.begin_rw_txn().unwrap())) as usize
-                                };
-                                println!("create rw txn in thread: {:?} rw_txn_ptr: {}", thread::current().id(), rw_txn_ptr);
-                            } else {
-                                ro_txn_ptr = unsafe {
-                                    Box::into_raw(Box::new(db_env.begin_ro_txn().unwrap())) as usize
-                                };
-                                println!("create ro txn in thread: {:?} ro_txn_ptr: {}", thread::current().id(), ro_txn_ptr);
-                            }
+                            
                         },
 
                         Ok(LmdbMessage::Query(db_name, keys, cb)) => {
@@ -127,27 +95,35 @@ impl ThreadPool {
                             cb(Ok(values));
                         },
 
-                        Ok(LmdbMessage::IterItems(db_env, db_name, descending, key, cb)) => {
-                            let db = db_env.open_db(Some(&db_name.to_string())).unwrap();
-                            let ro_txn = unsafe {
-                                Box::from_raw(ro_txn_ptr as *mut RoTransaction)
-                            };
-                            let cursor = ro_txn.open_ro_cursor(db).unwrap();
+                        Ok(LmdbMessage::IterItems(db_name, descending, key, cb)) => {
+                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
 
-                            if let Some(k) = key.clone() {
-                                cursor.get(Some(k.as_ref()), None, MDB_SET);
-                            } else {
-                                if descending {
-                                    cursor.get(None, None, MDB_FIRST);
-                                } else {
-                                    cursor.get(None, None, MDB_LAST);
-                                }
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                            }
+
+                            let txn = thread_local_txn.take().unwrap();
+
+                            let mut cursor = txn.open_ro_cursor(db).unwrap();
+
+                            // if let Some(k) = key.clone() {
+                            //     cursor.get(Some(k.as_ref()), None, MDB_SET);
+                            // } else {
+                            //     if descending {
+                            //         println!("{:?}", cursor.get(None, None, MDB_FIRST));
+                            //     } else {
+                            //         println!("{:?}", cursor.get(None, None, MDB_LAST));
+                            //     }
+                            // }
+
+                            for item in cursor.iter() {
+                                println!("{:?}", item);
                             }
 
                             println!("iter items");
                         },
 
-                        Ok(LmdbMessage::IterKeys(db_env, db_name, cb)) => {
+                        Ok(LmdbMessage::IterKeys(db_name, cb)) => {
                             let db = env.open_db(Some(&db_name.to_string())).unwrap();
 
                             if thread_local_txn.is_none() {
@@ -199,6 +175,7 @@ impl ThreadPool {
                                     };
                                 }
                             }
+                            thread_local_txn = Some(rw_txn);
                         },
 
                         // only commit rw txn
@@ -234,7 +211,6 @@ impl ThreadPool {
                             let mut rw_txn = thread_local_txn.take().unwrap();
 
                             rw_txn.abort();
-                            println!("rollback in thread {:?} with rw_tx_ptr: {}", thread::current().id(), rw_txn_ptr);
                             cb(Ok(()));
                         },
 
