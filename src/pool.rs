@@ -126,6 +126,8 @@ impl ThreadPool {
                                         cb(Ok(None))
                                     }
                                 }
+                            } else {
+                                cb(Err("Iterator not initialized".to_string()))
                             }
                         },
 
@@ -159,6 +161,8 @@ impl ThreadPool {
                                         cb(Ok(None))
                                     }
                                 }
+                            } else {
+                                cb(Err("Iterator not initialized".to_string()))
                             }
                         },
 
