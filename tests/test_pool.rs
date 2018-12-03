@@ -45,12 +45,12 @@ fn test_new_txn() {
 
     let _ = env.create_db(Some("test"), DatabaseFlags::empty());
 
-    // // test new tab txn
-    // assert_eq!(tx.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
-    // thread::sleep_ms(1000);
+    // test new tab txn
+    assert_eq!(tx.send(LmdbMessage::NewTxn("test".to_string(), true)).is_err(), false);
+    thread::sleep_ms(1000);
 
     let mut wb1 = WriteBuffer::new();
-    wb1.write_utf8("key2");
+    wb1.write_utf8("key4");
     let tab_name = Atom::from("player");
     let ware_name = Atom::from("file_test");
     let k1 = Arc::new(wb1.get_byte().to_vec());
@@ -71,13 +71,22 @@ fn test_new_txn() {
     thread::sleep_ms(1000);
 
     // test iter items
-    tx.send(LmdbMessage::IterItems("test".to_string(), true, None, Arc::new(move |it| {})));
+    tx.send(LmdbMessage::CreateItemIter("test".to_string(), true, None));
     thread::sleep_ms(1000);
 
-    // let tx1 = p.pop().unwrap();
+    // test next item
+    tx.send(LmdbMessage::NextItem("test".to_string(), Arc::new(move |item|{
+        println!("item: {:?}", item);
+    })));
 
-    // assert_eq!(tx1.send(LmdbMessage::NewTxn(env.clone(), "test".to_string(), true)).is_err(), false);
-    // thread::sleep_ms(1000);
+    // test iter kyes
+    tx.send(LmdbMessage::CreateKeyIter("test".to_string(), true, None));
+    thread::sleep_ms(1000);
+
+    // test next key
+    tx.send(LmdbMessage::NextKey("test".to_string(), Arc::new(move |key| {
+        println!("key: {:?}", key);
+    })));
 
     // test query
     tx.send(LmdbMessage::Query("test".to_string(), items.clone(), Arc::new(move |q| {
@@ -85,27 +94,16 @@ fn test_new_txn() {
     })));
     thread::sleep_ms(1000);
 
-    // // test rollback
-    // tx.send(LmdbMessage::Rollback("test".to_string(), Arc::new(move |q| {
-    //     println!("rollbacked");
-    // })));
-    // thread::sleep_ms(1000);
+    // test rollback
+    tx.send(LmdbMessage::Rollback("test".to_string(), Arc::new(move |q| {
+        println!("rollbacked: {:?}", q);
+        // assert!(q.is_ok());
+    })));
+    thread::sleep_ms(1000);
 
-    // p.push(tx);
-    // p.push(tx1);
+    p.push(tx);
 
-    // assert_eq!(p.idle_threads(), 10);
-
-    // test re-entrance
-    // tx.send(LmdbMessage::IterKeys(env.clone(), "test".to_string(), Arc::new(move |x| {
-
-    // })));
-    // thread::sleep_ms(1000);
-
-    // tx.send(LmdbMessage::IterKeys(env.clone(), "test".to_string(), Arc::new(move |x| {
-
-    // })));
-    // thread::sleep_ms(1000);
+    assert_eq!(p.idle_threads(), 10);
 }
 
 fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>,) -> TabKV {

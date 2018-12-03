@@ -8,7 +8,7 @@ use lmdb::{
     Environment, Database, WriteFlags, Error, Transaction, EnvironmentFlags,
     DatabaseFlags, RwTransaction, RoTransaction, RoCursor, Cursor, RwCursor,
 
-    mdb_set_compare, MDB_txn, MDB_dbi, MDB_val, MDB_cmp_func
+    mdb_set_compare, MDB_txn, MDB_dbi, MDB_val, MDB_cmp_func, Iter as LmdbIter
 };
 
 use lmdb_file::{
@@ -25,19 +25,15 @@ use pi_db::db::{
 use pi_lib::bon::{ReadBuffer, WriteBuffer, Encode, Decode};
 
 pub enum LmdbMessage {
-    NewTxn(Arc<Environment>, String, bool),
+    NewTxn(String, bool),
     Query(String, Arc<Vec<TabKV>>, TxQueryCallback),
-    IterItems(String, bool, Option<Bin>, Arc<Fn(IterResult)>),
-    IterKeys(String, Arc<Fn(KeyIterResult)>),
+    NextItem(String, Arc<Fn(NextResult<(Bin, Bin)>)>),
+    NextKey(String, Arc<Fn(NextResult<Bin>)>),
+    CreateItemIter(String, bool, Option<Bin>),
+    CreateKeyIter(String, bool, Option<Bin>),
     Modify(String, Arc<Vec<TabKV>>, TxCallback),
     Commit(String, TxCallback),
     Rollback(String, TxCallback),
-}
-
-#[derive(Debug, Clone)]
-pub enum TxnType {
-    ReadWrite,
-    ReadOnly
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -49,7 +45,7 @@ pub struct ThreadPool {
 }
 
 impl ThreadPool {
-    pub fn with_capacity(cap: usize, env: Arc::<Environment>) -> Self {
+    pub fn with_capacity(cap: usize, env: Arc<Environment>) -> Self {
         let mut senders = Vec::new();
 
         for i in 0..cap {
@@ -59,11 +55,13 @@ impl ThreadPool {
             thread::spawn(move || {
                 let env = clone_env;
                 let mut thread_local_txn: Option<RwTransaction> = None;
+                let mut thread_local_cursor: Option<RwCursor> = None;
+                let mut thread_local_iter: Option<LmdbIter>  = None;
 
                 loop {
                     match rx.recv() {
-                        Ok(LmdbMessage::NewTxn(db_env, db_name, writable)) => {
-
+                        Ok(LmdbMessage::NewTxn(db_name, writable)) => {
+                            thread_local_txn = env.begin_rw_txn().ok();
                         },
 
                         Ok(LmdbMessage::Query(db_name, keys, cb)) => {
@@ -98,51 +96,68 @@ impl ThreadPool {
                             cb(Ok(values));
                         },
 
-                        Ok(LmdbMessage::IterItems(db_name, descending, key, cb)) => {
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                        Ok(LmdbMessage::CreateItemIter(db_name, descending, key)) => {
+                            match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
+                                (true, true) => {
+                                    let db = env.open_db(Some(&db_name.to_string())).unwrap();
 
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
-                            }
+                                    thread_local_txn = env.begin_rw_txn().ok();
+                                    let txn = thread_local_txn.as_mut().unwrap();
+                                    let mut cursor = txn.open_rw_cursor(db).unwrap();
+                                    if let Some(k) = key {
+                                        thread_local_iter = Some(cursor.iter_from(k.to_vec()));
+                                    } else {
+                                        thread_local_iter = Some(cursor.iter_start());
+                                    }
+                                },
+                                _ => {
 
-                            let txn = thread_local_txn.take().unwrap();
-                            unsafe { mdb_set_compare(txn.txn(), db.dbi(), mdb_cmp_func as *mut MDB_cmp_func); }
-                            let mut cursor = txn.open_ro_cursor(db).unwrap();
-
-                            if let Some(k) = key.clone() {
-                                println!("get items1 {:?}", cursor.get(Some(k.as_ref()), None, MDB_SET));
-                            } else {
-                                if descending {
-                                    println!("get items2 {:?}", cursor.get(None, None, MDB_FIRST));
-                                } else {
-                                    println!("get items3 {:?}", cursor.get(None, None, MDB_LAST));
                                 }
-                            }
-
-                            for item in cursor.iter() {
-                                println!("{:?}", item);
                             }
                         },
 
-                        Ok(LmdbMessage::IterKeys(db_name, cb)) => {
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
-
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
+                        Ok(LmdbMessage::NextItem(db_name, cb)) => {
+                            if let Some(ref mut iter) = thread_local_iter {
+                                match iter.next() {
+                                    Some(v) => {
+                                        cb(Ok(Some((Arc::new(v.0.to_vec()), Arc::new(v.1.to_vec())))))
+                                    },
+                                    None => {
+                                        cb(Ok(None))
+                                    }
+                                }
                             }
+                        },
 
-                            thread_local_txn.as_mut().unwrap().put(db, b"foo", b"bar", WriteFlags::empty());
-                            thread_local_txn.as_mut().unwrap().put(db, b"foo1", b"bar1", WriteFlags::empty());
+                        Ok(LmdbMessage::CreateKeyIter(db_name, descending, key)) => {
+                            match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
+                                (true, true) => {
+                                    let db = env.open_db(Some(&db_name.to_string())).unwrap();
 
-                            let txn = thread_local_txn.take().unwrap();
-                            unsafe { mdb_set_compare(txn.txn(), db.dbi(), mdb_cmp_func as *mut MDB_cmp_func); }
-
-                            match txn.commit() {
-                                Ok(_) => {
-                                    println!("gtxn commit success: {:?}", thread_local_txn);
+                                    thread_local_txn = env.begin_rw_txn().ok();
+                                    let txn = thread_local_txn.as_mut().unwrap();
+                                    let mut cursor = txn.open_rw_cursor(db).unwrap();
+                                    if let Some(k) = key {
+                                        thread_local_iter = Some(cursor.iter_from(k.to_vec()));
+                                    } else {
+                                        thread_local_iter = Some(cursor.iter_start());
+                                    }
                                 },
-                                Err(_) => {
-                                    println!("gtxn commit failed");
+                                _ => {
+
+                                }
+                            }
+                        },
+
+                        Ok(LmdbMessage::NextKey(db_name, cb)) => {
+                            if let Some(ref mut iter) = thread_local_iter {
+                                match iter.next() {
+                                    Some(v) => {
+                                        cb(Ok(Some(Arc::new(v.0.to_vec()))))
+                                    },
+                                    None => {
+                                        cb(Ok(None))
+                                    }
                                 }
                             }
                         },
@@ -154,7 +169,7 @@ impl ThreadPool {
                                 thread_local_txn = env.begin_rw_txn().ok();
                             }
 
-                            let mut rw_txn = thread_local_txn.take().unwrap();
+                            let mut rw_txn = thread_local_txn.as_mut().unwrap();
                             unsafe { mdb_set_compare(rw_txn.txn(), db.dbi(), mdb_cmp_func as *mut MDB_cmp_func); }
 
                             for kv in keys.iter() {
@@ -177,43 +192,32 @@ impl ThreadPool {
                                     };
                                 }
                             }
-                            thread_local_txn = Some(rw_txn);
                         },
 
-                        // only commit rw txn
                         Ok(LmdbMessage::Commit(db_name, cb)) => {
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
-
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
-                            }
-
-                            let mut rw_txn = thread_local_txn.take().unwrap();
-
-                            match rw_txn.commit() {
-                                Ok(_) => {
-                                    cb(Ok(()));
-                                    println!("commit success");
-                                },
-                                Err(e) => {
-                                    cb(Err(e.to_string()));
-                                    println!("commit failed: {}", e);
+                            if let Some(txn) = thread_local_txn.take() {
+                                match txn.commit() {
+                                    Ok(_) => {
+                                        cb(Ok(()));
+                                        println!("commit success");
+                                    },
+                                    Err(e) => {
+                                        cb(Err(e.to_string()));
+                                        println!("commit failed: {}", e);
+                                    }
                                 }
+                            } else {
+                                cb(Err("Not in txn context".to_string()))
                             }
                         },
 
-                        // only abort tw txn
                         Ok(LmdbMessage::Rollback(db_name, cb)) => {
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
-
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
+                            if let Some(txn) = thread_local_txn.take() {
+                                txn.abort();
+                                cb(Ok(()))
+                            } else {
+                                cb(Err("Not in txn context".to_string()))
                             }
-
-                            let mut rw_txn = thread_local_txn.take().unwrap();
-
-                            rw_txn.abort();
-                            cb(Ok(()));
                         },
 
                         Err(e) => {
