@@ -2,6 +2,7 @@ use std::thread;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{ Sender, Receiver, channel };
+use std::slice::from_raw_parts;
 
 use lmdb::{
     Environment, Database, WriteFlags, Error, Transaction, EnvironmentFlags,
@@ -20,6 +21,8 @@ use pi_db::db::{
     Tab, OpenTab, Ware, WareSnapshot, TxState, Iter, CommitResult,
     RwLog, TabMeta
 };
+
+use pi_lib::bon::{ReadBuffer, WriteBuffer, Encode, Decode};
 
 pub enum LmdbMessage {
     NewTxn(Arc<Environment>, String, bool),
@@ -59,9 +62,8 @@ impl ThreadPool {
 
                 loop {
                     match rx.recv() {
-                        // This is the very first message should be sent before any database operation, or will be crashed.
                         Ok(LmdbMessage::NewTxn(db_env, db_name, writable)) => {
-                            
+
                         },
 
                         Ok(LmdbMessage::Query(db_name, keys, cb)) => {
@@ -73,6 +75,7 @@ impl ThreadPool {
                             }
 
                             let txn = thread_local_txn.take().unwrap();
+                            unsafe { mdb_set_compare(txn.txn(), db.dbi(), mdb_cmp_func as *mut MDB_cmp_func); }
 
                             for kv in keys.iter() {
                                 match txn.get(db, kv.key.as_ref()) {
@@ -103,24 +106,22 @@ impl ThreadPool {
                             }
 
                             let txn = thread_local_txn.take().unwrap();
-
+                            unsafe { mdb_set_compare(txn.txn(), db.dbi(), mdb_cmp_func as *mut MDB_cmp_func); }
                             let mut cursor = txn.open_ro_cursor(db).unwrap();
 
-                            // if let Some(k) = key.clone() {
-                            //     cursor.get(Some(k.as_ref()), None, MDB_SET);
-                            // } else {
-                            //     if descending {
-                            //         println!("{:?}", cursor.get(None, None, MDB_FIRST));
-                            //     } else {
-                            //         println!("{:?}", cursor.get(None, None, MDB_LAST));
-                            //     }
-                            // }
+                            if let Some(k) = key.clone() {
+                                println!("get items1 {:?}", cursor.get(Some(k.as_ref()), None, MDB_SET));
+                            } else {
+                                if descending {
+                                    println!("get items2 {:?}", cursor.get(None, None, MDB_FIRST));
+                                } else {
+                                    println!("get items3 {:?}", cursor.get(None, None, MDB_LAST));
+                                }
+                            }
 
                             for item in cursor.iter() {
                                 println!("{:?}", item);
                             }
-
-                            println!("iter items");
                         },
 
                         Ok(LmdbMessage::IterKeys(db_name, cb)) => {
@@ -133,9 +134,10 @@ impl ThreadPool {
                             thread_local_txn.as_mut().unwrap().put(db, b"foo", b"bar", WriteFlags::empty());
                             thread_local_txn.as_mut().unwrap().put(db, b"foo1", b"bar1", WriteFlags::empty());
 
-                            let txn = thread_local_txn.take();
+                            let txn = thread_local_txn.take().unwrap();
+                            unsafe { mdb_set_compare(txn.txn(), db.dbi(), mdb_cmp_func as *mut MDB_cmp_func); }
 
-                            match txn.unwrap().commit() {
+                            match txn.commit() {
                                 Ok(_) => {
                                     println!("gtxn commit success: {:?}", thread_local_txn);
                                 },
@@ -153,6 +155,7 @@ impl ThreadPool {
                             }
 
                             let mut rw_txn = thread_local_txn.take().unwrap();
+                            unsafe { mdb_set_compare(rw_txn.txn(), db.dbi(), mdb_cmp_func as *mut MDB_cmp_func); }
 
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {
@@ -166,7 +169,6 @@ impl ThreadPool {
                                         }
                                     };
                                 } else {
-                                    println!("del");
                                     match rw_txn.del(db, kv.key.as_ref(), None) {
                                         Ok(_) => {
                                             println!("delete {:?} success", kv.clone().key.as_ref());
@@ -247,5 +249,24 @@ impl ThreadPool {
 
     pub fn idle_threads(&self) -> usize {
         self.idle
+    }
+}
+
+// comprator function
+fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
+    unsafe {
+        let buf1 = from_raw_parts::<u8>((*a).mv_data as *const u8, (*a).mv_size);
+        let buf2 = from_raw_parts::<u8>((*b).mv_data as *const u8, (*b).mv_size);
+
+        let b1 = ReadBuffer::new(buf1, 0);
+        let b2 = ReadBuffer::new(buf2, 0);
+
+         if b1 > b2 {
+            1
+        } else if b1 == b2 {
+            0
+        } else {
+            -1
+        }
     }
 }
