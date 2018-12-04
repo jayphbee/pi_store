@@ -35,25 +35,6 @@ fn test_create_transaction() {
     let txn1 = tab.transaction(&Guid(0), false);
     let txn2 = tab.transaction(&Guid(0), false);
     let txn3 = tab.transaction(&Guid(0), false);
-    // let t1 = tab.clone();
-    // let t2 = tab.clone();
-    // let t3 = tab.clone();
-
-    // thread::spawn(move || {
-    //     t1.transaction(&Guid(0), false);
-    // });
-    // thread::sleep_ms(1000);
-
-    // thread::spawn(move || {
-
-    //     t2.transaction(&Guid(0), false);
-    // });
-    // thread::sleep_ms(1000);
-
-    // thread::spawn(move || {
-    //     t3.transaction(&Guid(0), true);
-    // });
-    // thread::sleep_ms(1000);
 }
 
 #[test]
@@ -114,17 +95,17 @@ fn test_get_put_iter() {
             println!("modify data: {:?}", modify);
         }),
     );
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     txn4.commit(Arc::new(move |c| {
         println!("commit");
     }));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     txn4.rollback(Arc::new(move |c| {
         println!("rollback");
     }));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     txn4.query(
         items.clone(),
@@ -134,7 +115,7 @@ fn test_get_put_iter() {
             println!("query data: {:?}", query);
         }),
     );
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     txn4.iter(
         None,
@@ -146,7 +127,7 @@ fn test_get_put_iter() {
             }));
         }),
     );
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
     // println!("{:?}", tab);
 }
 
@@ -206,7 +187,7 @@ fn test_lmdb_ware_house() {
             }));
         }));
     }));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     tab_txn1.query(arr, None, true, Arc::new(move |q| {
         println!("test query: {:?}", q);

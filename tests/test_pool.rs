@@ -36,7 +36,7 @@ fn test_new_txn() {
             .open(Path::new("_$lmdb"))
             .unwrap(),
     );
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     let mut p = ThreadPool::with_capacity(10, env.clone());
     let tx = p.pop().unwrap();
@@ -49,7 +49,7 @@ fn test_new_txn() {
             .is_err(),
         false
     );
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     let mut wb1 = WriteBuffer::new();
     wb1.write_utf8("key4");
@@ -70,21 +70,21 @@ fn test_new_txn() {
     tx.send(LmdbMessage::Modify("test".to_string(), items.clone(), Arc::new(move |m| {
         assert!(m.is_err());
     })));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     //test commit
     tx.send(LmdbMessage::Commit("test".to_string(), Arc::new(move |c| {
         // c.is_err();
     }))).is_ok();
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     // test iter items
     tx.send(LmdbMessage::CreateItemIter("test".to_string(), true, None));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     // test iter items
     tx.send(LmdbMessage::CreateItemIter("test".to_string(), true, None));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     // test next item
     tx.send(LmdbMessage::NextItem(
@@ -96,7 +96,7 @@ fn test_new_txn() {
 
     // test iter kyes
     tx.send(LmdbMessage::CreateKeyIter("test".to_string(), true, None));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     // test next key
     tx.send(LmdbMessage::NextKey(
@@ -114,7 +114,7 @@ fn test_new_txn() {
             println!("queried value: {:?}", q);
         }),
     ));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     // test rollback
     tx.send(LmdbMessage::Rollback(
@@ -124,7 +124,7 @@ fn test_new_txn() {
             // assert!(q.is_ok());
         }),
     ));
-    thread::sleep_ms(1000);
+    thread::sleep_ms(50);
 
     p.push(tx);
 
