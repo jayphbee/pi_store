@@ -66,17 +66,17 @@ fn test_new_txn() {
     );
     let items = Arc::new(vec![item1.clone()]);
 
-    // // test modify
-    // tx.send(LmdbMessage::Modify("test".to_string(), items.clone(), Arc::new(move |m| {
-    //     assert!(m.is_err());
-    // })));
-    // thread::sleep_ms(1000);
+    // test modify
+    tx.send(LmdbMessage::Modify("test".to_string(), items.clone(), Arc::new(move |m| {
+        assert!(m.is_err());
+    })));
+    thread::sleep_ms(1000);
 
-    // //test commit
-    // tx.send(LmdbMessage::Commit("test".to_string(), Arc::new(move |c| {
-    //     // c.is_err();
-    // }))).is_ok();
-    // thread::sleep_ms(1000);
+    //test commit
+    tx.send(LmdbMessage::Commit("test".to_string(), Arc::new(move |c| {
+        // c.is_err();
+    }))).is_ok();
+    thread::sleep_ms(1000);
 
     // test iter items
     tx.send(LmdbMessage::CreateItemIter("test".to_string(), true, None));
