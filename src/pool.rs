@@ -1,6 +1,7 @@
 use std::thread;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::{ Sender, Receiver, channel };
 use std::slice::from_raw_parts;
 
@@ -276,5 +277,26 @@ fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
         } else {
             -1
         }
+    }
+}
+
+pub struct ThreadPoolTabTxn {
+    sender: Sender<LmdbMessage>,
+    thread_pool: Arc<Mutex<ThreadPool>>
+}
+
+impl ThreadPoolTabTxn {
+    pub fn new(sender: Sender<LmdbMessage>, thread_pool: Arc<Mutex<ThreadPool>>) -> Self {
+        ThreadPoolTabTxn {
+            sender,
+            thread_pool
+        }
+    }
+}
+
+impl Drop for ThreadPoolTabTxn {
+    fn drop(&mut self) {
+        let mut guard = self.thread_pool.lock().unwrap();
+        (*guard).push(self.sender.clone());
     }
 }
