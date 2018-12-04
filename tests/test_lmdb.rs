@@ -1,28 +1,25 @@
-extern crate pi_store;
-extern crate pi_lib;
-extern crate pi_db;
 extern crate pi_base;
+extern crate pi_db;
+extern crate pi_lib;
+extern crate pi_store;
 extern crate tempdir;
 
 use std::sync::Arc;
 use std::thread;
 
-use pi_base::worker_pool::WorkerPool;
 use pi_base::pi_base_impl::STORE_TASK_POOL;
+use pi_base::worker_pool::WorkerPool;
 
 use pi_lib::atom::Atom;
+use pi_lib::bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use pi_lib::guid::Guid;
 use pi_lib::sinfo::{EnumType, StructInfo};
-use pi_lib::bon::{ReadBuffer, WriteBuffer, Encode, Decode};
 
 use pi_db::db::{
-    Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult,
-    NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn,
-    Tab, OpenTab, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult,
-    RwLog, TabMeta
+    Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,
+    OpenTab, RwLog, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState,
+    Txn, Ware, WareSnapshot,
 };
-
-
 
 use pi_store::lmdb_file::{LmdbTable, LmdbWareHouse};
 
@@ -80,19 +77,41 @@ fn test_get_put_iter() {
     wb2.write_utf8("key2");
     let k2 = Arc::new(wb2.get_byte().to_vec());
 
-
     let mut wb3 = WriteBuffer::new();
     wb3.write_utf8("key3");
     let k3 = Arc::new(wb3.get_byte().to_vec());
 
-    let item1 = create_tabkv(ware_name.clone(), tab_name.clone(), k1.clone(), 0, Some(value1.clone()));
-    let item2 = create_tabkv(ware_name.clone(), tab_name.clone(), k2.clone(), 0, Some(value2.clone()));
-    let item3 = create_tabkv(ware_name.clone(), tab_name.clone(), k3.clone(), 0, Some(value3.clone()));
-    let items =  Arc::new(vec![item1.clone(), item2.clone(), item3.clone()]);
+    let item1 = create_tabkv(
+        ware_name.clone(),
+        tab_name.clone(),
+        k1.clone(),
+        0,
+        Some(value1.clone()),
+    );
+    let item2 = create_tabkv(
+        ware_name.clone(),
+        tab_name.clone(),
+        k2.clone(),
+        0,
+        Some(value2.clone()),
+    );
+    let item3 = create_tabkv(
+        ware_name.clone(),
+        tab_name.clone(),
+        k3.clone(),
+        0,
+        Some(value3.clone()),
+    );
+    let items = Arc::new(vec![item1.clone(), item2.clone(), item3.clone()]);
 
-    txn4.modify(items.clone(), None, false, Arc::new(move |modify| {
-        println!("modify data: {:?}", modify);
-    }));
+    txn4.modify(
+        items.clone(),
+        None,
+        false,
+        Arc::new(move |modify| {
+            println!("modify data: {:?}", modify);
+        }),
+    );
     thread::sleep_ms(1000);
 
     txn4.commit(Arc::new(move |c| {
@@ -105,16 +124,26 @@ fn test_get_put_iter() {
     }));
     thread::sleep_ms(1000);
 
-    txn4.query(items.clone(), None, false, Arc::new(move |query| {
-        println!("query data: {:?}", query);
-    }));
+    txn4.query(
+        items.clone(),
+        None,
+        false,
+        Arc::new(move |query| {
+            println!("query data: {:?}", query);
+        }),
+    );
     thread::sleep_ms(1000);
 
-    txn4.iter(None, false, None, Arc::new(move |items| {
-        items.unwrap().next(Arc::new(move |item| {
-            println!("get item: {:?}", item);
-        }));
-    }));
+    txn4.iter(
+        None,
+        false,
+        None,
+        Arc::new(move |items| {
+            items.unwrap().next(Arc::new(move |item| {
+                println!("get item: {:?}", item);
+            }));
+        }),
+    );
     thread::sleep_ms(1000);
     // println!("{:?}", tab);
 }
@@ -143,6 +172,12 @@ fn test_lmdb_ware_house() {
     // let tab_txn1 = snapshot.tab_txn(&Atom::from("_$sinfo"), &Guid(0), true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
 }
 
-fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>,) -> TabKV{
-    TabKV{ware, tab, key, index, value}
+fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>) -> TabKV {
+    TabKV {
+        ware,
+        tab,
+        key,
+        index,
+        value,
+    }
 }

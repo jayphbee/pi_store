@@ -210,7 +210,7 @@
 //             }
 //             free(sclone);
 //             cb(Ok(value_arr))
-            
+
 //         };
 //         send_task(Box::new(func));
 //         None
@@ -308,7 +308,7 @@
 
 // impl FileMetaTxn{
 //     //tab_txn 必须是Arc<FileTabTxn>
-//     fn new(tab_txn: Arc<TabTxn>) -> FileMetaTxn{ 
+//     fn new(tab_txn: Arc<TabTxn>) -> FileMetaTxn{
 //         FileMetaTxn(tab_txn)
 //     }
 // }
@@ -534,7 +534,7 @@
 //         };
 //         send_task(Box::new(func));
 //         None
-//     } 
+//     }
 // }
 
 // pub struct KeyFDBIterator{
@@ -572,7 +572,7 @@
 //         };
 //         send_task(Box::new(func));
 //         None
-//     } 
+//     }
 // }
 
 // fn send_task(func: Box<FnBox()>){
@@ -624,7 +624,6 @@
 //     opts
 // }
 
-
 // #[cfg(test)]
 // use std::thread;
 // #[cfg(test)]
@@ -644,7 +643,6 @@
 //     let db = DB::new(ware_name.clone()).expect("new db fail");
 //     let snapshot = db.snapshot();
 //     let guid = Guid(0);
-    
 
 //     let meta_txn = snapshot.meta_txn(&guid);
 
@@ -659,7 +657,7 @@
 //    // &tab_name, Some(sinfo.clone())
 //     tab_txn1.modify(arr.clone(), None, false, Arc::new(move |alter|{
 //         assert!(alter.is_ok());  //插入元信息成功
-        
+
 //         let meta_txn_clone = meta_txn.clone();
 //         let meta_txn = meta_txn.clone();
 //         meta_txn_clone.prepare(1000, Arc::new(move |prepare|{
@@ -688,7 +686,6 @@
 //     let item3 = create_tabkv(ware_name.clone(), tab_name.clone(), key3.clone(), 0, Some(value3.clone()));
 //     let arr3 =  Arc::new(vec![item1.clone(), item2.clone(), item2.clone()]);
 
-    
 //     let tab_txn1 = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
 //     let tab_txn2 = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
 //     let tab_txn = snapshot.tab_txn(&tab_name, &guid, true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
@@ -747,7 +744,7 @@
 //                     tab_txn2_clone.prepare(1000, Arc::new(move |prepare|{
 //                         assert!(prepare.is_ok());  //事务2预提交成功
 //                         //println!("tab_txn2 prepare is success");
-                        
+
 //                         let tab_txn1 = tab_txn1.clone();
 //                         let tab_txn2 = tab_txn2.clone();
 //                         let arr3 = arr3.clone();
@@ -755,7 +752,7 @@
 //                         tab_txn1.commit(Arc::new(move |commit|{
 //                             assert!(commit.is_ok());  //事务1提交成功
 //                             //println!("tab_txn1 commit is success");
-                            
+
 //                             let tab_txn2 = tab_txn2.clone();
 //                             let arr3 = arr3.clone();
 //                             let tab_txn = tab_txn.clone();

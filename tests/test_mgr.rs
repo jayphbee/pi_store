@@ -20,7 +20,6 @@
 //     TabKV{ware, tab, key, index, value}
 // }
 
-
 // #[test]
 // fn test_file_db_mgr(){
 //     let ware_name = Atom::from("file_test_mgr");
@@ -30,7 +29,6 @@
 // 	let mgr = Mgr::new(GuidGen::new(1,1));
 //     let db = DB::new(ware_name.clone()).expect("create db fail, name is: file");
 //     mgr.register(ware_name.clone(), Arc::new(db));
-
 
 //     let key1 = Arc::new(Vec::from(String::from("key1").as_bytes()));
 //     let value1 = Arc::new(Vec::from(String::from("value1").as_bytes()));

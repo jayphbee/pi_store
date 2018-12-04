@@ -24,7 +24,6 @@
 // //     // let l = DB::list_cf(&opts, "path/for/rocksdb/aaa").expect("");
 // //     //  println!("retrieved value {:?}", l);
 
-
 // //     // match db.get(b"my key") {
 // //     //     Ok(Some(value)) => println!("retrieved value {}", value.to_utf8().unwrap()),
 // //     //     Ok(None) => println!("value not found"),
@@ -62,7 +61,7 @@
 // //     //DB::drop(&opts, "path/for/rocksdb/hhhhhhh");
 // //     let db = TXN_DB::open(&opts, &TransactionDBOptions::default(), "path/for/rocksdb/hhhhhhh").unwrap();
 // //     let rocksdb_txn = TXN::begin(&db, &WriteOptions::default(), &TransactionOptions::default()).unwrap();
-    
+
 // //     //println!("----------------{:?}",  a);
 
 // //     println!("----------------{:?}", rocksdb_txn.get(&ReadOptions::default(), b"my key").unwrap());
