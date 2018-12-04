@@ -72,7 +72,7 @@ impl Tab for LmdbTable {
             Environment::new()
                 // see doc: https://docs.rs/lmdb/0.8.0/lmdb/struct.EnvironmentFlags.html#associatedconstant.NO_TLS
                 .set_flags(EnvironmentFlags::NO_TLS)
-                .set_max_dbs(1024)
+                .set_max_dbs(MAX_DBS_PER_ENV)
                 .open(Path::new(DB_ROOT))
                 .expect("Open lmdb environment failed"),
         );
