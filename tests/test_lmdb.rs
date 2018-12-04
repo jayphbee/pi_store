@@ -59,9 +59,6 @@ fn test_create_transaction() {
 
 #[test]
 fn test_get_put_iter() {
-    let worker_pool0 = Box::new(WorkerPool::new(3, 1024 * 1024, 1000));
-    worker_pool0.run(STORE_TASK_POOL.clone());
-
     let tab = Arc::new(LmdbTable::new(&Atom::from("test")));
     let txn4 = tab.transaction(&Guid(3), true);
 
@@ -94,8 +91,7 @@ fn test_get_put_iter() {
     let items =  Arc::new(vec![item1.clone(), item2.clone(), item3.clone()]);
 
     txn4.modify(items.clone(), None, false, Arc::new(move |modify| {
-        // assert!(modify.is_ok());
-        println!("{:?}", modify);
+        println!("modify data: {:?}", modify);
     }));
     thread::sleep_ms(1000);
 
@@ -110,13 +106,14 @@ fn test_get_put_iter() {
     thread::sleep_ms(1000);
 
     txn4.query(items.clone(), None, false, Arc::new(move |query| {
-        // assert!(query.is_ok());
-        println!("{:?}", query);
+        println!("query data: {:?}", query);
     }));
     thread::sleep_ms(1000);
 
-    txn4.iter(None, false, None, Arc::new(move |it| {
-        println!("it");
+    txn4.iter(None, false, None, Arc::new(move |items| {
+        items.unwrap().next(Arc::new(move |item| {
+            println!("get item: {:?}", item);
+        }));
     }));
     thread::sleep_ms(1000);
     // println!("{:?}", tab);
@@ -131,7 +128,7 @@ fn test_lmdb_ware_house() {
     //     println!("{:?}", t);
     // }
 
-    // get tab info
+    // // get tab info
     // println!("yyyyyyyyyy, {:?}", db.tab_info(&Atom::from("_$sinfo1")));
 
     // let snapshot = db.snapshot();

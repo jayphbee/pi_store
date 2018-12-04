@@ -6,6 +6,7 @@ use std::mem::replace;
 use std::cell::RefCell;
 use std::boxed::FnBox;
 use std::slice::from_raw_parts;
+use std::sync::mpsc::Sender;
 
 use fnv::FnvHashMap;
 
@@ -32,6 +33,8 @@ use lmdb::{
     mdb_set_compare, MDB_txn, MDB_dbi, MDB_val, MDB_cmp_func
 };
 
+use pool::{LmdbMessage, ThreadPoolTabTxn, ThreadPool};
+
 const ASYNC_DB_TYPE: TaskType = TaskType::Sync;
 
 const DB_ROOT: &str = "_$lmdb";
@@ -52,29 +55,31 @@ lazy_static! {
 
 #[derive(Debug)]
 pub struct LmdbTableWrapper {
-    env: Environment,
+    env: Arc<Environment>,
     db: Database,
     name: Atom,
     // TODO: add methods to set/get these flags
     env_flags: EnvironmentFlags,
     write_flags: WriteFlags,
-    db_flags: DatabaseFlags
+    db_flags: DatabaseFlags,
+    pool: RefCell<ThreadPool>
 }
-
 
 #[derive(Debug, Clone)]
 pub struct LmdbTable(Arc<LmdbTableWrapper>);
 
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
-        let env = Environment::new()
+        let env = Arc::new(Environment::new()
             // see doc: https://docs.rs/lmdb/0.8.0/lmdb/struct.EnvironmentFlags.html#associatedconstant.NO_TLS
             .set_flags(EnvironmentFlags::NO_TLS)
             .set_max_dbs(1024)
             .open(Path::new(DB_ROOT))
-            .expect("Open lmdb environment failed");
+            .expect("Open lmdb environment failed"));
         let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty())
             .expect("Open lmdb database failed");
+
+        let pool = RefCell::new(ThreadPool::with_capacity(5, env.clone()));
 
         LmdbTable(Arc::new(LmdbTableWrapper {
             env: env,
@@ -82,70 +87,34 @@ impl Tab for LmdbTable {
             name: db_name.clone(),
             env_flags: EnvironmentFlags::empty(),
             write_flags: WriteFlags::empty(),
-            db_flags: DatabaseFlags::empty()
+            db_flags: DatabaseFlags::empty(),
+            pool: pool
         }))
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        let txn_ptr = if writable {
-            let rw_txn = self.0.env.begin_rw_txn().unwrap();
-            // set comparator function
-            unsafe {
-                mdb_set_compare(rw_txn.txn(), self.0.db.dbi(), mdb_cmp_func as *mut MDB_cmp_func);
-            }
-            Box::into_raw(Box::new(rw_txn)) as usize
-        } else {
-            let ro_txn = self.0.env.begin_ro_txn().unwrap();
-            // set comparator function
-            unsafe {
-                mdb_set_compare(ro_txn.txn(), self.0.db.dbi(), mdb_cmp_func as *mut MDB_cmp_func);
-            }
-            Box::into_raw(Box::new(ro_txn)) as usize
-        };
-
 		Arc::new(LmdbTableTxn(Arc::new(RefCell::new(LmdbTableTxnWrapper {
             tab: self.clone(),
-            // TODO: record all txns built from this env and free them if this env becoames invalidate
-            txn_ptr: txn_ptr,
             id: id.clone(),
             _writable: writable,
-            state: TxState::Ok
+            state: TxState::Ok,
+            sender: self.0.clone().pool.borrow_mut().pop()
         }))))
     }
 }
 
-// comprator function
-fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
-    unsafe {
-        let buf1 = from_raw_parts::<u8>((*a).mv_data as *const u8, (*a).mv_size);
-        let buf2 = from_raw_parts::<u8>((*b).mv_data as *const u8, (*b).mv_size);
-
-        let b1 = ReadBuffer::new(buf1, 0);
-        let b2 = ReadBuffer::new(buf2, 0);
-
-        if b1 > b2 {
-            1
-        } else if b1 == b2 {
-            0
-        } else {
-            -1
-        }
-    }
-}
-
 struct LmdbTableTxnWrapper {
-    txn_ptr: usize,
     tab: LmdbTable,
     id: Guid,
 	_writable: bool,
-	state: TxState
+	state: TxState,
+    sender: Option<Sender<LmdbMessage>>
 }
 
 impl Drop for LmdbTableTxnWrapper {
+    // TODO: give back `sender`
     fn drop(&mut self) {
-        unsafe {
-            Box::from_raw(self.txn_ptr as *mut RwTransaction);
-        }
+
     }
 }
 
@@ -165,37 +134,56 @@ impl Txn for LmdbTableTxn {
     fn commit(&self, cb: TxCallback) -> CommitResult {
         Arc::clone(&self.0).borrow_mut().state = TxState::Committing;
         let lmdb_table_txn = self.0.clone();
-        let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
-        send_task(Box::new(move || {
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction)};
-            println!("commit txn {:?}", txn.txn());
-            match txn.commit() {
-                Ok(_) => {
-                    println!("txn commit successed");
-                    lmdb_table_txn.borrow_mut().state = TxState::Commited;
-                    cb(Ok(()))
-                },
-                Err(e) => {
-                    println!("txn commit failed with error {:?}", e.clone().to_string());
-                    lmdb_table_txn.borrow_mut().state = TxState::CommitFail;
-                    cb(Err(e.to_string()))
-                }
-            };
-            println!("after commit");
-        }));
+        let tab_name = self.0.clone().borrow().tab.0.clone().name.to_string();
 
+        match self.0.clone().borrow().sender.clone() {
+            Some(tx) => {
+
+                tx.send(LmdbMessage::Commit(tab_name, Arc::new(move |c| {
+                    match c {
+                        Ok(_) => {
+                            lmdb_table_txn.borrow_mut().state = TxState::Commited;
+                            cb(Ok(()));
+                        },
+                        Err(e) => {
+                            lmdb_table_txn.borrow_mut().state = TxState::CommitFail;
+                            cb(Err(e.to_string()));
+                        }
+                    }
+                })));
+            },
+            None => {
+                cb(Err("Can't get sender".to_string()))
+            }
+        }
         None
     }
 
     fn rollback(&self, cb: TxCallback) -> DBResult {
         let lmdb_table_txn = self.0.clone();
-        let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
-        let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
-        txn.abort();
-        println!("transaction rollbacked");
-        lmdb_table_txn.borrow_mut().state = TxState::Rollbacked;
+        let tab_name = self.0.clone().borrow().tab.0.clone().name.to_string();
 
-        Some(Ok(()))
+        match self.0.clone().borrow().sender.clone() {
+            Some(tx) => {
+                tx.send(LmdbMessage::Rollback(tab_name, Arc::new(move |r| {
+                    match r {
+                        Ok(_) => {
+                            lmdb_table_txn.borrow_mut().state = TxState::Rollbacked;
+                            cb(Ok(()));
+                        },
+                        Err(e) => {
+                            lmdb_table_txn.borrow_mut().state = TxState::RollbackFail;
+                            cb(Err(e.to_string()));
+                        }
+                    }
+                })));
+            },
+            None => {
+                cb(Err("Can't get sender".to_string()));
+            }
+        }
+
+        None
     }
 }
 
@@ -206,132 +194,85 @@ impl TabTxn for LmdbTableTxn {
 
     fn query(&self,arr: Arc<Vec<TabKV>>,_lock_time: Option<usize>,_readonly: bool, cb: TxQueryCallback,) -> Option<SResult<Vec<TabKV>>> {
         let lmdb_table_txn = self.0.clone();
-        let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
-        send_task(Box::new(move || {
-            let mut value = Vec::new();
-            let lmdb_table_txn_wrapper = lmdb_table_txn.borrow_mut();
-            let lmdb_table = &lmdb_table_txn_wrapper.tab;
-            let lmdb_table_wrapper = lmdb_table.0.clone();
+        let tab_name = self.0.clone().borrow().tab.0.clone().name.to_string();
 
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
-            for kv in arr.iter() {
-                match txn.get(lmdb_table_wrapper.db, kv.key.as_ref()) {
-                    Ok(v) => {
-                        println!("query get value {:?}", v.clone());
-                        value.push(
-                            TabKV {
-                                ware: kv.ware.clone(),
-                                tab: kv.tab.clone(),
-                                key: kv.key.clone(),
-                                index: kv.index,
-                                value: Some(Arc::new(Vec::from(v)))
-                            }
-                        )
-                    },
-                    Err(e) => {
-                        println!("query key: {:?}, error: {:?}", kv.key.clone().as_ref(), e.to_string());
-                        return cb(Err(e.to_string()));
+        match self.0.clone().borrow().sender.clone() {
+            Some(tx) => {
+                tx.send(LmdbMessage::Query(tab_name, arr.clone(), Arc::new(move |q| {
+                    match q {
+                        Ok(value) => {
+                            cb(Ok(value))
+                        },
+                        Err(e) => {
+                            cb(Err(e.to_string()))
+                        }
                     }
-                }
+                })));
+            },
+            None => {
+                cb(Err("Can't get sender".to_string()));
             }
-            println!("after query");
-            cb(Ok(value))
-        }));
+        }
+
         None
     }
 
     fn modify(&self, arr: Arc<Vec<TabKV>>, _lock_time: Option<usize>, _readonly: bool, cb: TxCallback) -> DBResult {
         let lmdb_table_txn = self.0.clone();
-        let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
-        send_task(Box::new(move || {
-            let lmdb_table_txn_wrapper = lmdb_table_txn.borrow_mut();
-            let lmdb_table = &lmdb_table_txn_wrapper.tab;
-            let lmdb_table_wrapper = lmdb_table.0.clone();
+        let tab_name = self.0.clone().borrow().tab.0.clone().name.to_string();
 
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
-            println!("modify txn: {:?}", txn.txn());
-            for kv in arr.iter() {
-                if let Some(_) = kv.value {
-                    match txn.put(lmdb_table_wrapper.db, kv.key.as_ref(), kv.clone().value.unwrap().as_ref(), WriteFlags::empty()) {
+        match self.0.clone().borrow().sender.clone() {
+            Some(tx) => {
+                tx.send(LmdbMessage::Modify(tab_name, arr.clone(), Arc::new(move |m| {
+                    match m {
                         Ok(_) => {
-                            println!("insert {:?} success",kv.clone().key.as_ref());
+                            cb(Ok(()))
+                        },
+                        Err(e) => {
+                            cb(Err(e.to_string()))
                         }
-                        Err(e) => return cb(Err("insert failed".to_string()))
-                    };
-                } else {
-                    match txn.del(lmdb_table_wrapper.db, kv.key.as_ref(), None) {
-                        Ok(_) => {
-                            println!("delete {:?} success",kv.clone().key.as_ref());
-                        }
-                        Err(e) => return cb(Err("delete failed".to_string()))
-                    };
-                }
+                    }
+                })));
+            },
+            None => {
+                cb(Err("Can't get sender".to_string()));
             }
-            println!("after modify");
-        }));
-        None
-    }
-
-    fn iter(&self,key: Option<Bin>,descending: bool,filter: Filter, cb: Arc<Fn(IterResult)>,) -> Option<IterResult> {
-        let lmdb_table_txn = self.0.clone();
-        let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
-
-        send_task(Box::new(move || {
-            let lmdb_table_txn_wrapper = lmdb_table_txn.borrow_mut();
-            let lmdb_table = &lmdb_table_txn_wrapper.tab;
-            let lmdb_table_wrapper = lmdb_table.0.clone();
-
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RwTransaction) };
-            println!("iter txn {:?}", txn.txn());
-
-            let mut cursor = txn.open_rw_cursor(lmdb_table_wrapper.db).expect("open rw cursor failed");
-
-            if let Some(k) = key.clone() {
-                // get mothod has side effect to advance cursor
-                cursor.get(Some(k.as_ref()), None, MDB_SET);
-            } else {
-                if descending {
-                    cursor.get(None, None, MDB_FIRST);
-                } else {
-                    cursor.get(None, None, MDB_LAST);
-                }
-            }
-
-            let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
-            println!("after iter");
-
-            cb(Ok(Box::new(LmdbItemsIter::new(cursor_ptr, lmdb_table_wrapper.db, descending, filter))))
-        }));
+        }
 
         None
     }
 
-    fn key_iter(&self, key: Option<Bin>,descending: bool,filter: Filter, cb: Arc<Fn(KeyIterResult)>,) -> Option<KeyIterResult> {
+    fn iter(&self,key: Option<Bin>, descending: bool,filter: Filter, cb: Arc<Fn(IterResult)>,) -> Option<IterResult> {
         let lmdb_table_txn = self.0.clone();
-        let txn_ptr = self.0.clone().borrow_mut().txn_ptr;
+        let tab_name = self.0.clone().borrow().tab.0.clone().name.clone();
 
-        send_task(Box::new(move || {
-            let lmdb_table_txn_wrapper = lmdb_table_txn.borrow_mut();
-            let lmdb_table = &lmdb_table_txn_wrapper.tab;
-            let lmdb_table_wrapper = lmdb_table.0.clone();
-
-            let mut txn = unsafe { Box::from_raw(txn_ptr as *mut RoTransaction) };
-            let mut cursor = txn.open_ro_cursor(lmdb_table_wrapper.db).unwrap();
-
-            if let Some(k) = key.clone() {
-                cursor.get(Some(k.as_ref()), None, MDB_SET);
-            } else {
-                if descending {
-                    cursor.get(None, None, MDB_FIRST);
-                } else {
-                    cursor.get(None, None, MDB_LAST);
-                }
+        match self.0.clone().borrow().sender.clone() {
+            Some(tx) => {
+                tx.send(LmdbMessage::CreateItemIter(tab_name.clone().to_string(), descending, key));
+                cb(Ok(Box::new(LmdbItemsIter::new(tx.clone(), tab_name, descending, filter))));
+            },
+            None => {
+                cb(Err("Can't get sender".to_string()));
             }
+        }
 
-            let cursor_ptr = unsafe { Box::into_raw(Box::new(cursor)) as usize };
+        None
+    }
 
-            cb(Ok(Box::new(LmdbKeysIter::new(cursor_ptr, lmdb_table_wrapper.db, descending, filter))))
-        }));
+    fn key_iter(&self, key: Option<Bin>, descending: bool,filter: Filter, cb: Arc<Fn(KeyIterResult)>,) -> Option<KeyIterResult> {
+        let lmdb_table_txn = self.0.clone();
+        let tab_name = self.0.clone().borrow().tab.0.clone().name.clone();
+
+        match self.0.clone().borrow().sender.clone() {
+            Some(tx) => {
+                tx.send(LmdbMessage::CreateKeyIter(tab_name.clone().to_string(), descending, key));
+                cb(Ok(Box::new(LmdbKeysIter::new(tx.clone(), tab_name, descending, filter))));
+            },
+            None => {
+                cb(Err("Can't get sender".to_string()));
+            }
+        }
+
         None
     }
 
@@ -346,27 +287,25 @@ impl TabTxn for LmdbTableTxn {
 
 /// lmdb iterator that navigate key and value
 pub struct LmdbItemsIter {
-    cursor_ptr: Arc<AtomicUsize>,
-    db: Database,
+    sender: Sender<LmdbMessage>,
+    tab_name: Atom,
     descending: bool,
     _filter: Filter
 }
 
 impl Drop for LmdbItemsIter {
     fn drop(&mut self) {
-        unsafe {
-            Box::from_raw(self.cursor_ptr.load(Ordering::SeqCst) as *mut RoTransaction);
-        };
+
     }
 }
 
 impl LmdbItemsIter {
-    pub fn new(cursor_ptr: usize, db: Database, descending: bool, _filter: Filter) -> Self {
+    pub fn new(sender: Sender<LmdbMessage>, tab_name: Atom, descending: bool, _filter: Filter) -> Self {
         LmdbItemsIter {
-            cursor_ptr: Arc::new(AtomicUsize::new(cursor_ptr)),
-            db: db,
-            descending: descending,
-            _filter: _filter
+            sender,
+            tab_name,
+            descending,
+            _filter
         }
     }
 }
@@ -375,28 +314,19 @@ impl Iter for LmdbItemsIter {
     type Item = (Bin, Bin);
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
-        let descending = self.descending;
-        let cursor_ptr = self.cursor_ptr.clone();
-        let db = self.db;
-
-        send_task(Box::new(move || {
-            // cast cursor_ptr to RoCursor
-            let mut cursor = unsafe { Box::from_raw(cursor_ptr.load(Ordering::SeqCst) as *mut RoCursor) };
-
-            if descending {
-                match cursor.get(None, None, MDB_NEXT) {
-                    Ok(v) => cb(Ok(Some((Arc::new(v.0.unwrap().to_vec()), Arc::new(v.1.to_vec()))))),
-                    Err(_) => cb(Ok(None))
+        self.sender.send(LmdbMessage::NextItem(self.tab_name.to_string(), Arc::new(move |item| {
+            match item {
+                Ok(Some(v)) => {
+                    cb(Ok(Some(v)));
+                },
+                Ok(None) => {
+                    cb(Ok(None));
                 }
-            } else {
-                match cursor.get(None, None, MDB_PREV) {
-                    Ok(v) => cb(Ok(Some((Arc::new(v.0.unwrap().to_vec()), Arc::new(v.1.to_vec()))))),
-                    Err(_) => cb(Ok(None))
+                Err(e) => {
+                    cb(Err(e.to_string()));
                 }
             }
-            // cast back cursor to AtomicUsize
-            cursor_ptr.store(unsafe { Box::into_raw(Box::new(cursor)) as usize }, Ordering::SeqCst);
-        }));
+        })));
 
         None
     }
@@ -404,27 +334,24 @@ impl Iter for LmdbItemsIter {
 
 /// lmdb iterator that navigate only keys
 pub struct LmdbKeysIter {
-    cursor_ptr:  Arc<AtomicUsize>,
-    db: Database,
+    sender: Sender<LmdbMessage>,
+    tab_name: Atom,
     descending: bool,
     _filter: Filter
 }
 
 impl Drop for LmdbKeysIter {
     fn drop(&mut self) {
-        unsafe {
-            Box::from_raw(self.cursor_ptr.load(Ordering::SeqCst) as *mut RoTransaction);
-        };
     }
 }
 
 impl LmdbKeysIter {
-    pub fn new(cursor_ptr: usize, db: Database, descending: bool, _filter: Filter) -> Self {
+    pub fn new(sender: Sender<LmdbMessage>, tab_name: Atom, descending: bool, _filter: Filter) -> Self {
         LmdbKeysIter {
-            cursor_ptr: Arc::new(AtomicUsize::new(cursor_ptr)),
-            db: db,
-            descending: descending,
-            _filter: _filter
+            sender,
+            tab_name,
+            descending,
+            _filter
         }
     }
 }
@@ -433,28 +360,20 @@ impl Iter for LmdbKeysIter {
     type Item = Bin;
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
-        let descending = self.descending;
-        let db = self.db;
-        let cursor_ptr = self.cursor_ptr.clone();
-
-        send_task(Box::new(move || {
-            // cast cursor_ptr to RoCursor
-            let mut cursor = unsafe { Box::from_raw(cursor_ptr.load(Ordering::SeqCst) as *mut RoCursor) };
-
-            if descending {
-                match cursor.get(None, None, MDB_NEXT) {
-                    Ok(v) => cb(Ok(Some(Arc::new(v.0.unwrap().to_vec())))),
-                    Err(_) => cb(Ok(None))
+        self.sender.send(LmdbMessage::NextKey(self.tab_name.to_string(), Arc::new(move |item| {
+            match item {
+                Ok(Some(v)) => {
+                    cb(Ok(Some(v)));
+                },
+                Ok(None) => {
+                    cb(Ok(None));
                 }
-            } else {
-                match cursor.get(None, None, MDB_PREV) {
-                    Ok(v) => cb(Ok(Some(Arc::new(v.0.unwrap().to_vec())))),
-                    Err(_) => cb(Ok(None))
+                Err(e) => {
+                    cb(Err(e.to_string()));
                 }
             }
-            // cast back cursor to AtomicUsize
-            cursor_ptr.store(unsafe { Box::into_raw(Box::new(cursor)) as usize }, Ordering::SeqCst);
-        }));
+        })));
+
         None
     }
 }

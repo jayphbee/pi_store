@@ -39,6 +39,7 @@ pub enum LmdbMessage {
 
 unsafe impl Send for LmdbMessage {}
 
+#[derive(Debug)]
 pub struct ThreadPool {
     senders: Vec<Sender<LmdbMessage>>,
     total: usize,
