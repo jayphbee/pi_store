@@ -117,13 +117,32 @@ fn test_new_txn() {
     thread::sleep_ms(50);
 
     // test rollback
+    let mut wb2 = WriteBuffer::new();
+    wb2.write_utf8("rollback_key");
+    let rollback_key = Arc::new(wb2.get_byte().to_vec());
+    let rollback_value = Arc::new(Vec::from(String::from("rollback_value").as_bytes()));
+    let rollback_item = create_tabkv(
+        ware_name.clone(),
+        tab_name.clone(),
+        rollback_key.clone(),
+        0,
+        Some(rollback_value.clone()),
+    );
+    let rollback_item = Arc::new(vec![rollback_item.clone()]);
+
+    tx.send(LmdbMessage::Modify("test".to_string(), rollback_item.clone(), Arc::new(move |m| {
+
+    })));
     tx.send(LmdbMessage::Rollback(
         "test".to_string(),
-        Arc::new(move |q| {
-            println!("rollbacked: {:?}", q);
-            // assert!(q.is_ok());
+        Arc::new(move |r| {
+            println!("rollbacked: {:?}", r);
         }),
     ));
+
+    tx.send(LmdbMessage::Query("test".to_string(), rollback_item.clone(), Arc::new(move |q| {
+        println!("queried value after rollback: {:?}", q);
+    })));
     thread::sleep_ms(50);
 
     p.push(tx);
