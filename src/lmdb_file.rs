@@ -511,18 +511,16 @@ pub struct LmdbWareHouse {
 impl LmdbWareHouse {
     // retrive meta table info of a DB
     pub fn new(name: Atom) -> Result<Self, String> {
-        // find meta table info in DB_ROOT path
         let env = Environment::new()
             .set_max_dbs(MAX_DBS_PER_ENV)
-            .open(Path::new(DB_ROOT))
+            .open(Path::new(SINFO))
             .unwrap();
-        let db = env.open_db(Some(SINFO)).unwrap();
+        let db = env.create_db(Some(&name.to_string()), DatabaseFlags::empty()).unwrap();
         let txn = env.begin_ro_txn().unwrap();
         let mut cursor = txn.open_ro_cursor(db).unwrap();
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
-        println!("how many tables: {}", cursor.iter().count());
         for kv in cursor.iter() {
             tabs.set_tab_meta(
                 Atom::decode(&mut ReadBuffer::new(kv.0, 0)).unwrap(),
@@ -632,11 +630,4 @@ impl WareSnapshot for LmdbSnapshot {
     fn rollback(&self, id: &Guid) {
         (self.0).tabs.write().unwrap().rollback(id)
     }
-}
-
-fn send_task(func: Box<FnBox()>) {
-    let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
-    let mut task_pool = lock.lock().unwrap();
-    (*task_pool).push(ASYNC_DB_TYPE, 20, func, DB_ASYNC_FILE_INFO.clone());
-    cvar.notify_one();
 }
