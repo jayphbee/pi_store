@@ -25,69 +25,65 @@ use pi_db::db::{
 
 use pi_store::lmdb_file::{LmdbTable, LmdbWareHouse};
 
-#[test]
-fn test_create_transaction() {
-    // https://www.openldap.org/lists/openldap-devel/201409/msg00001.html
-    // lmdb-sys/lmdb/libraries/liblmdb/mdb.c +2687
-    let tab = LmdbTable::new(&Atom::from("test"));
+fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>) -> TabKV {
+    TabKV {
+        ware,
+        tab,
+        key,
+        index,
+        value,
+    }
+}
 
-    // let tab = Arc::new(tab);
-    let txn1 = tab.transaction(&Guid(0), false);
-    let txn2 = tab.transaction(&Guid(0), false);
-    let txn3 = tab.transaction(&Guid(0), false);
+fn build_db_key(key: &str) -> Arc<Vec<u8>> {
+    let mut wb = WriteBuffer::new();
+    wb.write_utf8(key);
+    Arc::new(wb.get_byte().to_vec())
+}
+
+fn build_db_val(val: &str) -> Arc<Vec<u8>> {
+    Arc::new(Vec::from(String::from(val).as_bytes()))
 }
 
 #[test]
 fn test_get_put_iter() {
     let tab = Arc::new(LmdbTable::new(&Atom::from("test")));
-    let txn4 = tab.transaction(&Guid(3), true);
+    let txn = tab.transaction(&Guid(3), true);
 
     let tab_name = Atom::from("player");
     let ware_name = Atom::from("file_test");
 
-    let key1 = Arc::new(Vec::from(String::from("key1").as_bytes()));
-    let value1 = Arc::new(Vec::from(String::from("value1").as_bytes()));
-    let key2 = Arc::new(Vec::from(String::from("key2").as_bytes()));
-    let value2 = Arc::new(Vec::from(String::from("value2").as_bytes()));
-    let key3 = Arc::new(Vec::from(String::from("key3").as_bytes()));
-    let value3 = Arc::new(Vec::from(String::from("value3").as_bytes()));
-
-    let mut wb1 = WriteBuffer::new();
-    wb1.write_utf8("key1");
-    let k1 = Arc::new(wb1.get_byte().to_vec());
-
-    let mut wb2 = WriteBuffer::new();
-    wb2.write_utf8("key2");
-    let k2 = Arc::new(wb2.get_byte().to_vec());
-
-    let mut wb3 = WriteBuffer::new();
-    wb3.write_utf8("key3");
-    let k3 = Arc::new(wb3.get_byte().to_vec());
+    let key1 = build_db_key("key1");
+    let value1 = build_db_val("value1");
+    let key2 = build_db_key("key1");
+    let value2 = build_db_val("value2");
+    let key3 = build_db_key("key1");
+    let value3 = build_db_val("value3");
 
     let item1 = create_tabkv(
         ware_name.clone(),
         tab_name.clone(),
-        k1.clone(),
+        key1.clone(),
         0,
         Some(value1.clone()),
     );
     let item2 = create_tabkv(
         ware_name.clone(),
         tab_name.clone(),
-        k2.clone(),
+        key2.clone(),
         0,
         Some(value2.clone()),
     );
     let item3 = create_tabkv(
         ware_name.clone(),
         tab_name.clone(),
-        k3.clone(),
+        key3.clone(),
         0,
         Some(value3.clone()),
     );
     let items = Arc::new(vec![item1.clone(), item2.clone(), item3.clone()]);
 
-    txn4.modify(
+    txn.modify(
         items.clone(),
         None,
         false,
@@ -97,17 +93,17 @@ fn test_get_put_iter() {
     );
     thread::sleep_ms(50);
 
-    txn4.commit(Arc::new(move |c| {
+    txn.commit(Arc::new(move |c| {
         println!("commit");
     }));
     thread::sleep_ms(50);
 
-    txn4.rollback(Arc::new(move |c| {
+    txn.rollback(Arc::new(move |c| {
         println!("rollback");
     }));
     thread::sleep_ms(50);
 
-    txn4.query(
+    txn.query(
         items.clone(),
         None,
         false,
@@ -117,7 +113,7 @@ fn test_get_put_iter() {
     );
     thread::sleep_ms(50);
 
-    txn4.iter(
+    txn.iter(
         None,
         false,
         None,
@@ -128,7 +124,6 @@ fn test_get_put_iter() {
         }),
     );
     thread::sleep_ms(50);
-    // println!("{:?}", tab);
 }
 
 #[test]
@@ -219,14 +214,4 @@ fn test_lmdb_ware_house() {
             println!("test query: {:?}", q);
         }),
     );
-}
-
-fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>) -> TabKV {
-    TabKV {
-        ware,
-        tab,
-        key,
-        index,
-        value,
-    }
 }
