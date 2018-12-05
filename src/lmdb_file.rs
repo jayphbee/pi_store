@@ -517,10 +517,10 @@ impl LmdbWareHouse {
         let env = Environment::new()
             .set_max_dbs(MAX_DBS_PER_ENV)
             .open(Path::new(SINFO))
-            .unwrap();
-        let db = env.create_db(Some(&name.to_string()), DatabaseFlags::empty()).unwrap();
-        let txn = env.begin_ro_txn().unwrap();
-        let mut cursor = txn.open_ro_cursor(db).unwrap();
+            .map_err(|e| e.to_string())?;
+        let db = env.create_db(Some(&name.to_string()), DatabaseFlags::empty()).map_err(|e| e.to_string())?;
+        let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
+        let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
