@@ -4,10 +4,10 @@ extern crate pi_lib;
 extern crate pi_store;
 extern crate tempdir;
 
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::path::Path;
-use std::fs;
 
 use pi_base::pi_base_impl::STORE_TASK_POOL;
 use pi_base::worker_pool::WorkerPool;
@@ -148,50 +148,77 @@ fn test_lmdb_ware_house() {
     let tab_name_1 = Atom::from("test_table_1");
     let ware_name = Atom::from("testdb");
 
-    let tab_name_1= Atom::from("test_table_1");
+    let tab_name_1 = Atom::from("test_table_1");
     let tab_name_2 = Atom::from("test_table_2");
 
-    let sinfo = Arc::new(TabMeta::new(EnumType::Str, EnumType::Struct(Arc::new(StructInfo::new(tab_name.clone(), 8888)))));
+    let sinfo = Arc::new(TabMeta::new(
+        EnumType::Str,
+        EnumType::Struct(Arc::new(StructInfo::new(tab_name.clone(), 8888))),
+    ));
     snapshot.alter(&tab_name_1, Some(sinfo.clone()));
     snapshot.alter(&tab_name_2, Some(sinfo.clone()));
 
     // there should be three tables: "player", "test_tab_1" and "_$sinfo"
     assert_eq!(snapshot.list().into_iter().count(), 3);
     assert!(snapshot.tab_info(&Atom::from("test_table_1")).is_some());
-    assert!(snapshot.tab_info(&Atom::from("does_not_exist_table")).is_none());
+    assert!(snapshot
+        .tab_info(&Atom::from("does_not_exist_table"))
+        .is_none());
 
     let meta_txn = snapshot.meta_txn(&Guid(0));
-    let tab_txn1 = snapshot.tab_txn(&Atom::from("_$sinfo"), &Guid(0), true, Box::new(|_r|{})).unwrap().expect("create player tab_txn fail");
+    let tab_txn1 = snapshot
+        .tab_txn(&Atom::from("_$sinfo"), &Guid(0), true, Box::new(|_r| {}))
+        .unwrap()
+        .expect("create player tab_txn fail");
 
     let mut wb1 = WriteBuffer::new();
     wb1.write_utf8("key1");
     let key1 = Arc::new(wb1.get_byte().to_vec());
 
     let value1 = Arc::new(Vec::from(String::from("value1").as_bytes()));
-    let item1 = create_tabkv(ware_name.clone(), Atom::from("_$sinfo"), key1.clone(), 0, Some(value1.clone()));
-    let arr =  Arc::new(vec![item1.clone()]);
+    let item1 = create_tabkv(
+        ware_name.clone(),
+        Atom::from("_$sinfo"),
+        key1.clone(),
+        0,
+        Some(value1.clone()),
+    );
+    let arr = Arc::new(vec![item1.clone()]);
 
-    tab_txn1.modify(arr.clone(), None, false, Arc::new(move |alter| {
-        assert!(alter.is_ok());
+    tab_txn1.modify(
+        arr.clone(),
+        None,
+        false,
+        Arc::new(move |alter| {
+            assert!(alter.is_ok());
 
-        let meta_txn_clone = meta_txn.clone();
-        let meta_txn = meta_txn.clone();
-        meta_txn_clone.prepare(1000, Arc::new(move |prepare|{
-            assert!(prepare.is_ok());
-            meta_txn.commit(Arc::new(move |commit|{
-                match commit {
-                    Ok(_) => (),
-                    Err(e) => panic!("{:?}", e),
-                };
-                println!("meta_txn commit success");
-            }));
-        }));
-    }));
+            let meta_txn_clone = meta_txn.clone();
+            let meta_txn = meta_txn.clone();
+            meta_txn_clone.prepare(
+                1000,
+                Arc::new(move |prepare| {
+                    assert!(prepare.is_ok());
+                    meta_txn.commit(Arc::new(move |commit| {
+                        match commit {
+                            Ok(_) => (),
+                            Err(e) => panic!("{:?}", e),
+                        };
+                        println!("meta_txn commit success");
+                    }));
+                }),
+            );
+        }),
+    );
     thread::sleep_ms(50);
 
-    tab_txn1.query(arr, None, true, Arc::new(move |q| {
-        println!("test query: {:?}", q);
-    }));
+    tab_txn1.query(
+        arr,
+        None,
+        true,
+        Arc::new(move |q| {
+            println!("test query: {:?}", q);
+        }),
+    );
 }
 
 fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>) -> TabKV {

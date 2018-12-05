@@ -67,15 +67,23 @@ fn test_new_txn() {
     let items = Arc::new(vec![item1.clone()]);
 
     // test modify
-    tx.send(LmdbMessage::Modify("test".to_string(), items.clone(), Arc::new(move |m| {
-        assert!(m.is_err());
-    })));
+    tx.send(LmdbMessage::Modify(
+        "test".to_string(),
+        items.clone(),
+        Arc::new(move |m| {
+            assert!(m.is_err());
+        }),
+    ));
     thread::sleep_ms(50);
 
     //test commit
-    tx.send(LmdbMessage::Commit("test".to_string(), Arc::new(move |c| {
-        // c.is_err();
-    }))).is_ok();
+    tx.send(LmdbMessage::Commit(
+        "test".to_string(),
+        Arc::new(move |c| {
+            // c.is_err();
+        }),
+    ))
+    .is_ok();
     thread::sleep_ms(50);
 
     // test iter items
@@ -130,9 +138,11 @@ fn test_new_txn() {
     );
     let rollback_item = Arc::new(vec![rollback_item.clone()]);
 
-    tx.send(LmdbMessage::Modify("test".to_string(), rollback_item.clone(), Arc::new(move |m| {
-
-    })));
+    tx.send(LmdbMessage::Modify(
+        "test".to_string(),
+        rollback_item.clone(),
+        Arc::new(move |m| {}),
+    ));
     tx.send(LmdbMessage::Rollback(
         "test".to_string(),
         Arc::new(move |r| {
@@ -140,9 +150,13 @@ fn test_new_txn() {
         }),
     ));
 
-    tx.send(LmdbMessage::Query("test".to_string(), rollback_item.clone(), Arc::new(move |q| {
-        println!("queried value after rollback: {:?}", q);
-    })));
+    tx.send(LmdbMessage::Query(
+        "test".to_string(),
+        rollback_item.clone(),
+        Arc::new(move |q| {
+            println!("queried value after rollback: {:?}", q);
+        }),
+    ));
     thread::sleep_ms(50);
 
     p.push(tx);

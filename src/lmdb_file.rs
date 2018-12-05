@@ -1,5 +1,6 @@
 use std::boxed::FnBox;
 use std::cell::RefCell;
+use std::fs;
 use std::mem::replace;
 use std::path::Path;
 use std::rc::Rc;
@@ -7,7 +8,6 @@ use std::slice::from_raw_parts;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
-use std::fs;
 
 use fnv::FnvHashMap;
 
@@ -115,9 +115,7 @@ struct LmdbTableTxnWrapper {
 
 impl Drop for LmdbTableTxnWrapper {
     // TODO: give back `sender`
-    fn drop(&mut self) {
-
-    }
+    fn drop(&mut self) {}
 }
 
 #[derive(Clone)]
@@ -518,7 +516,9 @@ impl LmdbWareHouse {
             .set_max_dbs(MAX_DBS_PER_ENV)
             .open(Path::new(SINFO))
             .map_err(|e| e.to_string())?;
-        let db = env.create_db(Some(&name.to_string()), DatabaseFlags::empty()).map_err(|e| e.to_string())?;
+        let db = env
+            .create_db(Some(&name.to_string()), DatabaseFlags::empty())
+            .map_err(|e| e.to_string())?;
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
