@@ -7,6 +7,7 @@ use std::slice::from_raw_parts;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
+use std::fs;
 
 use fnv::FnvHashMap;
 
@@ -64,6 +65,10 @@ pub struct LmdbTable(Arc<LmdbTableWrapper>);
 
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
+        if !Path::new(&db_name.to_string()).exists() {
+            fs::create_dir(DB_ROOT);
+        }
+
         let env = Arc::new(
             Environment::new()
                 // see doc: https://docs.rs/lmdb/0.8.0/lmdb/struct.EnvironmentFlags.html#associatedconstant.NO_TLS
@@ -201,7 +206,6 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
-        let lmdb_table_txn = self.0.clone();
         let tab_name = self.0.clone().borrow().tab.0.clone().name.to_string();
 
         match self.0.clone().borrow().sender.clone() {
@@ -230,7 +234,6 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        let lmdb_table_txn = self.0.clone();
         let tab_name = self.0.clone().borrow().tab.0.clone().name.to_string();
 
         match self.0.clone().borrow().sender.clone() {
@@ -259,7 +262,6 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
-        let lmdb_table_txn = self.0.clone();
         let tab_name = self.0.clone().borrow().tab.0.clone().name.clone();
 
         match self.0.clone().borrow().sender.clone() {
@@ -291,7 +293,6 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         cb: Arc<Fn(KeyIterResult)>,
     ) -> Option<KeyIterResult> {
-        let lmdb_table_txn = self.0.clone();
         let tab_name = self.0.clone().borrow().tab.0.clone().name.clone();
 
         match self.0.clone().borrow().sender.clone() {
@@ -509,6 +510,10 @@ pub struct LmdbWareHouse {
 impl LmdbWareHouse {
     // retrive meta table info of a DB
     pub fn new(name: Atom) -> Result<Self, String> {
+        if !Path::new(&name.to_string()).exists() {
+            fs::create_dir(SINFO);
+        }
+
         let env = Environment::new()
             .set_max_dbs(MAX_DBS_PER_ENV)
             .open(Path::new(SINFO))
