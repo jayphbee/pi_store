@@ -109,9 +109,9 @@ impl ThreadPool {
                                     let txn = thread_local_txn.as_mut().unwrap();
                                     let mut cursor = txn.open_rw_cursor(db).unwrap();
                                     if let Some(k) = key {
-                                        thread_local_iter = Some(cursor.iter_from(k.to_vec()));
+                                        thread_local_iter = Some(cursor.iter_from_with_direction(k.to_vec(), descending));
                                     } else {
-                                        thread_local_iter = Some(cursor.iter_start());
+                                        thread_local_iter = Some(cursor.iter_items_with_direction(descending));
                                     }
                                 }
                                 _ => {}
@@ -141,9 +141,9 @@ impl ThreadPool {
                                     let txn = thread_local_txn.as_mut().unwrap();
                                     let mut cursor = txn.open_rw_cursor(db).unwrap();
                                     if let Some(k) = key {
-                                        thread_local_iter = Some(cursor.iter_from(k.to_vec()));
+                                        thread_local_iter = Some(cursor.iter_from_with_direction(k.to_vec(), descending));
                                     } else {
-                                        thread_local_iter = Some(cursor.iter_start());
+                                        thread_local_iter = Some(cursor.iter_items_with_direction(descending));
                                     }
                                 }
                                 _ => {}
