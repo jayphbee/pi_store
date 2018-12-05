@@ -71,7 +71,7 @@ fn test_new_txn() {
         "test".to_string(),
         items.clone(),
         Arc::new(move |m| {
-            assert!(m.is_err());
+            assert!(m.is_ok());
         }),
     ));
     thread::sleep_ms(50);
