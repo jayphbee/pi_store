@@ -214,6 +214,7 @@ impl ThreadPool {
                                     };
                                 }
                             }
+                            cb(Ok(()))
                         }
 
                         Ok(LmdbMessage::Commit(db_name, cb)) => {

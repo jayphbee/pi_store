@@ -128,6 +128,7 @@ impl Txn for LmdbTableTxn {
 
     fn prepare(&self, _timeout: usize, _cb: TxCallback) -> DBResult {
         self.0.borrow_mut().state = TxState::Preparing;
+        _cb(Ok(()));
         Some(Ok(()))
     }
 
