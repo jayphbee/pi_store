@@ -47,10 +47,6 @@ pub const MDB_LAST: u32 = 6;
 
 const TIMEOUT: usize = 100;
 
-lazy_static! {
-    pub static ref DB_ASYNC_FILE_INFO: Atom = Atom::from("DB asyn file");
-}
-
 #[derive(Debug)]
 pub struct LmdbTableWrapper {
     env: Arc<Environment>,
@@ -114,7 +110,9 @@ struct LmdbTableTxnWrapper {
 
 impl Drop for LmdbTableTxnWrapper {
     // TODO: give back `sender`
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+
+    }
 }
 
 #[derive(Clone)]
