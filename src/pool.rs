@@ -168,6 +168,8 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
+                            println!("receive keys: {:?}", keys);
+                            println!("modify thread id: {:?}", thread::current().id());
                             let db = env.open_db(Some(&db_name.to_string())).unwrap();
 
                             if thread_local_txn.is_none() {
@@ -218,6 +220,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Commit(db_name, cb)) => {
+                            println!("commit thread id: {:?}", thread::current().id());
                             if let Some(txn) = thread_local_txn.take() {
                                 match txn.commit() {
                                     Ok(_) => {
