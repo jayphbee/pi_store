@@ -43,14 +43,6 @@ fn test_thread_pool() {
 
     let _ = env.create_db(Some("test"), DatabaseFlags::empty());
 
-    // test new tab txn
-    assert_eq!(
-        tx.send(LmdbMessage::NewTxn("test".to_string(), true))
-            .is_err(),
-        false
-    );
-    thread::sleep_ms(50);
-
     let mut wb1 = WriteBuffer::new();
     wb1.write_utf8("key4");
     let tab_name = Atom::from("player");

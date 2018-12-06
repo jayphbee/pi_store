@@ -24,7 +24,6 @@ use pi_db::db::{
 use pi_lib::bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 
 pub enum LmdbMessage {
-    NewTxn(String, bool),
     Query(String, Arc<Vec<TabKV>>, TxQueryCallback),
     NextItem(String, Arc<Fn(NextResult<(Bin, Bin)>)>),
     NextKey(String, Arc<Fn(NextResult<Bin>)>),
@@ -60,10 +59,6 @@ impl ThreadPool {
 
                 loop {
                     match rx.recv() {
-                        Ok(LmdbMessage::NewTxn(db_name, writable)) => {
-                            thread_local_txn = env.begin_rw_txn().ok();
-                        }
-
                         Ok(LmdbMessage::Query(db_name, keys, cb)) => {
                             let mut values = Vec::new();
                             let db = env.open_db(Some(&db_name.to_string())).unwrap();
