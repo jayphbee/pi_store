@@ -193,10 +193,6 @@ fn test_lmdb_ware_house() {
         .tab_info(&Atom::from("does_not_exist_table"))
         .is_none());
 
-    // for t in snapshot.list().into_iter() {
-    //     println!("tables: {:?}", t);
-    // }
-
     thread::sleep_ms(500);
 
     tab_txn1.query(
@@ -212,19 +208,17 @@ fn test_lmdb_ware_house() {
 
 #[test]
 fn test_multiply_txns() {
-    let key1 = build_db_key("key1");
-    let value1 = build_db_val("value1");
-    let key2 = build_db_key("key2");
-    let value2 = build_db_val("value2");
-    let key3 = build_db_key("key3");
-    let value3 = build_db_val("value3");
+    let key1 = build_db_key("nest_key1");
+    let value1 = build_db_val("nest_value1");
+    let key2 = build_db_key("nest_key2");
+    let value2 = build_db_val("nest_value2");
+    let key3 = build_db_key("nest_key3");
+    let value3 = build_db_val("nest_value3");
 
     let db = LmdbWareHouse::new(Atom::from("testdb")).unwrap();
     let snapshot = db.snapshot();
     let tab_name = Atom::from("_$sinfo");
     let ware_name = Atom::from("testdb");
-
-    // assert_eq!(snapshot.list().into_iter().count(), 3);
 
     for t in snapshot.list().into_iter() {
         println!("tables: {:?}", t);
@@ -261,10 +255,7 @@ fn test_multiply_txns() {
     let tab_txn1_clone = tab_txn1.clone();
     let tab_txn1_clone1 = tab_txn1.clone();
     tab_txn1_clone.modify(arr.clone(), None, false, Arc::new(move |m1|{
-        match m1 {
-            Ok(_) => (),
-            Err(e) => panic!("{:?}", e),
-        };
+        assert!(m1.is_ok());
         println!("nested txn level 1");
 
         let item1 = item1.clone();
@@ -286,10 +277,7 @@ fn test_multiply_txns() {
             let arr = Arc::new(vec![item3.clone()]);
             let tab_txn1_clone3 = tab_txn1.clone();
             tab_txn1_clone2.modify(arr.clone(), None, false, Arc::new(move |m3|{
-                match m3 {
-                    Ok(_) => (),
-                    Err(e) => panic!("{:?}", e),
-                };
+                assert!(m3.is_ok());
                 println!("nested txn level 3");
 
                 let tab_txn1_clone = tab_txn1.clone();

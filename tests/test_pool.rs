@@ -28,7 +28,7 @@ use lmdb::{
 };
 
 #[test]
-fn test_new_txn() {
+fn test_thread_pool() {
     let env = Arc::new(
         Environment::new()
             .set_flags(EnvironmentFlags::NO_TLS)
