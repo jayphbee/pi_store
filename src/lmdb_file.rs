@@ -32,7 +32,7 @@ use lmdb::{
     Transaction, WriteFlags,
 };
 
-use pool::{LmdbMessage, ThreadPool, ThreadPoolTabTxn};
+use pool::{LmdbMessage, THREAD_POOL};
 
 const ASYNC_DB_TYPE: TaskType = TaskType::Sync;
 
@@ -57,7 +57,6 @@ pub struct LmdbTableWrapper {
     env_flags: EnvironmentFlags,
     write_flags: WriteFlags,
     db_flags: DatabaseFlags,
-    pool: RefCell<ThreadPool>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,8 +80,6 @@ impl Tab for LmdbTable {
             .create_db(Some(&db_name.to_string()), DatabaseFlags::empty())
             .expect("Open lmdb database failed");
 
-        let pool = RefCell::new(ThreadPool::with_capacity(5, env.clone()));
-
         LmdbTable(Arc::new(LmdbTableWrapper {
             env: env,
             db: db,
@@ -90,17 +87,25 @@ impl Tab for LmdbTable {
             env_flags: EnvironmentFlags::empty(),
             write_flags: WriteFlags::empty(),
             db_flags: DatabaseFlags::empty(),
-            pool: pool,
         }))
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
+        let sender = match THREAD_POOL.clone().lock() {
+            Ok(mut pool) => pool.pop(),
+            Err(e) => panic!("get sender error when creating transaction: {:?}", e.to_string())
+        };
+
+        if let Some(ref tx) = sender {
+            println!("THREAD_POOL full, can't get one from it");
+        }
+
         Arc::new(LmdbTableTxn(Arc::new(RefCell::new(LmdbTableTxnWrapper {
             tab: self.clone(),
             id: id.clone(),
             _writable: writable,
             state: TxState::Ok,
-            sender: self.0.clone().pool.borrow_mut().pop(),
+            sender,
         }))))
     }
 }
@@ -114,8 +119,12 @@ struct LmdbTableTxnWrapper {
 }
 
 impl Drop for LmdbTableTxnWrapper {
-    // TODO: give back `sender`
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        match THREAD_POOL.clone().lock() {
+            Ok(mut pool) => pool.push(self.sender.take().unwrap()),
+            Err(e) => panic!("Give back sender failed: {:?}", e.to_string())
+        };
+    }
 }
 
 #[derive(Clone)]
@@ -510,7 +519,7 @@ impl LmdbWareHouse {
     // retrive meta table info of a DB
     pub fn new(name: Atom) -> Result<Self, String> {
         if !Path::new(&name.to_string()).exists() {
-            fs::create_dir(SINFO);
+            fs::create_dir(name.to_string());
         }
 
         let env = Environment::new()

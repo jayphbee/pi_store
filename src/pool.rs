@@ -299,23 +299,14 @@ fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
     }
 }
 
-pub struct ThreadPoolTabTxn {
-    sender: Sender<LmdbMessage>,
-    thread_pool: Arc<Mutex<ThreadPool>>,
-}
 
-impl ThreadPoolTabTxn {
-    pub fn new(sender: Sender<LmdbMessage>, thread_pool: Arc<Mutex<ThreadPool>>) -> Self {
-        ThreadPoolTabTxn {
-            sender,
-            thread_pool,
-        }
-    }
-}
-
-impl Drop for ThreadPoolTabTxn {
-    fn drop(&mut self) {
-        let mut guard = self.thread_pool.lock().unwrap();
-        (*guard).push(self.sender.clone());
-    }
+lazy_static! {
+    static ref LMDB_ENV: Arc<Environment> = Arc::new(
+        Environment::new()
+            .set_flags(EnvironmentFlags::NO_TLS)
+            .set_max_dbs(1024)
+            .open(Path::new("_$lmdb"))
+            .unwrap(),
+    );
+    pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::with_capacity(32, LMDB_ENV.clone())));
 }
