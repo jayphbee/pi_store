@@ -1,6 +1,5 @@
 // extern crate rocksdb;
 
-
 // use rocksdb::{TXN_DB, Error, DB, DBVector, TXN, Options, TransactionDBOptions, TransactionOptions, ColumnFamily, WriteOptions, ReadOptions};
 
 // #[test]
@@ -14,7 +13,7 @@
 //         let write_opts = WriteOptions::default();
 //         let read_opts = ReadOptions::default();
 //         let db = TXN_DB::open(&opts, &txn_db_opts, path).unwrap();
-        
+
 //         //
 //         let txn = TXN::begin(&db, &write_opts, &txn_opts).unwrap();
 //         assert!(txn.set_name("xid111").is_ok());
@@ -52,13 +51,13 @@
 //         let read_opts = ReadOptions::default();
 
 //         let db = TXN_DB::open(&opts, &txn_db_opts, path).unwrap();
-        
+
 //         let cf1 = db.cf(&opts, "cf1").unwrap();
 //         // let cf1 = match db.cf(&opts, "cf1") {
 //         //     Ok(cf) => cf,
 //         //     _ => panic!("value not present!"),
 //         // };
-        
+
 //         let txn = TXN::begin(&db, &write_opts, &txn_opts).unwrap();
 //         assert!(txn.set_name("xid111").is_ok());
 //         let p = txn.put_cf(&cf1, b"k1", b"v1111");

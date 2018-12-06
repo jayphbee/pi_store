@@ -3,7 +3,7 @@
 #![feature(integer_atomics)]
 #![feature(duration_extras)]
 #![feature(int_to_from_bytes)]
-#![feature(custom_derive,asm,box_syntax,box_patterns)]
+#![feature(custom_derive, asm, box_syntax, box_patterns)]
 #![feature(pointer_methods)]
 #![feature(core_intrinsics)]
 #![feature(generators, generator_trait)]
@@ -12,27 +12,37 @@
 #![feature(trait_alias)]
 #![feature(nll)]
 
-#[allow(dead_code,unused_variables,non_snake_case,unused_parens,unused_assignments,unused_unsafe,unused_imports)]
-
-extern crate crc;
-extern crate core;
-extern crate fnv;
 extern crate bytes;
-extern crate rocksdb;
+extern crate core;
+#[allow(
+    dead_code,
+    unused_variables,
+    non_snake_case,
+    unused_parens,
+    unused_assignments,
+    unused_unsafe,
+    unused_imports
+)]
+extern crate crc;
+extern crate fnv;
+// extern crate rocksdb;
+extern crate lmdb;
+extern crate tempdir;
 
 #[macro_use]
 extern crate lazy_static;
 
-extern crate pi_lib;
 extern crate pi_base;
 extern crate pi_db;
-extern crate pi_vm;
+extern crate pi_lib;
+// extern crate pi_vm;
 
-
-pub mod log;
+pub mod db;
+pub mod kg;
 pub mod kg_log;
 pub mod kg_record;
 pub mod kg_root;
 pub mod kg_subtab;
-pub mod kg;
-pub mod db;
+pub mod lmdb_file;
+pub mod log;
+pub mod pool;
