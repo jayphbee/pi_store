@@ -3,6 +3,8 @@ use std::slice::from_raw_parts;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::thread;
 
 use lmdb::{
@@ -38,8 +40,8 @@ unsafe impl Send for LmdbMessage {}
 #[derive(Debug)]
 pub struct ThreadPool {
     senders: Vec<Sender<LmdbMessage>>,
-    total: usize,
-    idle: usize,
+    total: AtomicUsize,
+    idle: AtomicUsize,
 }
 
 impl ThreadPool {
@@ -254,27 +256,27 @@ impl ThreadPool {
 
         ThreadPool {
             senders,
-            total: cap,
-            idle: cap,
+            total: AtomicUsize::new(cap),
+            idle: AtomicUsize::new(cap),
         }
     }
 
     pub fn pop(&mut self) -> Option<Sender<LmdbMessage>> {
-        self.idle = self.idle - 1;
+        self.idle.fetch_sub(1, Ordering::SeqCst);
         self.senders.pop()
     }
 
     pub fn push(&mut self, sender: Sender<LmdbMessage>) {
-        self.idle = self.idle + 1;
+        self.idle.fetch_add(1, Ordering::SeqCst);
         self.senders.push(sender);
     }
 
     pub fn total_threads(&self) -> usize {
-        self.total
+        self.total.load(Ordering::SeqCst)
     }
 
     pub fn idle_threads(&self) -> usize {
-        self.idle
+        self.idle.load(Ordering::SeqCst)
     }
 }
 
