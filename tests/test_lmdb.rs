@@ -269,9 +269,9 @@ fn test_multiply_txns() {
 
         let item1 = item1.clone();
         let item3 = item3.clone();
-        
+
         let tab_txn1 = tab_txn1.clone();
-        
+
         let arr3 = arr3.clone();
         let tab_txn = tab_txn.clone();
         let arr = Arc::new(vec![item1.clone()]);
@@ -279,7 +279,7 @@ fn test_multiply_txns() {
         tab_txn1_clone1.modify(arr.clone(), None, false, Arc::new(move|m2|{
             assert!(m2.is_ok());
             println!("nested txn level 2");
-            
+
             let tab_txn1 = tab_txn1.clone();
             let arr3 = arr3.clone();
             let tab_txn = tab_txn.clone();
@@ -294,7 +294,7 @@ fn test_multiply_txns() {
 
                 let tab_txn1_clone = tab_txn1.clone();
                 let tab_txn1 = tab_txn1.clone();
-                
+
                 let arr3 = arr3.clone();
                 let tab_txn = tab_txn.clone();
                 tab_txn1_clone3.prepare(1000, Arc::new(move |prepare|{
@@ -307,8 +307,8 @@ fn test_multiply_txns() {
                     let tab_txn1_clone4 = tab_txn1.clone();
 
                     tab_txn1_clone4.commit(Arc::new(move |commit|{
-                            assert!(commit.is_ok()); 
-                            println!("nested txn level 5");                            
+                            assert!(commit.is_ok());
+                            println!("nested txn level 5");
                             let arr3 = arr3.clone();
                             let tab_txn = tab_txn.clone();
                             let tab_txn1_clone6 = tab_txn1.clone();
