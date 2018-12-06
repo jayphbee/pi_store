@@ -510,12 +510,12 @@ impl Txn for LmdbMetaTxn {
 }
 
 #[derive(Clone)]
-pub struct LmdbWareHouse {
+pub struct DB {
     name: Atom,
     tabs: Arc<RwLock<Tabs<LmdbTable>>>,
 }
 
-impl LmdbWareHouse {
+impl DB {
     // retrive meta table info of a DB
     pub fn new(name: Atom) -> Result<Self, String> {
         if !Path::new(&name.to_string()).exists() {
@@ -546,24 +546,24 @@ impl LmdbWareHouse {
             Arc::new(TabMeta::new(EnumType::Str, EnumType::Bool)),
         );
 
-        Ok(LmdbWareHouse {
+        Ok(DB {
             name: name,
             tabs: Arc::new(RwLock::new(tabs)),
         })
     }
 }
 
-impl OpenTab for LmdbWareHouse {
+impl OpenTab for DB {
     // 打开指定的表，表必须有meta
     fn open<'a, T: Tab>(&self, tab: &Atom, _cb: Box<Fn(SResult<T>) + 'a>) -> Option<SResult<T>> {
         Some(Ok(T::new(tab)))
     }
 }
 
-impl Ware for LmdbWareHouse {
+impl Ware for DB {
     // 拷贝全部的表
     fn tabs_clone(&self) -> Arc<Ware> {
-        Arc::new(LmdbWareHouse {
+        Arc::new(DB {
             name: self.name.clone(),
             tabs: Arc::new(RwLock::new(self.tabs.read().unwrap().clone_map())),
         })
@@ -590,7 +590,7 @@ impl Ware for LmdbWareHouse {
 }
 
 /// LMDB manager
-pub struct LmdbSnapshot(LmdbWareHouse, RefCell<TabLog<LmdbTable>>);
+pub struct LmdbSnapshot(DB, RefCell<TabLog<LmdbTable>>);
 
 impl WareSnapshot for LmdbSnapshot {
     // 列出全部的表

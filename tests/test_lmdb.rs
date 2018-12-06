@@ -23,7 +23,7 @@ use pi_db::db::{
     Txn, Ware, WareSnapshot,
 };
 
-use pi_store::lmdb_file::{LmdbTable, LmdbWareHouse};
+use pi_store::lmdb_file::{LmdbTable, DB};
 
 fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>) -> TabKV {
     TabKV {
@@ -135,7 +135,7 @@ fn test_lmdb_ware_house() {
         fs::create_dir("_$sinfo");
     }
 
-    let db = LmdbWareHouse::new(Atom::from("testdb")).unwrap();
+    let db = DB::new(Atom::from("testdb")).unwrap();
 
     let snapshot = db.snapshot();
 
@@ -215,7 +215,7 @@ fn test_multiply_txns() {
     let key3 = build_db_key("nest_key3");
     let value3 = build_db_val("nest_value3");
 
-    let db = LmdbWareHouse::new(Atom::from("testdb")).unwrap();
+    let db = DB::new(Atom::from("testdb")).unwrap();
     let snapshot = db.snapshot();
     let tab_name = Atom::from("_$sinfo");
     let ware_name = Atom::from("testdb");
