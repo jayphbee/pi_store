@@ -38,7 +38,9 @@ fn test_thread_pool() {
     );
     thread::sleep_ms(50);
 
-    let mut p = ThreadPool::with_capacity(10, env.clone());
+    let mut p = ThreadPool::new();
+    p.start_pool(10, env.clone());
+
     let tx = p.pop().unwrap();
 
     let _ = env.create_db(Some("test"), DatabaseFlags::empty());

@@ -45,6 +45,7 @@ pub struct ThreadPool {
 
 impl ThreadPool {
     pub fn new() -> Self {
+        println!("create thread pool");
         ThreadPool {
             senders: Vec::new(),
             total: 0,
@@ -52,6 +53,7 @@ impl ThreadPool {
         }
     }
     pub fn start_pool(&mut self, cap: usize, env: Arc<Environment>) {
+        println!("start thread pool");
         for i in 0..cap {
             let clone_env = env.clone();
             let (tx, rx) = channel();
@@ -66,7 +68,7 @@ impl ThreadPool {
                     match rx.recv() {
                         Ok(LmdbMessage::Query(db_name, keys, cb)) => {
                             let mut values = Vec::new();
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
@@ -105,7 +107,7 @@ impl ThreadPool {
                         Ok(LmdbMessage::CreateItemIter(db_name, descending, key)) => {
                             match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
                                 (true, true) => {
-                                    let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                                    let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
@@ -140,7 +142,7 @@ impl ThreadPool {
                         Ok(LmdbMessage::CreateKeyIter(db_name, descending, key)) => {
                             match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
                                 (true, true) => {
-                                    let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                                    let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
@@ -170,7 +172,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
