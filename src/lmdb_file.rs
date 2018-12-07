@@ -96,7 +96,7 @@ impl Tab for LmdbTable {
             Err(e) => panic!("get sender error when creating transaction: {:?}", e.to_string())
         };
 
-        if let Some(ref tx) = sender {
+        if sender.is_none() {
             println!("THREAD_POOL full, can't get one from it");
         }
 
@@ -516,23 +516,26 @@ pub struct DB {
 }
 
 impl DB {
-    // retrive meta table info of a DB
     pub fn new(name: Atom) -> Result<Self, String> {
         if !Path::new(&name.to_string()).exists() {
             fs::create_dir(name.to_string());
         }
 
-        let env = Environment::new()
+        let env = Arc::new(Environment::new()
             .set_max_dbs(MAX_DBS_PER_ENV)
-            .open(Path::new(SINFO))
-            .map_err(|e| e.to_string())?;
+            .open(Path::new(&name.to_string()))
+            .map_err(|e| e.to_string())?);
+
+        // retrive meta table info of a DB
         let db = env
-            .create_db(Some(&name.to_string()), DatabaseFlags::empty())
+            .create_db(Some(SINFO), DatabaseFlags::empty())
             .map_err(|e| e.to_string())?;
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
+
+        THREAD_POOL.lock().unwrap().start_pool(32, env.clone());
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
@@ -607,6 +610,7 @@ impl WareSnapshot for LmdbSnapshot {
     }
     // 新增 修改 删除 表
     fn alter(&self, tab_name: &Atom, meta: Option<Arc<TabMeta>>) {
+        println!("alter table: {:?}", tab_name);
         self.1.borrow_mut().alter(tab_name, meta)
     }
     // 创建指定表的表事务
@@ -621,6 +625,7 @@ impl WareSnapshot for LmdbSnapshot {
     }
     // 创建一个meta事务
     fn meta_txn(&self, id: &Guid) -> Arc<MetaTxn> {
+        println!("create meta txn");
         Arc::new(LmdbMetaTxn::new(
             self.tab_txn(&Atom::from(SINFO), id, true, Box::new(|_r| {}))
                 .unwrap()

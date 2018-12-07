@@ -39,14 +39,21 @@ unsafe impl Send for LmdbMessage {}
 #[derive(Debug)]
 pub struct ThreadPool {
     senders: Vec<Sender<LmdbMessage>>,
-    total: AtomicUsize,
-    idle: AtomicUsize,
+    total: usize,
+    idle: usize,
 }
 
 impl ThreadPool {
-    pub fn with_capacity(cap: usize, env: Arc<Environment>) -> Self {
-        let mut senders = Vec::new();
-
+    pub fn new() -> Self {
+        println!("create thread pool");
+        ThreadPool {
+            senders: Vec::new(),
+            total: 0,
+            idle: 0,
+        }
+    }
+    pub fn start_pool(&mut self, cap: usize, env: Arc<Environment>) {
+        println!("start thread pool");
         for i in 0..cap {
             let clone_env = env.clone();
             let (tx, rx) = channel();
@@ -61,7 +68,7 @@ impl ThreadPool {
                     match rx.recv() {
                         Ok(LmdbMessage::Query(db_name, keys, cb)) => {
                             let mut values = Vec::new();
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
@@ -100,7 +107,7 @@ impl ThreadPool {
                         Ok(LmdbMessage::CreateItemIter(db_name, descending, key)) => {
                             match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
                                 (true, true) => {
-                                    let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                                    let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
@@ -135,7 +142,7 @@ impl ThreadPool {
                         Ok(LmdbMessage::CreateKeyIter(db_name, descending, key)) => {
                             match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
                                 (true, true) => {
-                                    let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                                    let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
@@ -165,7 +172,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
-                            let db = env.open_db(Some(&db_name.to_string())).unwrap();
+                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
@@ -190,8 +197,9 @@ impl ThreadPool {
                                     ) {
                                         Ok(_) => {
                                             println!(
-                                                "insert {:?} success",
-                                                kv.clone().key.as_ref()
+                                                "insert key: {:?}, value: {:?} success",
+                                                kv.clone().key.as_ref(),
+                                                kv.clone().value.as_ref()
                                             );
                                         }
                                         Err(e) => {
@@ -246,32 +254,28 @@ impl ThreadPool {
                     }
                 }
             });
-            senders.push(tx);
+            self.senders.push(tx);
         }
-
-        ThreadPool {
-            senders,
-            total: AtomicUsize::new(cap),
-            idle: AtomicUsize::new(cap),
-        }
+        self.idle = cap;
+        self.total = cap;
     }
 
     pub fn pop(&mut self) -> Option<Sender<LmdbMessage>> {
-        self.idle.fetch_sub(1, Ordering::SeqCst);
+        self.idle -= 1;
         self.senders.pop()
     }
 
     pub fn push(&mut self, sender: Sender<LmdbMessage>) {
-        self.idle.fetch_add(1, Ordering::SeqCst);
+        self.idle += 1;
         self.senders.push(sender);
     }
 
     pub fn total_threads(&self) -> usize {
-        self.total.load(Ordering::SeqCst)
+        self.total
     }
 
     pub fn idle_threads(&self) -> usize {
-        self.idle.load(Ordering::SeqCst)
+        self.idle
     }
 }
 
@@ -296,12 +300,5 @@ fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
 
 
 lazy_static! {
-    static ref LMDB_ENV: Arc<Environment> = Arc::new(
-        Environment::new()
-            .set_flags(EnvironmentFlags::NO_TLS)
-            .set_max_dbs(1024)
-            .open(Path::new("_$lmdb"))
-            .unwrap(),
-    );
-    pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::with_capacity(32, LMDB_ENV.clone())));
+    pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new()));
 }
