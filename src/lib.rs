@@ -25,7 +25,6 @@ extern crate core;
 )]
 extern crate crc;
 extern crate fnv;
-// extern crate rocksdb;
 extern crate lmdb;
 extern crate tempdir;
 
