@@ -522,10 +522,11 @@ impl DB {
             fs::create_dir(name.to_string());
         }
 
-        let env = Environment::new()
+        let env = Arc::new(Environment::new()
             .set_max_dbs(MAX_DBS_PER_ENV)
             .open(Path::new(SINFO))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?);
+
         let db = env
             .create_db(Some(&name.to_string()), DatabaseFlags::empty())
             .map_err(|e| e.to_string())?;
@@ -533,6 +534,8 @@ impl DB {
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
+
+        THREAD_POOL.lock().unwrap().start_pool(32, env.clone());
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
