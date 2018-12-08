@@ -235,7 +235,7 @@ impl ThreadPool {
                                     }
                                 }
                             } else {
-                                cb(Err("Not in txn context".to_string()))
+                                cb(Ok(()))
                             }
                         }
 
@@ -244,7 +244,7 @@ impl ThreadPool {
                                 txn.abort();
                                 cb(Ok(()))
                             } else {
-                                cb(Err("Not in txn context".to_string()))
+                                cb(Ok(()))
                             }
                         }
 
