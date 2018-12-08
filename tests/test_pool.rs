@@ -33,7 +33,7 @@ fn test_thread_pool() {
         Environment::new()
             .set_flags(EnvironmentFlags::NO_TLS)
             .set_max_dbs(1024)
-            .open(Path::new("_$lmdb"))
+            .open(Path::new("testdb"))
             .unwrap(),
     );
     thread::sleep_ms(50);

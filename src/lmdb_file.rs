@@ -36,7 +36,6 @@ use pool::{LmdbMessage, THREAD_POOL};
 
 const ASYNC_DB_TYPE: TaskType = TaskType::Sync;
 
-const DB_ROOT: &str = "_$lmdb";
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
 
@@ -50,8 +49,6 @@ const TIMEOUT: usize = 100;
 
 #[derive(Debug)]
 pub struct LmdbTableWrapper {
-    env: Arc<Environment>,
-    db: Database,
     name: Atom,
     // TODO: add methods to set/get these flags
     env_flags: EnvironmentFlags,
@@ -64,25 +61,7 @@ pub struct LmdbTable(Arc<LmdbTableWrapper>);
 
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
-        if !Path::new(&db_name.to_string()).exists() {
-            fs::create_dir(DB_ROOT);
-        }
-
-        let env = Arc::new(
-            Environment::new()
-                // see doc: https://docs.rs/lmdb/0.8.0/lmdb/struct.EnvironmentFlags.html#associatedconstant.NO_TLS
-                .set_flags(EnvironmentFlags::NO_TLS)
-                .set_max_dbs(MAX_DBS_PER_ENV)
-                .open(Path::new(DB_ROOT))
-                .expect("Open lmdb environment failed"),
-        );
-        let db = env
-            .create_db(Some(&db_name.to_string()), DatabaseFlags::empty())
-            .expect("Open lmdb database failed");
-
         LmdbTable(Arc::new(LmdbTableWrapper {
-            env: env,
-            db: db,
             name: db_name.clone(),
             env_flags: EnvironmentFlags::empty(),
             write_flags: WriteFlags::empty(),
