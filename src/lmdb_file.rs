@@ -100,7 +100,14 @@ struct LmdbTableTxnWrapper {
 impl Drop for LmdbTableTxnWrapper {
     fn drop(&mut self) {
         match THREAD_POOL.clone().lock() {
-            Ok(mut pool) => pool.push(self.sender.take().unwrap()),
+            Ok(mut pool) => {
+                if let Some(sender) = self.sender.clone() {
+                    pool.push(sender);
+                    self.sender = None;
+                } else {
+                    panic!("Push None value to thread pool");
+                }
+            }
             Err(e) => panic!("Give back sender failed: {:?}", e.to_string())
         };
     }
@@ -329,10 +336,6 @@ pub struct LmdbItemsIter {
     _filter: Filter,
 }
 
-impl Drop for LmdbItemsIter {
-    fn drop(&mut self) {}
-}
-
 impl LmdbItemsIter {
     pub fn new(
         sender: Sender<LmdbMessage>,
@@ -378,10 +381,6 @@ pub struct LmdbKeysIter {
     tab_name: Atom,
     descending: bool,
     _filter: Filter,
-}
-
-impl Drop for LmdbKeysIter {
-    fn drop(&mut self) {}
 }
 
 impl LmdbKeysIter {
