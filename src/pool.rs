@@ -111,7 +111,7 @@ impl ThreadPool {
 
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
-                                    let mut cursor = txn.open_rw_cursor(db).unwrap();
+                                    let mut cursor = txn.open_ro_cursor(db).unwrap();
                                     if let Some(k) = key {
                                         thread_local_iter = Some(
                                             cursor.iter_from_with_direction(k.to_vec(), descending),
@@ -146,7 +146,7 @@ impl ThreadPool {
 
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
-                                    let mut cursor = txn.open_rw_cursor(db).unwrap();
+                                    let mut cursor = txn.open_ro_cursor(db).unwrap();
                                     if let Some(k) = key {
                                         thread_local_iter = Some(
                                             cursor.iter_from_with_direction(k.to_vec(), descending),
@@ -235,7 +235,7 @@ impl ThreadPool {
                                     }
                                 }
                             } else {
-                                cb(Err("Not in txn context".to_string()))
+                                cb(Ok(()))
                             }
                         }
 
@@ -244,7 +244,7 @@ impl ThreadPool {
                                 txn.abort();
                                 cb(Ok(()))
                             } else {
-                                cb(Err("Not in txn context".to_string()))
+                                cb(Ok(()))
                             }
                         }
 
