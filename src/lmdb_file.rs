@@ -603,7 +603,6 @@ impl WareSnapshot for LmdbSnapshot {
     }
     // 创建一个meta事务
     fn meta_txn(&self, id: &Guid) -> Arc<MetaTxn> {
-        println!("create meta txn");
         Arc::new(LmdbMetaTxn::new(
             self.tab_txn(&Atom::from(SINFO), id, true, Box::new(|_r| {}))
                 .unwrap()

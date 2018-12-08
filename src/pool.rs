@@ -75,13 +75,13 @@ impl ThreadPool {
                             }
 
                             let txn = thread_local_txn.take().unwrap();
-                            unsafe {
-                                mdb_set_compare(
-                                    txn.txn(),
-                                    db.dbi(),
-                                    mdb_cmp_func as *mut MDB_cmp_func,
-                                );
-                            }
+                            // unsafe {
+                            //     mdb_set_compare(
+                            //         txn.txn(),
+                            //         db.dbi(),
+                            //         mdb_cmp_func as *mut MDB_cmp_func,
+                            //     );
+                            // }
 
                             for kv in keys.iter() {
                                 match txn.get(db, kv.key.as_ref()) {
@@ -173,19 +173,23 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
                             let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
+                            println!("db: {:?}", db);
 
                             if thread_local_txn.is_none() {
+                                println!("thread_local_txn is none, create new one");
                                 thread_local_txn = env.begin_rw_txn().ok();
                             }
+                            println!("thread_local_txn not none");
 
                             let mut rw_txn = thread_local_txn.as_mut().unwrap();
-                            unsafe {
-                                mdb_set_compare(
-                                    rw_txn.txn(),
-                                    db.dbi(),
-                                    mdb_cmp_func as *mut MDB_cmp_func,
-                                );
-                            }
+                            println!("txn: {:?}",  rw_txn.txn());
+                            // unsafe {
+                            //     mdb_set_compare(
+                            //         rw_txn.txn(),
+                            //         db.dbi(),
+                            //         mdb_cmp_func as *mut MDB_cmp_func,
+                            //     );
+                            // }
 
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {

@@ -113,6 +113,9 @@ fn test_lmdb_ware_house() {
     tab_txn.modify(arr.clone(), None, false, Arc::new(move |m| {
         assert!(m.is_ok());
     }));
+    tab_txn.modify(arr3.clone(), None, false, Arc::new(move |m| {
+        assert!(m.is_ok());
+    }));
 
     tab_txn.prepare(1000, Arc::new(move |p| {
         assert!(p.is_ok());
