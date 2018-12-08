@@ -197,8 +197,9 @@ impl ThreadPool {
                                     ) {
                                         Ok(_) => {
                                             println!(
-                                                "insert {:?} success",
-                                                kv.clone().key.as_ref()
+                                                "insert key: {:?}, value: {:?} success",
+                                                kv.clone().key.as_ref(),
+                                                kv.clone().value.as_ref()
                                             );
                                         }
                                         Err(e) => {

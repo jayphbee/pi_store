@@ -42,7 +42,12 @@ fn build_db_key(key: &str) -> Arc<Vec<u8>> {
 }
 
 fn build_db_val(val: &str) -> Arc<Vec<u8>> {
-    Arc::new(Vec::from(String::from(val).as_bytes()))
+    let mut wb = WriteBuffer::new();
+    wb.write_utf8(val);
+    
+    // Arc::new(Vec::from(String::from(val).as_bytes()))
+    println!("value: {:?}", Arc::new(wb.get_byte().to_vec()));
+    Arc::new(wb.get_byte().to_vec())
 }
 
 #[test]
@@ -128,19 +133,11 @@ fn test_get_put_iter() {
 
 #[test]
 fn test_lmdb_ware_house() {
-    if !Path::new("_$lmdb").exists() {
-        fs::create_dir("_$lmdb");
-    }
-    if !Path::new("_$sinfo").exists() {
-        fs::create_dir("_$sinfo");
-    }
-
     let db = DB::new(Atom::from("testdb")).unwrap();
 
     let snapshot = db.snapshot();
 
     let tab_name = Atom::from("test_table");
-    let tab_name_1 = Atom::from("test_table_1");
     let ware_name = Atom::from("testdb");
 
     let tab_name_1 = Atom::from("test_table_1");
@@ -150,45 +147,50 @@ fn test_lmdb_ware_house() {
         EnumType::Str,
         EnumType::Struct(Arc::new(StructInfo::new(tab_name.clone(), 8888))),
     ));
+
+    // create 2 tables in testdb ware
     snapshot.alter(&tab_name_1, Some(sinfo.clone()));
     snapshot.alter(&tab_name_2, Some(sinfo.clone()));
 
     let meta_txn = snapshot.meta_txn(&Guid(0));
-    meta_txn.alter(&tab_name_1, Some(sinfo.clone()), Arc::new(move |alter| {
-        assert!(alter.is_ok());
-    }));
     let tab_txn1 = snapshot
-        .tab_txn(&Atom::from("_$sinfo"), &Guid(0), true, Box::new(|_r| {}))
+        .tab_txn(&Atom::from(tab_name_1.clone()), &Guid(0), true, Box::new(|_r| {}))
         .unwrap()
         .expect("create player tab_txn fail");
 
     let key1 = build_db_key("key1");
     let value1 = build_db_val("value1");
 
-    let item1 = create_tabkv(ware_name.clone(), Atom::from("_$sinfo"), key1.clone(), 0, Some(value1.clone()));
+    let item1 = create_tabkv(ware_name.clone(), Atom::from(tab_name_1.clone()), key1.clone(), 0, Some(value1.clone()));
     let arr =  Arc::new(vec![item1.clone()]);
 
+    let tab_txn1_clone1 = tab_txn1.clone();
     tab_txn1.modify(arr.clone(), None, false, Arc::new(move |alter| {
         assert!(alter.is_ok());
 
-        let meta_txn_clone = meta_txn.clone();
-        let meta_txn = meta_txn.clone();
-        meta_txn_clone.prepare(1000, Arc::new(move |prepare|{
+        // let meta_txn_clone = meta_txn.clone();
+        // let meta_txn = meta_txn.clone();
+        let tab_txn1_clone2 = tab_txn1_clone1.clone();
+        tab_txn1_clone1.prepare(1000, Arc::new(move |prepare|{
             assert!(prepare.is_ok());
-            meta_txn.commit(Arc::new(move |commit| {
+            tab_txn1_clone2.commit(Arc::new(move |commit| {
                 assert!(commit.is_ok());
                 match commit {
                     Ok(_) => (),
-                    Err(e) => panic!("{:?}", e),
+                    Err(e) => println!("{:?}", e),
                 };
                 println!("meta_txn commit success");
             }));
         }));
     }));
 
+    
+
     // there should be three tables: "test_table_1", "test_table_2" and "_$sinfo"
     assert_eq!(snapshot.list().into_iter().count(), 3);
     assert!(snapshot.tab_info(&Atom::from("test_table_1")).is_some());
+    assert!(snapshot.tab_info(&Atom::from("test_table_2")).is_some());
+    assert!(snapshot.tab_info(&Atom::from("_$sinfo")).is_some());
     assert!(snapshot
         .tab_info(&Atom::from("does_not_exist_table"))
         .is_none());
@@ -268,6 +270,7 @@ fn test_multiply_txns() {
         let arr = Arc::new(vec![item1.clone()]);
         let tab_txn1_clone2 = tab_txn1.clone();
         tab_txn1_clone1.modify(arr.clone(), None, false, Arc::new(move|m2|{
+            println!("kkkkkkkkkkkk {:?}", m2);
             assert!(m2.is_ok());
             println!("nested txn level 2");
 
