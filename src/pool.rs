@@ -61,7 +61,6 @@ impl ThreadPool {
             thread::spawn(move || {
                 let env = clone_env;
                 let mut thread_local_txn: Option<RwTransaction> = None;
-                let mut thread_local_cursor: Option<RwCursor> = None;
                 let mut thread_local_iter: Option<LmdbIter> = None;
 
                 loop {
@@ -93,11 +92,19 @@ impl ThreadPool {
                                             index: kv.index,
                                             value: Some(Arc::new(Vec::from(v))),
                                         });
-                                        println!("query success: {:?}", values);
+                                    }
+                                    Err(Error::NotFound) => {
+                                        values.push(TabKV {
+                                            ware: kv.ware.clone(),
+                                            tab: kv.tab.clone(),
+                                            key: kv.key.clone(),
+                                            index: kv.index,
+                                            value: None,
+                                        });
                                     }
                                     Err(e) => {
-                                        println!("query failed {:?}", e);
-                                        cb(Err(e.to_string()));
+                                        cb(Err(format!("lmdb internal error: {:?}", e.to_string())));
+                                        break;
                                     }
                                 }
                             }
@@ -105,10 +112,10 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateItemIter(db_name, descending, key)) => {
-                            match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
-                                (true, true) => {
-                                    let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
+                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
+                            match thread_local_txn.is_none() {
+                                true => {
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
                                     let mut cursor = txn.open_ro_cursor(db).unwrap();
@@ -121,7 +128,7 @@ impl ThreadPool {
                                             Some(cursor.iter_items_with_direction(descending));
                                     }
                                 }
-                                _ => {}
+                                false => {}
                             }
                         }
 
@@ -140,10 +147,10 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateKeyIter(db_name, descending, key)) => {
-                            match (thread_local_txn.is_none(), thread_local_cursor.is_none()) {
-                                (true, true) => {
-                                    let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
+                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
+                            match thread_local_txn.is_none() {
+                                true => {
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
                                     let mut cursor = txn.open_ro_cursor(db).unwrap();
@@ -156,7 +163,7 @@ impl ThreadPool {
                                             Some(cursor.iter_items_with_direction(descending));
                                     }
                                 }
-                                _ => {}
+                                false => {}
                             }
                         }
 
@@ -203,8 +210,7 @@ impl ThreadPool {
                                             );
                                         }
                                         Err(e) => {
-                                            println!("modify error {:?}", e);
-                                            return cb(Err("insert failed".to_string()));
+                                            cb(Err(format!("insert data error: {:?}", e.to_string())));
                                         }
                                     };
                                 } else {
@@ -215,7 +221,7 @@ impl ThreadPool {
                                                 kv.clone().key.as_ref()
                                             );
                                         }
-                                        Err(e) => return cb(Err(e.to_string())),
+                                        Err(e) => cb(Err(format!("delete data error: {:?}", e.to_string()))),
                                     };
                                 }
                             }
@@ -227,11 +233,9 @@ impl ThreadPool {
                                 match txn.commit() {
                                     Ok(_) => {
                                         cb(Ok(()));
-                                        println!("commit success");
                                     }
                                     Err(e) => {
-                                        cb(Err(e.to_string()));
-                                        println!("commit failed: {}", e);
+                                        cb(Err(format!("commit failed with error: {:?}", e.to_string())));
                                     }
                                 }
                             } else {
