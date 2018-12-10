@@ -44,14 +44,11 @@ fn build_db_key(key: &str) -> Arc<Vec<u8>> {
 fn build_db_val(val: &str) -> Arc<Vec<u8>> {
     let mut wb = WriteBuffer::new();
     wb.write_utf8(val);
-
-    // Arc::new(Vec::from(String::from(val).as_bytes()))
-    // println!("value: {:?}", Arc::new(wb.get_byte().to_vec()));
     Arc::new(wb.get_byte().to_vec())
 }
 
 #[test]
-fn test_lmdb_ware_house() {
+fn test_lmdb_single_thread() {
     if Path::new("testdb").exists() {
         fs::remove_dir_all("testdb");
     }
@@ -115,8 +112,16 @@ fn test_lmdb_ware_house() {
     let item3 = create_tabkv(Atom::from("testdb"), Atom::from("test_table_1"), key3.clone(), 0, Some(value3.clone()));
     let arr3 =  Arc::new(vec![item1.clone(), item2.clone(), item3.clone()]);
 
-    // insert data
+    // insert data consecutively
     tab_txn.modify(arr.clone(), None, false, Arc::new(move |m| {
+        assert!(m.is_ok());
+    }));
+    // insert data
+    tab_txn.modify(arr3.clone(), None, false, Arc::new(move |m| {
+        assert!(m.is_ok());
+    }));
+    // insert data
+    tab_txn.modify(arr2.clone(), None, false, Arc::new(move |m| {
         assert!(m.is_ok());
     }));
 
@@ -188,10 +193,12 @@ fn test_lmdb_ware_house() {
         it.next(Arc::new(move |item| {
             println!("item: {:?}", item);
         }));
+        it.next(Arc::new(move |item| {
+            println!("item: {:?}", item);
+        }));
     }));
 
     tab_txn.commit(Arc::new(move |c| {
-        println!("error: {:?}", c);
         assert!(c.is_ok());
     }));
 
@@ -247,20 +254,32 @@ fn test_lmdb_ware_house() {
         .unwrap();
 
     // txn1 insert item1
-    txn1.modify(Arc::new(vec![item1]), None, false, Arc::new(move |m| {
+    txn1.modify(Arc::new(vec![item1.clone()]), None, false, Arc::new(move |m| {
         assert!(m.is_ok());
     }));
     // txn2 insert item2
     txn2.modify(Arc::new(vec![item2]), None, false, Arc::new(move |m| {
         assert!(m.is_ok());
     }));
+    // txn1 pre commit
+    txn1.prepare(1000, Arc::new(move |p| {
+        assert!(p.is_ok());
+    }));
     // txn1 commit
     txn1.commit(Arc::new(move |c| {
         assert!(c.is_ok());
     }));
-    // txn3 insert item3, item4
-    txn3.modify(Arc::new(vec![item3, item4]), None, false, Arc::new(move |m| {
+    // txn3 insert item3, item4, item5
+    txn3.modify(Arc::new(vec![item3, item4, item5]), None, false, Arc::new(move |m| {
         assert!(m.is_ok());
+    }));
+    // txn2 rollback
+    txn2.rollback(Arc::new(move |r| {
+        assert!(r.is_ok());
+    }));
+    // txn2 pre-commit
+    txn2.prepare(1000, Arc::new(move |p| {
+        assert!(p.is_ok());
     }));
     // txn2 commit
     txn2.commit(Arc::new(move |c| {
@@ -270,34 +289,51 @@ fn test_lmdb_ware_house() {
     txn1.modify(Arc::new(vec![delete_item1]), None, false, Arc::new(move |m| {
         assert!(m.is_ok());
     }));
+    // txn3 pre commit
+    txn3.prepare(1000, Arc::new(move |p| {
+        assert!(p.is_ok());
+    }));
     // commit txn3
     txn3.commit(Arc::new(move |c| {
         assert!(c.is_ok());
+    }));
+    // txn1 pre commit
+    txn1.prepare(1000, Arc::new(move |p| {
+        assert!(p.is_ok());
     }));
     // commit txn1
     txn1.commit(Arc::new(move |c| {
         assert!(c.is_ok());
     }));
+    // use txn3 to query item1, value should be None
+    txn3.query(Arc::new(vec![item1.clone()]), None, false, Arc::new(move |q| {
+        assert!(q.is_ok());
+        println!("queried value: {:?}", q);
+    }));
 
-    // reuse txn1 to iterate inserted items
+    // reuse txn1 to iterate inserted items, there should be item3, item4, item5
+    // puls the previously inserted value1 and value3 because item1 is deleted, item2 is rollbacked
     txn1.iter(None, false, None, Arc::new(move |iter| {
         assert!(iter.is_ok());
         let mut it = iter.unwrap();
 
         it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
+            println!("multi txn item: {:?}", item);
         }));
         it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
+            println!("multi txn item: {:?}", item);
         }));
         it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
+            println!("multi txn item: {:?}", item);
         }));
         it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
+            println!("multi txn item: {:?}", item);
         }));
         it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
+            println!("multi txn item: {:?}", item);
+        }));
+        it.next(Arc::new(move |item| {
+            println!("multi txn item: {:?}", item);
         }));
     }));
 

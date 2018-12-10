@@ -6,7 +6,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::slice::from_raw_parts;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, RwLock};
 
 use fnv::FnvHashMap;
@@ -77,6 +77,13 @@ impl Tab for LmdbTable {
 
         if sender.is_none() {
             println!("THREAD_POOL full, can't get one from it");
+        }
+
+        let db_name = self.0.clone().name.to_string();
+        let (tx, rx) = channel();
+        sender.clone().unwrap().send(LmdbMessage::CreateDb(db_name, tx));
+        if let Err(e) = rx.recv() {
+            panic!("Open db error: {:?}", e.to_string());
         }
 
         Arc::new(LmdbTableTxn(Arc::new(RefCell::new(LmdbTableTxnWrapper {

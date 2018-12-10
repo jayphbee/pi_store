@@ -24,6 +24,7 @@ use pi_db::db::{
 use pi_lib::bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 
 pub enum LmdbMessage {
+    CreateDb(String, Sender<()>),
     Query(String, Arc<Vec<TabKV>>, TxQueryCallback),
     NextItem(String, Arc<Fn(NextResult<(Bin, Bin)>)>),
     NextKey(String, Arc<Fn(NextResult<Bin>)>),
@@ -62,12 +63,21 @@ impl ThreadPool {
                 let env = clone_env;
                 let mut thread_local_txn: Option<RwTransaction> = None;
                 let mut thread_local_iter: Option<LmdbIter> = None;
+                let mut db: Option<Database> = None;
 
                 loop {
                     match rx.recv() {
+                        Ok(LmdbMessage::CreateDb(db_name, tx)) => {
+                            db = match env.open_db(Some(&db_name.to_string())) {
+                                Ok(db) => Some(db),
+                                Err(_) => Some(env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap()),
+                            };
+
+                            tx.send(());
+                        }
+
                         Ok(LmdbMessage::Query(db_name, keys, cb)) => {
                             let mut values = Vec::new();
-                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
@@ -77,13 +87,13 @@ impl ThreadPool {
                             unsafe {
                                 mdb_set_compare(
                                     txn.txn(),
-                                    db.dbi(),
+                                    db.clone().unwrap().dbi(),
                                     mdb_cmp_func as *mut MDB_cmp_func,
                                 );
                             }
 
                             for kv in keys.iter() {
-                                match txn.get(db, kv.key.as_ref()) {
+                                match txn.get(db.clone().unwrap(), kv.key.as_ref()) {
                                     Ok(v) => {
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
@@ -112,13 +122,11 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateItemIter(db_name, descending, key)) => {
-                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
-
                             match thread_local_txn.is_none() {
                                 true => {
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
-                                    let mut cursor = txn.open_ro_cursor(db).unwrap();
+                                    let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
                                     if let Some(k) = key {
                                         thread_local_iter = Some(
                                             cursor.iter_from_with_direction(k.to_vec(), descending),
@@ -147,13 +155,11 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateKeyIter(db_name, descending, key)) => {
-                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
-
                             match thread_local_txn.is_none() {
                                 true => {
                                     thread_local_txn = env.begin_rw_txn().ok();
                                     let txn = thread_local_txn.as_mut().unwrap();
-                                    let mut cursor = txn.open_ro_cursor(db).unwrap();
+                                    let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
                                     if let Some(k) = key {
                                         thread_local_iter = Some(
                                             cursor.iter_from_with_direction(k.to_vec(), descending),
@@ -179,8 +185,6 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
-                            let db = env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap();
-
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
                             }
@@ -189,7 +193,7 @@ impl ThreadPool {
                             unsafe {
                                 mdb_set_compare(
                                     rw_txn.txn(),
-                                    db.dbi(),
+                                    db.clone().unwrap().dbi(),
                                     mdb_cmp_func as *mut MDB_cmp_func,
                                 );
                             }
@@ -197,7 +201,7 @@ impl ThreadPool {
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {
                                     match rw_txn.put(
-                                        db,
+                                        db.clone().unwrap(),
                                         kv.key.as_ref(),
                                         kv.clone().value.unwrap().as_ref(),
                                         WriteFlags::empty(),
@@ -214,7 +218,7 @@ impl ThreadPool {
                                         }
                                     };
                                 } else {
-                                    match rw_txn.del(db, kv.key.as_ref(), None) {
+                                    match rw_txn.del(db.clone().unwrap(), kv.key.as_ref(), None) {
                                         Ok(_) => {
                                             println!(
                                                 "delete {:?} success",
