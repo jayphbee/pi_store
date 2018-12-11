@@ -501,13 +501,18 @@ pub struct DB {
 }
 
 impl DB {
-    pub fn new(name: Atom) -> Result<Self, String> {
+    pub fn new(name: Atom, db_size: usize) -> Result<Self, String> {
         if !Path::new(&name.to_string()).exists() {
             fs::create_dir(name.to_string());
         }
 
+        if db_size < 1024 * 1024 {
+            return Err("DB size must greater than 1M".to_string());
+        }
+
         let env = Arc::new(Environment::new()
             .set_max_dbs(MAX_DBS_PER_ENV)
+            .set_map_size(db_size)
             .open(Path::new(&name.to_string()))
             .map_err(|e| e.to_string())?);
 
