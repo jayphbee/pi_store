@@ -161,6 +161,7 @@ impl Txn for LmdbTableTxn {
     }
 
     fn rollback(&self, cb: TxCallback) -> DBResult {
+        Arc::clone(&self.0).borrow_mut().state = TxState::Rollbacking;
         let lmdb_table_txn = self.0.clone();
         let tab_name = self.0.clone().borrow().tab.0.clone().name.to_string();
 
