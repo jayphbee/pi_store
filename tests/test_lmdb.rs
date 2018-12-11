@@ -187,15 +187,11 @@ fn test_lmdb_single_thread() {
         assert!(iter.is_ok());
         let mut it = iter.unwrap();
 
-        it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
-        }));
-        it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
-        }));
-        it.next(Arc::new(move |item| {
-            println!("item: {:?}", item);
-        }));
+        for i in 0..3 {
+            it.next(Arc::new(move |item| {
+                println!("item {:?}: {:?}", i, item);
+            }));
+        }
     }));
 
     tab_txn.commit(Arc::new(move |c| {
@@ -317,25 +313,152 @@ fn test_lmdb_single_thread() {
         assert!(iter.is_ok());
         let mut it = iter.unwrap();
 
-        it.next(Arc::new(move |item| {
-            println!("multi txn item: {:?}", item);
-        }));
-        it.next(Arc::new(move |item| {
-            println!("multi txn item: {:?}", item);
-        }));
-        it.next(Arc::new(move |item| {
-            println!("multi txn item: {:?}", item);
-        }));
-        it.next(Arc::new(move |item| {
-            println!("multi txn item: {:?}", item);
-        }));
-        it.next(Arc::new(move |item| {
-            println!("multi txn item: {:?}", item);
-        }));
-        it.next(Arc::new(move |item| {
-            println!("multi txn item: {:?}", item);
-        }));
+        for i in 0..6 {
+            it.next(Arc::new(move |item| {
+                println!("multi thread item {:?}: {:?}", i, item);
+            }));
+        }
     }));
 
     thread::sleep_ms(500);
+}
+
+#[test]
+fn test_lmdb_multi_thread() {
+    if Path::new("testdb").exists() {
+        fs::remove_dir_all("testdb");
+    }
+
+    let db = DB::new(Atom::from("testdb")).unwrap();
+
+    let snapshot = db.snapshot();
+    // newly created DB should have a "_$sinfo" table
+    assert!(snapshot.tab_info(&Atom::from("_$sinfo")).is_some());
+
+    // insert table meta info to "_$sinfo" table
+    let sinfo = Arc::new(TabMeta::new(
+        EnumType::Str,
+        EnumType::Struct(Arc::new(StructInfo::new(Atom::from("test_table_2"), 8888))),
+    ));
+    snapshot.alter(&Atom::from("test_table_2"), Some(sinfo.clone()));
+
+    let meta_txn = snapshot.meta_txn(&Guid(0));
+
+    meta_txn.alter(&Atom::from("test_table_2"), Some(sinfo.clone()), Arc::new(move |alter| {
+        assert!(alter.is_ok());
+    }));
+    meta_txn.prepare(1000, Arc::new(move |p| {
+        assert!(p.is_ok());
+    }));
+    meta_txn.commit(Arc::new(move |c| {
+        assert!(c.is_ok());
+    }));
+
+    thread::sleep_ms(500);
+
+    let k1 = build_db_key("foo1");
+    let v1 = build_db_val("bar1");
+
+    let k2 = build_db_key("foo2");
+    let v2 = build_db_val("bar2");
+
+    let k3 = build_db_key("foo3");
+    let v3 = build_db_val("bar3");
+
+    let k4 = build_db_key("foo4");
+    let v4 = build_db_val("bar4");
+
+    let k5 = build_db_key("foo5");
+    let v5 = build_db_val("bar5");
+
+    let item1 = create_tabkv(Atom::from("testdb"), Atom::from("test_table_1"), k1.clone(), 0, Some(v1.clone()));
+    let delete_item1 = create_tabkv(Atom::from("testdb"), Atom::from("test_table_1"), k1.clone(), 0, None);
+    let item2 = create_tabkv(Atom::from("testdb"), Atom::from("test_table_1"), k2.clone(), 0, Some(v2.clone()));
+    let item3 = create_tabkv(Atom::from("testdb"), Atom::from("test_table_1"), k3.clone(), 0, Some(v3.clone()));
+    let item4 = create_tabkv(Atom::from("testdb"), Atom::from("test_table_1"), k4.clone(), 0, Some(v4.clone()));
+    let item5 = create_tabkv(Atom::from("testdb"), Atom::from("test_table_1"), k5.clone(), 0, Some(v5.clone()));
+
+    // thread 1, 2, 3 insert item1, item2, item3, item4, item5
+    let h1 = thread::spawn(move || {
+        let db = DB::new(Atom::from("testdb")).unwrap();
+        let snapshot = db.snapshot();
+        let txn1 = snapshot
+        .tab_txn(&Atom::from("test_table_2"), &Guid(0), true, Box::new(|_r| {}))
+        .unwrap()
+        .unwrap();
+
+        txn1.modify(Arc::new(vec![item1.clone()]), None, false, Arc::new(move |m| {
+            assert!(m.is_ok());
+        }));
+        txn1.prepare(1000, Arc::new(move |p| {
+            assert!(p.is_ok());
+        }));
+        txn1.commit(Arc::new(move |c| {
+            assert!(c.is_ok());
+        }));
+    });
+
+    let h2 = thread::spawn(move || {
+        let db = DB::new(Atom::from("testdb")).unwrap();
+        let snapshot = db.snapshot();
+        let txn2 = snapshot
+        .tab_txn(&Atom::from("test_table_2"), &Guid(1), true, Box::new(|_r| {}))
+        .unwrap()
+        .unwrap();
+
+        txn2.modify(Arc::new(vec![item2.clone(), item3.clone()]), None, false, Arc::new(move |m| {
+            assert!(m.is_ok());
+        }));
+        txn2.prepare(1000, Arc::new(move |p| {
+            assert!(p.is_ok());
+        }));
+        txn2.commit(Arc::new(move |c| {
+            assert!(c.is_ok());
+        }));
+    });
+
+    let h3 = thread::spawn(move || {
+        let db = DB::new(Atom::from("testdb")).unwrap();
+        let snapshot = db.snapshot();
+        let txn3 = snapshot
+        .tab_txn(&Atom::from("test_table_2"), &Guid(2), true, Box::new(|_r| {}))
+        .unwrap()
+        .unwrap();
+
+        txn3.modify(Arc::new(vec![item4.clone(), item5.clone()]), None, false, Arc::new(move |m| {
+            assert!(m.is_ok());
+        }));
+        txn3.prepare(1000, Arc::new(move |p| {
+            assert!(p.is_ok());
+        }));
+        txn3.commit(Arc::new(move |c| {
+            assert!(c.is_ok());
+        }));
+    });
+
+    h1.join();
+    h2.join();
+    h3.join();
+
+    // thread 4 iterate all the inserted value from beging to end
+    let h4 = thread::spawn(move || {
+        let db = DB::new(Atom::from("testdb")).unwrap();
+        let snapshot = db.snapshot();
+        let txn4 = snapshot
+        .tab_txn(&Atom::from("test_table_2"), &Guid(4 ), true, Box::new(|_r| {}))
+        .unwrap()
+        .unwrap();
+
+        txn4.iter(None, true, None, Arc::new(move |iter| {
+            assert!(iter.is_ok());
+            let mut it = iter.unwrap();
+            for i in 0..6 {
+                it.next(Arc::new(move |item| {
+                    println!("multi thread item {:?}: {:?}", i, item);
+                }));
+            }
+        }));
+    });
+
+    thread::sleep_ms(1000);
 }
