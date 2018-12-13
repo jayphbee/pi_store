@@ -35,6 +35,7 @@ extern crate pi_base;
 extern crate pi_db;
 extern crate pi_lib;
 // extern crate pi_vm;
+extern crate crossbeam_channel;
 
 pub mod db;
 pub mod kg;
