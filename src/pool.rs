@@ -1,16 +1,16 @@
 use std::path::Path;
 use std::slice::from_raw_parts;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::thread;
 
 use lmdb::{
     mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Error,
     Iter as LmdbIter, MDB_cmp_func, MDB_dbi, MDB_txn, MDB_val, RoCursor, RoTransaction, RwCursor,
-    RwTransaction, Transaction, WriteFlags,
+    RwTransaction, Stat, Transaction, WriteFlags,
 };
 
 use lmdb_file::{MDB_FIRST, MDB_LAST, MDB_NEXT, MDB_PREV, MDB_SET};
@@ -33,6 +33,7 @@ pub enum LmdbMessage {
     Modify(String, Arc<Vec<TabKV>>, TxCallback),
     Commit(String, TxCallback),
     Rollback(String, TxCallback),
+    TableSize(Arc<Fn(SResult<usize>)>),
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -70,7 +71,13 @@ impl ThreadPool {
                         Ok(LmdbMessage::CreateDb(db_name, tx)) => {
                             db = match env.open_db(Some(&db_name.to_string())) {
                                 Ok(db) => Some(db),
-                                Err(_) => Some(env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty()).unwrap()),
+                                Err(_) => Some(
+                                    env.create_db(
+                                        Some(&db_name.to_string()),
+                                        DatabaseFlags::empty(),
+                                    )
+                                    .unwrap(),
+                                ),
                             };
 
                             tx.send(());
@@ -113,7 +120,10 @@ impl ThreadPool {
                                         });
                                     }
                                     Err(e) => {
-                                        cb(Err(format!("lmdb internal error: {:?}", e.to_string())));
+                                        cb(Err(format!(
+                                            "lmdb internal error: {:?}",
+                                            e.to_string()
+                                        )));
                                         break;
                                     }
                                 }
@@ -122,21 +132,18 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateItemIter(db_name, descending, key)) => {
-                            match thread_local_txn.is_none() {
-                                true => {
-                                    thread_local_txn = env.begin_rw_txn().ok();
-                                    let txn = thread_local_txn.as_mut().unwrap();
-                                    let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
-                                    if let Some(k) = key {
-                                        thread_local_iter = Some(
-                                            cursor.iter_from_with_direction(k.to_vec(), descending),
-                                        );
-                                    } else {
-                                        thread_local_iter =
-                                            Some(cursor.iter_items_with_direction(descending));
-                                    }
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                                let txn = thread_local_txn.as_mut().unwrap();
+                                let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
+                                if let Some(k) = key {
+                                    thread_local_iter = Some(
+                                        cursor.iter_from_with_direction(k.to_vec(), descending),
+                                    );
+                                } else {
+                                    thread_local_iter =
+                                        Some(cursor.iter_items_with_direction(descending));
                                 }
-                                false => {}
                             }
                         }
 
@@ -155,21 +162,18 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateKeyIter(db_name, descending, key)) => {
-                            match thread_local_txn.is_none() {
-                                true => {
-                                    thread_local_txn = env.begin_rw_txn().ok();
-                                    let txn = thread_local_txn.as_mut().unwrap();
-                                    let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
-                                    if let Some(k) = key {
-                                        thread_local_iter = Some(
-                                            cursor.iter_from_with_direction(k.to_vec(), descending),
-                                        );
-                                    } else {
-                                        thread_local_iter =
-                                            Some(cursor.iter_items_with_direction(descending));
-                                    }
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                                let txn = thread_local_txn.as_mut().unwrap();
+                                let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
+                                if let Some(k) = key {
+                                    thread_local_iter = Some(
+                                        cursor.iter_from_with_direction(k.to_vec(), descending),
+                                    );
+                                } else {
+                                    thread_local_iter =
+                                        Some(cursor.iter_items_with_direction(descending));
                                 }
-                                false => {}
                             }
                         }
 
@@ -206,26 +210,20 @@ impl ThreadPool {
                                         kv.clone().value.unwrap().as_ref(),
                                         WriteFlags::empty(),
                                     ) {
-                                        Ok(_) => {
-                                            println!(
-                                                "insert key: {:?}, value: {:?} success",
-                                                kv.clone().key.as_ref(),
-                                                kv.clone().value.as_ref()
-                                            );
-                                        }
-                                        Err(e) => {
-                                            cb(Err(format!("insert data error: {:?}", e.to_string())));
-                                        }
+                                        Ok(_) => {}
+                                        Err(e) => cb(Err(format!(
+                                            "insert data error: {:?}",
+                                            e.to_string()
+                                        ))),
                                     };
                                 } else {
                                     match rw_txn.del(db.clone().unwrap(), kv.key.as_ref(), None) {
-                                        Ok(_) => {
-                                            println!(
-                                                "delete {:?} success",
-                                                kv.clone().key.as_ref()
-                                            );
-                                        }
-                                        Err(e) => cb(Err(format!("delete data error: {:?}", e.to_string()))),
+                                        Ok(_) => {}
+                                        Err(Error::NotFound) => {}
+                                        Err(e) => cb(Err(format!(
+                                            "delete data error: {:?}",
+                                            e.to_string()
+                                        ))),
                                     };
                                 }
                             }
@@ -235,12 +233,11 @@ impl ThreadPool {
                         Ok(LmdbMessage::Commit(db_name, cb)) => {
                             if let Some(txn) = thread_local_txn.take() {
                                 match txn.commit() {
-                                    Ok(_) => {
-                                        cb(Ok(()));
-                                    }
-                                    Err(e) => {
-                                        cb(Err(format!("commit failed with error: {:?}", e.to_string())));
-                                    }
+                                    Ok(_) => cb(Ok(())),
+                                    Err(e) => cb(Err(format!(
+                                        "commit failed with error: {:?}",
+                                        e.to_string()
+                                    ))),
                                 }
                             } else {
                                 cb(Ok(()))
@@ -255,6 +252,11 @@ impl ThreadPool {
                                 cb(Ok(()))
                             }
                         }
+
+                        Ok(LmdbMessage::TableSize(cb)) => match env.stat() {
+                            Ok(stat) => cb(Ok(stat.entries())),
+                            Err(e) => cb(Err(e.to_string())),
+                        },
 
                         Err(e) => {
                             // unexpected message, do nothing
@@ -305,7 +307,6 @@ fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
         }
     }
 }
-
 
 lazy_static! {
     pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new()));

@@ -72,7 +72,10 @@ impl Tab for LmdbTable {
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
         let sender = match THREAD_POOL.clone().lock() {
             Ok(mut pool) => pool.pop(),
-            Err(e) => panic!("get sender error when creating transaction: {:?}", e.to_string())
+            Err(e) => panic!(
+                "get sender error when creating transaction: {:?}",
+                e.to_string()
+            ),
         };
 
         if sender.is_none() {
@@ -81,7 +84,10 @@ impl Tab for LmdbTable {
 
         let db_name = self.0.clone().name.to_string();
         let (tx, rx) = channel();
-        sender.clone().unwrap().send(LmdbMessage::CreateDb(db_name, tx));
+        sender
+            .clone()
+            .unwrap()
+            .send(LmdbMessage::CreateDb(db_name, tx));
         if let Err(e) = rx.recv() {
             panic!("Open db error: {:?}", e.to_string());
         }
@@ -115,7 +121,7 @@ impl Drop for LmdbTableTxnWrapper {
                     panic!("Push None value to thread pool");
                 }
             }
-            Err(e) => panic!("Give back sender failed: {:?}", e.to_string())
+            Err(e) => panic!("Give back sender failed: {:?}", e.to_string()),
         };
     }
 }
@@ -331,6 +337,17 @@ impl TabTxn for LmdbTableTxn {
     }
 
     fn tab_size(&self, cb: Arc<Fn(SResult<usize>)>) -> Option<SResult<usize>> {
+        match self.0.clone().borrow().sender.clone() {
+            Some(tx) => {
+                tx.send(LmdbMessage::TableSize(Arc::new(move |t| match t {
+                    Ok(entries) => cb(Ok(entries)),
+                    Err(e) => cb(Err(e.to_string())),
+                })));
+            }
+            None => {
+                cb(Err("Can't get sender".to_string()));
+            }
+        }
         None
     }
 }
@@ -510,11 +527,14 @@ impl DB {
             return Err("DB size must greater than 1M".to_string());
         }
 
-        let env = Arc::new(Environment::new()
-            .set_max_dbs(MAX_DBS_PER_ENV)
-            .set_map_size(db_size)
-            .open(Path::new(&name.to_string()))
-            .map_err(|e| e.to_string())?);
+        let env = Arc::new(
+            Environment::new()
+                .set_max_dbs(MAX_DBS_PER_ENV)
+                .set_map_size(db_size)
+                .set_flags(EnvironmentFlags::NO_TLS)
+                .open(Path::new(&name.to_string()))
+                .map_err(|e| e.to_string())?,
+        );
 
         // retrive meta table info of a DB
         let db = env
