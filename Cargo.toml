@@ -16,3 +16,4 @@ lmdb = { git = "https://github.com/GaiaWorld/lmdb-rs"}
 pi_db = {path = "../pi_db"}
 pi_lib = { path = "../pi_lib" }
 pi_base = { path = "../pi_base" }
+crossbeam-channel = "0.3"

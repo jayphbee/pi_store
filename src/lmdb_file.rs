@@ -6,10 +6,10 @@ use std::path::Path;
 use std::rc::Rc;
 use std::slice::from_raw_parts;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, RwLock};
 
 use fnv::FnvHashMap;
+use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
 
 use pi_base::pi_base_impl::STORE_TASK_POOL;
 use pi_base::task::TaskType;
@@ -83,7 +83,7 @@ impl Tab for LmdbTable {
         }
 
         let db_name = self.0.clone().name.to_string();
-        let (tx, rx) = channel();
+        let (tx, rx) = bounded(1);
         sender
             .clone()
             .unwrap()

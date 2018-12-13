@@ -2,7 +2,7 @@ use std::path::Path;
 use std::slice::from_raw_parts;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -58,7 +58,7 @@ impl ThreadPool {
         println!("start thread pool");
         for i in 0..cap {
             let clone_env = env.clone();
-            let (tx, rx) = channel();
+            let (tx, rx) = bounded(1);
 
             thread::spawn(move || {
                 let env = clone_env;
