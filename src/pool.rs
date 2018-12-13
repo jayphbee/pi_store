@@ -47,7 +47,6 @@ pub struct ThreadPool {
 
 impl ThreadPool {
     pub fn new() -> Self {
-        println!("create thread pool");
         ThreadPool {
             senders: Vec::new(),
             total: 0,
@@ -55,7 +54,6 @@ impl ThreadPool {
         }
     }
     pub fn start_pool(&mut self, cap: usize, env: Arc<Environment>) {
-        println!("start thread pool");
         for i in 0..cap {
             let clone_env = env.clone();
             let (tx, rx) = bounded(1);
@@ -88,16 +86,16 @@ impl ThreadPool {
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
+                                unsafe {
+                                    mdb_set_compare(
+                                        thread_local_txn.as_ref().unwrap().txn(),
+                                        db.clone().unwrap().dbi(),
+                                        mdb_cmp_func as *mut MDB_cmp_func,
+                                    );
+                                }
                             }
 
                             let txn = thread_local_txn.take().unwrap();
-                            unsafe {
-                                mdb_set_compare(
-                                    txn.txn(),
-                                    db.clone().unwrap().dbi(),
-                                    mdb_cmp_func as *mut MDB_cmp_func,
-                                );
-                            }
 
                             for kv in keys.iter() {
                                 match txn.get(db.clone().unwrap(), kv.key.as_ref()) {
@@ -191,16 +189,17 @@ impl ThreadPool {
                         Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
+
+                                unsafe {
+                                    mdb_set_compare(
+                                        thread_local_txn.as_ref().unwrap().txn(),
+                                        db.clone().unwrap().dbi(),
+                                        mdb_cmp_func as *mut MDB_cmp_func,
+                                    );
+                                }
                             }
 
                             let mut rw_txn = thread_local_txn.as_mut().unwrap();
-                            unsafe {
-                                mdb_set_compare(
-                                    rw_txn.txn(),
-                                    db.clone().unwrap().dbi(),
-                                    mdb_cmp_func as *mut MDB_cmp_func,
-                                );
-                            }
 
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {
