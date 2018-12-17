@@ -987,17 +987,17 @@ fn write_log(
         let mut writer = awriter.0.lock().unwrap();
         last = writer.block.data.len();
         //写guid
-        match (&mut writer.block.data).write_all(&guid.0.to_bytes()[..]) {
+        match (&mut writer.block.data).write_all(&guid.0.to_le_bytes()[..]) {
             Err(e) => return Err(e.to_string()),
             _ => (),
         }
         //写data长度
         match match data.len() {
-            len if len < 127 => (&mut writer.block.data).write_all(&(len as u8).to_bytes()[..]),
+            len if len < 127 => (&mut writer.block.data).write_all(&(len as u8).to_le_bytes()[..]),
             len if len >= 127 && len < 65536 => {
-                (&mut writer.block.data).write_all(&(len as u16).to_bytes()[..])
+                (&mut writer.block.data).write_all(&(len as u16).to_le_bytes()[..])
             }
-            len => (&mut writer.block.data).write_all(&(len as u32).to_bytes()[..]),
+            len => (&mut writer.block.data).write_all(&(len as u32).to_le_bytes()[..]),
         } {
             Err(e) => return Err(e.to_string()),
             _ => (),
@@ -1009,7 +1009,7 @@ fn write_log(
         }
         if st_key != 0 {
             //写子表编号
-            match (&mut writer.block.data).write_all(&st_key.to_bytes()[..]) {
+            match (&mut writer.block.data).write_all(&st_key.to_le_bytes()[..]) {
                 Err(e) => return Err(e.to_string()),
                 _ => (),
             }
@@ -1125,11 +1125,11 @@ fn save_block_head(
 ) -> SResult<()> {
     let mut head: Vec<u8> = Vec::with_capacity(BLOCK_HEAD_SIZE);
     let writer = awriter.0.lock().unwrap();
-    match head.write_all(&writer.block.data.len().to_bytes()[0..3]) {
+    match head.write_all(&writer.block.data.len().to_le_bytes()[0..3]) {
         Err(e) => return Err(e.to_string()),
         _ => (),
     }
-    match head.write_all(&crc32::checksum_ieee(&writer.block.data[..]).to_bytes()[..]) {
+    match head.write_all(&crc32::checksum_ieee(&writer.block.data[..]).to_le_bytes()[..]) {
         Err(e) => return Err(e.to_string()),
         _ => (),
     }
@@ -1253,7 +1253,7 @@ fn handle_create_rw_file(
 fn create_rw_file(dir: Atom, time: u64, count: usize, cb: Box<FnBox(IoResult<AsyncFile>)>) {
     let mut path = PathBuf::new();
     path.push(&**dir);
-    path.push((&time.to_bytes()[..]).to_base58());
+    path.push((&time.to_le_bytes()[..]).to_base58());
     path.set_extension(count.to_string());
     AsyncFile::open(path, AsynFileOptions::ReadWrite(8), cb);
 }

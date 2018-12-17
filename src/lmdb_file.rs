@@ -11,18 +11,18 @@ use std::sync::{Arc, RwLock};
 use fnv::FnvHashMap;
 use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
 
-use pi_base::pi_base_impl::STORE_TASK_POOL;
-use pi_base::task::TaskType;
+use worker::impls::STORE_TASK_POOL;
+use worker::task::TaskType;
 
 use pi_db::db::{
     Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,
     OpenTab, RwLog, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState,
     Txn, Ware, WareSnapshot,
 };
-use pi_lib::atom::Atom;
-use pi_lib::bon::{Decode, Encode, ReadBuffer, WriteBuffer};
-use pi_lib::guid::Guid;
-use pi_lib::sinfo::EnumType;
+use atom::Atom;
+use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
+use guid::Guid;
+use sinfo::EnumType;
 
 use pi_db::tabs::{TabLog, Tabs};
 

@@ -11,9 +11,20 @@ bytes = "*"
 lazy_static = "*"
 fnv = "1.0.3"
 tempdir = "0.3"
+rand = "*"
 pi_vm = { path = "../pi_vm" }
 lmdb = { git = "https://github.com/GaiaWorld/lmdb-rs"}
 pi_db = {path = "../pi_db"}
-pi_lib = { path = "../pi_lib" }
-pi_base = { path = "../pi_base" }
+hash_value = { path = "../pi_math/hash_value" }
+atom = { path = "../pi_lib/atom" }
+worker = { path = "../pi_lib/worker" }
+handler = { path = "../pi_lib/handler" }
+bon = { path = "../pi_lib/bon" }
+file = { path = "../pi_lib/file" }
+gray = {path = "../pi_lib/gray" }
+guid = {path = "../pi_lib/guid" }
+util = {path = "../pi_lib/util" }
+sinfo = {path = "../pi_lib/sinfo" }
+timer = {path = "../pi_lib/timer" }
+ordmap = {path = "../pi_lib/ordmap" }
 crossbeam-channel = "0.3"

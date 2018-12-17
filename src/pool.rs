@@ -21,7 +21,7 @@ use pi_db::db::{
     WareSnapshot,
 };
 
-use pi_lib::bon::{Decode, Encode, ReadBuffer, WriteBuffer};
+use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 
 pub enum LmdbMessage {
     CreateDb(String, Sender<()>),
