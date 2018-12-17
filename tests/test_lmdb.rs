@@ -1,22 +1,21 @@
-extern crate pi_base;
 extern crate pi_db;
-extern crate pi_lib;
 extern crate pi_store;
 extern crate tempdir;
 
-use std::cell::RefCell;
+extern crate atom;
+extern crate bon;
+extern crate guid;
+extern crate sinfo;
+
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
-use pi_base::pi_base_impl::STORE_TASK_POOL;
-use pi_base::worker_pool::WorkerPool;
-
-use pi_lib::atom::Atom;
-use pi_lib::bon::{Decode, Encode, ReadBuffer, WriteBuffer};
-use pi_lib::guid::Guid;
-use pi_lib::sinfo::{EnumType, StructInfo};
+use atom::Atom;
+use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
+use guid::Guid;
+use sinfo::{EnumType, StructInfo};
 
 use pi_db::db::{
     Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,
@@ -1023,7 +1022,7 @@ fn test_exception() {
             let v = build_db_val(&format!("test_value{:?}", i));
             let item = create_tabkv(
                 Atom::from("testdb"),
-                Atom::from("test_table_2"),
+                Atom::from("test_table_3"),
                 k.clone(),
                 0,
                 Some(v.clone()),
@@ -1054,7 +1053,7 @@ fn test_exception() {
             assert!(c.is_ok());
         }));
 
-        println!("XXXX impossible to reach there XXXXX");
+        unreachable!();
     });
 
     // thread 2 normally insert items
@@ -1076,7 +1075,7 @@ fn test_exception() {
             let v = build_db_val(&format!("test_value{:?}", i));
             let item = create_tabkv(
                 Atom::from("testdb"),
-                Atom::from("test_table_2"),
+                Atom::from("test_table_3"),
                 k.clone(),
                 0,
                 Some(v.clone()),
@@ -1123,7 +1122,7 @@ fn test_exception() {
             let v = build_db_val(&format!("test_value{:?}", i));
             let item = create_tabkv(
                 Atom::from("testdb"),
-                Atom::from("test_table_2"),
+                Atom::from("test_table_3"),
                 k.clone(),
                 0,
                 Some(v.clone()),
@@ -1186,7 +1185,7 @@ fn test_exception() {
                 Arc::new(move |q| {
                     // query result is ok, but value is None
                     assert!(q.is_ok());
-                    println!("after crash {:?} : {:?}", i, q);
+                    println!("value should be none {:?} : {:?}", i, q);
                 }),
             );
         })
@@ -1210,7 +1209,7 @@ fn test_exception() {
                 false,
                 Arc::new(move |q| {
                     assert!(q.is_ok());
-                    println!("after crash {:?} : {:?}", i, q);
+                    println!("value should be some {:?} : {:?}", i, q);
                 }),
             );
         })
