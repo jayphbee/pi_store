@@ -1,38 +1,28 @@
-use std::path::Path;
+use crossbeam_channel::{bounded, Sender};
 use std::slice::from_raw_parts;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
 use lmdb::{
-    mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Error,
-    Iter as LmdbIter, MDB_cmp_func, MDB_dbi, MDB_txn, MDB_val, RoCursor, RoTransaction, RwCursor,
-    RwTransaction, Stat, Transaction, WriteFlags,
+    mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error, Iter as LmdbIter,
+    MDB_cmp_func, MDB_val, RwTransaction, Transaction, WriteFlags,
 };
 
-use lmdb_file::{MDB_FIRST, MDB_LAST, MDB_NEXT, MDB_PREV, MDB_SET};
+use pi_db::db::{Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback};
 
-use pi_db::db::{
-    Bin, CommitResult, DBResult, Iter, IterResult, KeyIterResult, MetaTxn, NextResult, OpenTab,
-    RwLog, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,
-    WareSnapshot,
-};
-
-use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
+use bon::ReadBuffer;
 
 pub enum LmdbMessage {
     CreateDb(String, Sender<()>),
-    Query(String, Arc<Vec<TabKV>>, TxQueryCallback),
-    NextItem(String, Arc<Fn(NextResult<(Bin, Bin)>)>),
-    NextKey(String, Arc<Fn(NextResult<Bin>)>),
-    CreateItemIter(String, bool, Option<Bin>),
-    CreateKeyIter(String, bool, Option<Bin>),
-    Modify(String, Arc<Vec<TabKV>>, TxCallback),
-    Commit(String, TxCallback),
-    Rollback(String, TxCallback),
+    Query(Arc<Vec<TabKV>>, TxQueryCallback),
+    NextItem(Arc<Fn(NextResult<(Bin, Bin)>)>),
+    NextKey(Arc<Fn(NextResult<Bin>)>),
+    CreateItemIter(bool, Option<Bin>),
+    CreateKeyIter(bool, Option<Bin>),
+    Modify(Arc<Vec<TabKV>>, TxCallback),
+    Commit(TxCallback),
+    Rollback(TxCallback),
     TableSize(Arc<Fn(SResult<usize>)>),
 }
 
@@ -54,7 +44,7 @@ impl ThreadPool {
         }
     }
     pub fn start_pool(&mut self, cap: usize, env: Arc<Environment>) {
-        for i in 0..cap {
+        for _ in 0..cap {
             let clone_env = env.clone();
             let (tx, rx) = bounded(1);
 
@@ -78,10 +68,10 @@ impl ThreadPool {
                                 ),
                             };
 
-                            tx.send(());
+                            let _ = tx.send(());
                         }
 
-                        Ok(LmdbMessage::Query(db_name, keys, cb)) => {
+                        Ok(LmdbMessage::Query(keys, cb)) => {
                             let mut values = Vec::new();
 
                             if thread_local_txn.is_none() {
@@ -129,7 +119,7 @@ impl ThreadPool {
                             cb(Ok(values));
                         }
 
-                        Ok(LmdbMessage::CreateItemIter(db_name, descending, key)) => {
+                        Ok(LmdbMessage::CreateItemIter(descending, key)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
                                 let txn = thread_local_txn.as_mut().unwrap();
@@ -145,7 +135,7 @@ impl ThreadPool {
                             }
                         }
 
-                        Ok(LmdbMessage::NextItem(db_name, cb)) => {
+                        Ok(LmdbMessage::NextItem(cb)) => {
                             if let Some(ref mut iter) = thread_local_iter {
                                 match iter.next() {
                                     Some(v) => cb(Ok(Some((
@@ -159,7 +149,7 @@ impl ThreadPool {
                             }
                         }
 
-                        Ok(LmdbMessage::CreateKeyIter(db_name, descending, key)) => {
+                        Ok(LmdbMessage::CreateKeyIter(descending, key)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
                                 let txn = thread_local_txn.as_mut().unwrap();
@@ -175,7 +165,7 @@ impl ThreadPool {
                             }
                         }
 
-                        Ok(LmdbMessage::NextKey(db_name, cb)) => {
+                        Ok(LmdbMessage::NextKey(cb)) => {
                             if let Some(ref mut iter) = thread_local_iter {
                                 match iter.next() {
                                     Some(v) => cb(Ok(Some(Arc::new(v.0.to_vec())))),
@@ -186,7 +176,7 @@ impl ThreadPool {
                             }
                         }
 
-                        Ok(LmdbMessage::Modify(db_name, keys, cb)) => {
+                        Ok(LmdbMessage::Modify(keys, cb)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
 
@@ -199,7 +189,7 @@ impl ThreadPool {
                                 }
                             }
 
-                            let mut rw_txn = thread_local_txn.as_mut().unwrap();
+                            let rw_txn = thread_local_txn.as_mut().unwrap();
 
                             for kv in keys.iter() {
                                 if let Some(_) = kv.value {
@@ -229,7 +219,7 @@ impl ThreadPool {
                             cb(Ok(()))
                         }
 
-                        Ok(LmdbMessage::Commit(db_name, cb)) => {
+                        Ok(LmdbMessage::Commit(cb)) => {
                             if let Some(txn) = thread_local_txn.take() {
                                 match txn.commit() {
                                     Ok(_) => cb(Ok(())),
@@ -243,7 +233,7 @@ impl ThreadPool {
                             }
                         }
 
-                        Ok(LmdbMessage::Rollback(db_name, cb)) => {
+                        Ok(LmdbMessage::Rollback(cb)) => {
                             if let Some(txn) = thread_local_txn.take() {
                                 txn.abort();
                                 cb(Ok(()))
@@ -257,7 +247,7 @@ impl ThreadPool {
                             Err(e) => cb(Err(e.to_string())),
                         },
 
-                        Err(e) => {
+                        Err(_e) => {
                             // unexpected message, do nothing
                         }
                     }
