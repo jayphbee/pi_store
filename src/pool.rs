@@ -1,17 +1,15 @@
-use std::slice::from_raw_parts;
 use crossbeam_channel::{bounded, Sender};
+use std::slice::from_raw_parts;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
 use lmdb::{
-    mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error,
-    Iter as LmdbIter, MDB_cmp_func, MDB_val, RwTransaction, Transaction, WriteFlags,
+    mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error, Iter as LmdbIter,
+    MDB_cmp_func, MDB_val, RwTransaction, Transaction, WriteFlags,
 };
 
-use pi_db::db::{
-    Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback
-};
+use pi_db::db::{Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback};
 
 use bon::ReadBuffer;
 
@@ -70,7 +68,7 @@ impl ThreadPool {
                                 ),
                             };
 
-                            let _ =tx.send(());
+                            let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::Query(keys, cb)) => {

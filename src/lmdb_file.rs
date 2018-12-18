@@ -5,22 +5,19 @@ use std::sync::{Arc, RwLock};
 
 use crossbeam_channel::{bounded, Sender};
 
-use pi_db::db::{
-    Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,
-    OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState,
-    Txn, Ware, WareSnapshot,
-};
 use atom::Atom;
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use guid::Guid;
+use pi_db::db::{
+    Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,
+    OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,
+    WareSnapshot,
+};
 use sinfo::EnumType;
 
 use pi_db::tabs::{TabLog, Tabs};
 
-use lmdb::{
-    Cursor, DatabaseFlags, Environment, EnvironmentFlags,
-    Transaction, WriteFlags,
-};
+use lmdb::{Cursor, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
 use pool::{LmdbMessage, THREAD_POOL};
 
@@ -131,18 +128,16 @@ impl Txn for LmdbTableTxn {
 
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ =tx.send(LmdbMessage::Commit(
-                    Arc::new(move |c| match c {
-                        Ok(_) => {
-                            lmdb_table_txn.borrow_mut().state = TxState::Commited;
-                            cb(Ok(()));
-                        }
-                        Err(e) => {
-                            lmdb_table_txn.borrow_mut().state = TxState::CommitFail;
-                            cb(Err(e.to_string()));
-                        }
-                    }),
-                ));
+                let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
+                    Ok(_) => {
+                        lmdb_table_txn.borrow_mut().state = TxState::Commited;
+                        cb(Ok(()));
+                    }
+                    Err(e) => {
+                        lmdb_table_txn.borrow_mut().state = TxState::CommitFail;
+                        cb(Err(e.to_string()));
+                    }
+                })));
             }
             None => cb(Err("Can't get sender".to_string())),
         }
@@ -155,18 +150,16 @@ impl Txn for LmdbTableTxn {
 
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ =tx.send(LmdbMessage::Rollback(
-                    Arc::new(move |r| match r {
-                        Ok(_) => {
-                            lmdb_table_txn.borrow_mut().state = TxState::Rollbacked;
-                            cb(Ok(()));
-                        }
-                        Err(e) => {
-                            lmdb_table_txn.borrow_mut().state = TxState::RollbackFail;
-                            cb(Err(e.to_string()));
-                        }
-                    }),
-                ));
+                let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
+                    Ok(_) => {
+                        lmdb_table_txn.borrow_mut().state = TxState::Rollbacked;
+                        cb(Ok(()));
+                    }
+                    Err(e) => {
+                        lmdb_table_txn.borrow_mut().state = TxState::RollbackFail;
+                        cb(Err(e.to_string()));
+                    }
+                })));
             }
             None => {
                 cb(Err("Can't get sender".to_string()));
@@ -222,7 +215,7 @@ impl TabTxn for LmdbTableTxn {
     ) -> DBResult {
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ =tx.send(LmdbMessage::Modify(
+                let _ = tx.send(LmdbMessage::Modify(
                     arr.clone(),
                     Arc::new(move |m| match m {
                         Ok(_) => cb(Ok(())),
@@ -247,14 +240,8 @@ impl TabTxn for LmdbTableTxn {
     ) -> Option<IterResult> {
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ =tx.send(LmdbMessage::CreateItemIter(
-                    descending,
-                    key,
-                ));
-                cb(Ok(Box::new(LmdbItemsIter::new(
-                    tx.clone(),
-                    filter,
-                ))));
+                let _ = tx.send(LmdbMessage::CreateItemIter(descending, key));
+                cb(Ok(Box::new(LmdbItemsIter::new(tx.clone(), filter))));
             }
             None => {
                 cb(Err("Can't get sender".to_string()));
@@ -273,14 +260,8 @@ impl TabTxn for LmdbTableTxn {
     ) -> Option<KeyIterResult> {
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ =tx.send(LmdbMessage::CreateKeyIter(
-                    descending,
-                    key,
-                ));
-                cb(Ok(Box::new(LmdbKeysIter::new(
-                    tx.clone(),
-                    filter,
-                ))));
+                let _ = tx.send(LmdbMessage::CreateKeyIter(descending, key));
+                cb(Ok(Box::new(LmdbKeysIter::new(tx.clone(), filter))));
             }
             None => {
                 cb(Err("Can't get sender".to_string()));
@@ -305,7 +286,7 @@ impl TabTxn for LmdbTableTxn {
     fn tab_size(&self, cb: Arc<Fn(SResult<usize>)>) -> Option<SResult<usize>> {
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ =tx.send(LmdbMessage::TableSize(Arc::new(move |t| match t {
+                let _ = tx.send(LmdbMessage::TableSize(Arc::new(move |t| match t {
                     Ok(entries) => cb(Ok(entries)),
                     Err(e) => cb(Err(e.to_string())),
                 })));
@@ -325,14 +306,8 @@ pub struct LmdbItemsIter {
 }
 
 impl LmdbItemsIter {
-    pub fn new(
-        sender: Sender<LmdbMessage>,
-        _filter: Filter,
-    ) -> Self {
-        LmdbItemsIter {
-            sender,
-            _filter,
-        }
+    pub fn new(sender: Sender<LmdbMessage>, _filter: Filter) -> Self {
+        LmdbItemsIter { sender, _filter }
     }
 }
 
@@ -340,8 +315,9 @@ impl Iter for LmdbItemsIter {
     type Item = (Bin, Bin);
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
-        let _ =self.sender.send(LmdbMessage::NextItem(
-            Arc::new(move |item| match item {
+        let _ = self
+            .sender
+            .send(LmdbMessage::NextItem(Arc::new(move |item| match item {
                 Ok(Some(v)) => {
                     cb(Ok(Some(v)));
                 }
@@ -351,8 +327,7 @@ impl Iter for LmdbItemsIter {
                 Err(e) => {
                     cb(Err(e.to_string()));
                 }
-            }),
-        ));
+            })));
 
         None
     }
@@ -365,14 +340,8 @@ pub struct LmdbKeysIter {
 }
 
 impl LmdbKeysIter {
-    pub fn new(
-        sender: Sender<LmdbMessage>,
-        _filter: Filter,
-    ) -> Self {
-        LmdbKeysIter {
-            sender,
-            _filter,
-        }
+    pub fn new(sender: Sender<LmdbMessage>, _filter: Filter) -> Self {
+        LmdbKeysIter { sender, _filter }
     }
 }
 
@@ -380,8 +349,9 @@ impl Iter for LmdbKeysIter {
     type Item = Bin;
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
-        let _ = self.sender.send(LmdbMessage::NextKey(
-            Arc::new(move |item| match item {
+        let _ = self
+            .sender
+            .send(LmdbMessage::NextKey(Arc::new(move |item| match item {
                 Ok(Some(v)) => {
                     cb(Ok(Some(v)));
                 }
@@ -391,8 +361,7 @@ impl Iter for LmdbKeysIter {
                 Err(e) => {
                     cb(Err(e.to_string()));
                 }
-            }),
-        ));
+            })));
 
         None
     }

@@ -18,9 +18,7 @@ use bon::WriteBuffer;
 use guid::Guid;
 use sinfo::{EnumType, StructInfo};
 
-use pi_db::db::{
-    Bin, TabKV, TabMeta, Ware
-};
+use pi_db::db::{Bin, TabKV, TabMeta, Ware};
 
 use pi_store::lmdb_file::DB;
 
@@ -143,37 +141,55 @@ fn test_lmdb_single_thread() {
 
     let txn1 = tab_txn.clone();
 
-    txn1.modify(arr.clone(), None, false, Arc::new(move |m1| {
-        assert!(m1.is_ok());
-        let txn2 = tab_txn.clone();
-        let tab_txn = tab_txn.clone();
-        txn2.modify(arr2.clone(), None, false, Arc::new(move |m2| {
-            assert!(m2.is_ok());
-            let txn3 = tab_txn.clone();
+    txn1.modify(
+        arr.clone(),
+        None,
+        false,
+        Arc::new(move |m1| {
+            assert!(m1.is_ok());
+            let txn2 = tab_txn.clone();
             let tab_txn = tab_txn.clone();
-            txn3.prepare(1000, Arc::new(move |p| {
-                assert!(p.is_ok());
-                let txn4 = tab_txn.clone();
-                txn4.commit(Arc::new(move |c| {
-                    assert!(c.is_ok());
-                }));
-            }));
-        }));
-    }));
+            txn2.modify(
+                arr2.clone(),
+                None,
+                false,
+                Arc::new(move |m2| {
+                    assert!(m2.is_ok());
+                    let txn3 = tab_txn.clone();
+                    let tab_txn = tab_txn.clone();
+                    txn3.prepare(
+                        1000,
+                        Arc::new(move |p| {
+                            assert!(p.is_ok());
+                            let txn4 = tab_txn.clone();
+                            txn4.commit(Arc::new(move |c| {
+                                assert!(c.is_ok());
+                            }));
+                        }),
+                    );
+                }),
+            );
+        }),
+    );
 
     let tab_txn = snapshot
-            .tab_txn(
-                &Atom::from("test_table_1"),
-                &Guid(4),
-                true,
-                Box::new(|_r| {}),
-            )
-            .unwrap()
-            .unwrap();
+        .tab_txn(
+            &Atom::from("test_table_1"),
+            &Guid(4),
+            true,
+            Box::new(|_r| {}),
+        )
+        .unwrap()
+        .unwrap();
 
-    tab_txn.query(Arc::new(vec![item1.clone()]), None, false, Arc::new(|q| {
-        assert!(q.is_ok());
-    }));
+    tab_txn.query(
+        Arc::new(vec![item1.clone()]),
+        None,
+        false,
+        Arc::new(|q| {
+            assert!(q.is_ok());
+        }),
+    );
 }
 
 #[test]
@@ -637,7 +653,7 @@ fn test_lmdb_multi_thread() {
 #[test]
 fn test_exception() {
     if Path::new("testdb").exists() {
-        let _ =fs::remove_dir_all("testdb");
+        let _ = fs::remove_dir_all("testdb");
     }
 
     let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 100).unwrap();
