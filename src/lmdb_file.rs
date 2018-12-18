@@ -81,7 +81,6 @@ impl Tab for LmdbTable {
         }
 
         Arc::new(LmdbTableTxn(Arc::new(RefCell::new(LmdbTableTxnWrapper {
-            tab: self.clone(),
             _id: id.clone(),
             _writable: writable,
             state: TxState::Ok,
@@ -91,7 +90,6 @@ impl Tab for LmdbTable {
 }
 
 struct LmdbTableTxnWrapper {
-    tab: LmdbTable,
     _id: Guid,
     _writable: bool,
     state: TxState,
