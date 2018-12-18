@@ -11,7 +11,7 @@ use guid::Guid;
 use pi_db::db::{
     Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,
     OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,
-    WareSnapshot,
+    WareSnapshot
 };
 use sinfo::EnumType;
 
