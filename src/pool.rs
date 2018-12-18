@@ -1,24 +1,16 @@
-use std::path::Path;
 use std::slice::from_raw_parts;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
+use crossbeam_channel::{bounded, Sender};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
 use lmdb::{
-    mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Error,
-    Iter as LmdbIter, MDB_cmp_func, MDB_dbi, MDB_txn, MDB_val, RoCursor, RoTransaction, RwCursor,
-    RwTransaction, Stat, Transaction, WriteFlags,
+    mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error,
+    Iter as LmdbIter, MDB_cmp_func, MDB_val, RwTransaction, Transaction, WriteFlags,
 };
 
-use lmdb_file::{MDB_FIRST, MDB_LAST, MDB_NEXT, MDB_PREV, MDB_SET};
-
 use pi_db::db::{
-    Bin, CommitResult, DBResult, Iter, IterResult, KeyIterResult, MetaTxn, NextResult, OpenTab,
-    RwLog, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,
-    WareSnapshot,
+    Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback
 };
 
 use bon::ReadBuffer;
@@ -54,7 +46,7 @@ impl ThreadPool {
         }
     }
     pub fn start_pool(&mut self, cap: usize, env: Arc<Environment>) {
-        for i in 0..cap {
+        for _ in 0..cap {
             let clone_env = env.clone();
             let (tx, rx) = bounded(1);
 
@@ -257,7 +249,7 @@ impl ThreadPool {
                             Err(e) => cb(Err(e.to_string())),
                         },
 
-                        Err(e) => {
+                        Err(_e) => {
                             // unexpected message, do nothing
                         }
                     }
