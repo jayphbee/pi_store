@@ -236,19 +236,25 @@ impl TabTxn for LmdbTableTxn {
         key: Option<Bin>,
         descending: bool,
         filter: Filter,
-        cb: Arc<Fn(IterResult)>,
+        _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ = tx.send(LmdbMessage::CreateItemIter(descending, key));
-                cb(Ok(Box::new(LmdbItemsIter::new(tx.clone(), filter))));
+                let (inner_tx, inner_rx) = bounded(1);
+                let _ = tx.send(LmdbMessage::CreateItemIter(descending, key, inner_tx));
+                match inner_rx.recv() {
+                    Ok(_) => {
+                        return Some(Ok(Box::new(LmdbItemsIter::new(tx.clone(), filter))));
+                    }
+                    Err(e) => {
+                        panic!("Create db item iter in pool failed: {:?}", e.to_string());
+                    }
+                }
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
-
-        None
     }
 
     fn key_iter(
@@ -256,19 +262,25 @@ impl TabTxn for LmdbTableTxn {
         key: Option<Bin>,
         descending: bool,
         filter: Filter,
-        cb: Arc<Fn(KeyIterResult)>,
+        _cb: Arc<Fn(KeyIterResult)>,
     ) -> Option<KeyIterResult> {
         match self.0.clone().borrow().sender.clone() {
             Some(tx) => {
-                let _ = tx.send(LmdbMessage::CreateKeyIter(descending, key));
-                cb(Ok(Box::new(LmdbKeysIter::new(tx.clone(), filter))));
+                let (inner_tx, inner_rx) = bounded(1);
+                let _ = tx.send(LmdbMessage::CreateKeyIter(descending, key, inner_tx));
+                match inner_rx.recv() {
+                    Ok(_) => {
+                        return Some(Ok(Box::new(LmdbKeysIter::new(tx.clone(), filter))));
+                    }
+                    Err(e) => {
+                        panic!("Create db key iter in pool failed: {:?}", e.to_string());
+                    }
+                }
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
-
-        None
     }
 
     fn index(
@@ -541,7 +553,6 @@ impl WareSnapshot for LmdbSnapshot {
     }
     // 新增 修改 删除 表
     fn alter(&self, tab_name: &Atom, meta: Option<Arc<TabMeta>>) {
-        println!("alter table: {:?}", tab_name);
         self.1.borrow_mut().alter(tab_name, meta)
     }
     // 创建指定表的表事务
@@ -556,7 +567,6 @@ impl WareSnapshot for LmdbSnapshot {
     }
     // 创建一个meta事务
     fn meta_txn(&self, id: &Guid) -> Arc<MetaTxn> {
-        println!("create meta txn");
         Arc::new(LmdbMetaTxn::new(
             self.tab_txn(&Atom::from(SINFO), id, true, Box::new(|_r| {}))
                 .unwrap()
