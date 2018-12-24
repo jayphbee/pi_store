@@ -625,9 +625,10 @@ fn test_lmdb_multi_thread() {
             true,
             None,
             Arc::new(move |iter| {
-                assert!(iter.is_ok());
+                assert!(iter.is_err());
                 let mut it = iter.unwrap();
                 for i in 0..6 {
+                    println!("here");
                     it.next(Arc::new(move |item| {
                         println!("None items {:?}: {:?}", i, item);
                     }));

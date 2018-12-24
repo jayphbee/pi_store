@@ -18,8 +18,8 @@ pub enum LmdbMessage {
     Query(Arc<Vec<TabKV>>, TxQueryCallback),
     NextItem(Arc<Fn(NextResult<(Bin, Bin)>)>),
     NextKey(Arc<Fn(NextResult<Bin>)>),
-    CreateItemIter(bool, Option<Bin>),
-    CreateKeyIter(bool, Option<Bin>),
+    CreateItemIter(bool, Option<Bin>, Sender<()>),
+    CreateKeyIter(bool, Option<Bin>, Sender<()>),
     Modify(Arc<Vec<TabKV>>, TxCallback),
     Commit(TxCallback),
     Rollback(TxCallback),
@@ -119,7 +119,7 @@ impl ThreadPool {
                             cb(Ok(values));
                         }
 
-                        Ok(LmdbMessage::CreateItemIter(descending, key)) => {
+                        Ok(LmdbMessage::CreateItemIter(descending, key, tx)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
                                 let txn = thread_local_txn.as_mut().unwrap();
@@ -133,6 +133,7 @@ impl ThreadPool {
                                         Some(cursor.iter_items_with_direction(descending));
                                 }
                             }
+                            let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::NextItem(cb)) => {
@@ -149,7 +150,7 @@ impl ThreadPool {
                             }
                         }
 
-                        Ok(LmdbMessage::CreateKeyIter(descending, key)) => {
+                        Ok(LmdbMessage::CreateKeyIter(descending, key, tx)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
                                 let txn = thread_local_txn.as_mut().unwrap();
@@ -163,6 +164,7 @@ impl ThreadPool {
                                         Some(cursor.iter_items_with_direction(descending));
                                 }
                             }
+                            let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::NextKey(cb)) => {
