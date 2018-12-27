@@ -27,4 +27,4 @@ util = {path = "../pi_lib/util" }
 sinfo = {path = "../pi_lib/sinfo" }
 timer = {path = "../pi_lib/timer" }
 ordmap = {path = "../pi_lib/ordmap" }
-crossbeam-channel = "0.3"
+crossbeam-channel = "0.3.4"
