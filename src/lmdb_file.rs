@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 
 use crossbeam_channel::{bounded, Sender};
 
@@ -32,26 +32,22 @@ pub const MDB_LAST: u32 = 6;
 
 const TIMEOUT: usize = 100;
 
-#[derive(Debug)]
-pub struct LmdbTableWrapper {
+#[derive(Debug, Clone)]
+pub struct LmdbTable {
     name: Atom,
-    // TODO: add methods to set/get these flags
     env_flags: EnvironmentFlags,
     write_flags: WriteFlags,
     db_flags: DatabaseFlags,
 }
 
-#[derive(Debug, Clone)]
-pub struct LmdbTable(Arc<LmdbTableWrapper>);
-
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
-        LmdbTable(Arc::new(LmdbTableWrapper {
+        LmdbTable {
             name: db_name.clone(),
             env_flags: EnvironmentFlags::empty(),
             write_flags: WriteFlags::empty(),
             db_flags: DatabaseFlags::empty(),
-        }))
+        }
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
@@ -67,7 +63,7 @@ impl Tab for LmdbTable {
             println!("THREAD_POOL full, can't get one from it");
         }
 
-        let db_name = self.0.clone().name.to_string();
+        let db_name = self.name.to_string();
         let (tx, rx) = bounded(1);
         let _ = sender
             .clone()
@@ -77,23 +73,23 @@ impl Tab for LmdbTable {
             panic!("Open db error: {:?}", e.to_string());
         }
 
-        Arc::new(LmdbTableTxn(Arc::new(RefCell::new(LmdbTableTxnWrapper {
+        Arc::new(LmdbTableTxn {
             _id: id.clone(),
             _writable: writable,
-            state: TxState::Ok,
+            state: Arc::new(Mutex::new(TxState::Ok)),
             sender,
-        }))))
+        })
     }
 }
 
-struct LmdbTableTxnWrapper {
+pub struct LmdbTableTxn {
     _id: Guid,
     _writable: bool,
-    state: TxState,
+    state: Arc<Mutex<TxState>>,
     sender: Option<Sender<LmdbMessage>>,
 }
 
-impl Drop for LmdbTableTxnWrapper {
+impl Drop for LmdbTableTxn {
     fn drop(&mut self) {
         match THREAD_POOL.clone().lock() {
             Ok(mut pool) => {
@@ -109,32 +105,33 @@ impl Drop for LmdbTableTxnWrapper {
     }
 }
 
-#[derive(Clone)]
-pub struct LmdbTableTxn(Arc<RefCell<LmdbTableTxnWrapper>>);
-
 impl Txn for LmdbTableTxn {
     fn get_state(&self) -> TxState {
-        self.0.borrow().state.clone()
+        if let Ok(state) = self.state.lock() {
+            state.clone()
+        } else {
+            TxState::Err
+        }
     }
 
     fn prepare(&self, _timeout: usize, _cb: TxCallback) -> DBResult {
-        self.0.borrow_mut().state = TxState::Preparing;
+        *self.state.lock().unwrap() = TxState::Preparing;
         Some(Ok(()))
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
-        Arc::clone(&self.0).borrow_mut().state = TxState::Committing;
-        let lmdb_table_txn = self.0.clone();
+        *self.state.lock().unwrap() = TxState::Committing;
+        let state = self.state.clone();
 
-        match self.0.clone().borrow().sender.clone() {
+        match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
                     Ok(_) => {
-                        lmdb_table_txn.borrow_mut().state = TxState::Commited;
+                        *state.lock().unwrap() = TxState::Commited;
                         cb(Ok(()));
                     }
                     Err(e) => {
-                        lmdb_table_txn.borrow_mut().state = TxState::CommitFail;
+                        *state.lock().unwrap() = TxState::CommitFail;
                         cb(Err(e.to_string()));
                     }
                 })));
@@ -145,18 +142,18 @@ impl Txn for LmdbTableTxn {
     }
 
     fn rollback(&self, cb: TxCallback) -> DBResult {
-        Arc::clone(&self.0).borrow_mut().state = TxState::Rollbacking;
-        let lmdb_table_txn = self.0.clone();
+        *self.state.lock().unwrap() = TxState::Rollbacking;
+        let state = self.state.clone();
 
-        match self.0.clone().borrow().sender.clone() {
+        match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
                     Ok(_) => {
-                        lmdb_table_txn.borrow_mut().state = TxState::Rollbacked;
+                        *state.lock().unwrap() = TxState::Rollbacked;
                         cb(Ok(()));
                     }
                     Err(e) => {
-                        lmdb_table_txn.borrow_mut().state = TxState::RollbackFail;
+                        *state.lock().unwrap() = TxState::RollbackFail;
                         cb(Err(e.to_string()));
                     }
                 })));
@@ -188,7 +185,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
-        match self.0.clone().borrow().sender.clone() {
+        match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Query(
                     arr.clone(),
@@ -213,7 +210,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        match self.0.clone().borrow().sender.clone() {
+        match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Modify(
                     arr.clone(),
@@ -238,7 +235,7 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
-        match self.0.clone().borrow().sender.clone() {
+        match self.sender.clone() {
             Some(tx) => {
                 let (inner_tx, inner_rx) = bounded(1);
                 let _ = tx.send(LmdbMessage::CreateItemIter(descending, key, inner_tx));
@@ -264,7 +261,7 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(KeyIterResult)>,
     ) -> Option<KeyIterResult> {
-        match self.0.clone().borrow().sender.clone() {
+        match self.sender.clone() {
             Some(tx) => {
                 let (inner_tx, inner_rx) = bounded(1);
                 let _ = tx.send(LmdbMessage::CreateKeyIter(descending, key, inner_tx));
@@ -296,7 +293,7 @@ impl TabTxn for LmdbTableTxn {
     }
 
     fn tab_size(&self, cb: Arc<Fn(SResult<usize>)>) -> Option<SResult<usize>> {
-        match self.0.clone().borrow().sender.clone() {
+        match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::TableSize(Arc::new(move |t| match t {
                     Ok(entries) => cb(Ok(entries)),
