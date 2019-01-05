@@ -30,6 +30,7 @@ unsafe impl Send for LmdbMessage {}
 
 #[derive(Debug)]
 pub struct ThreadPool {
+    rw_sender: Option<Sender<LmdbMessage>>,
     senders: Vec<Sender<LmdbMessage>>,
     total: usize,
     idle: usize,
@@ -38,11 +39,107 @@ pub struct ThreadPool {
 impl ThreadPool {
     pub fn new() -> Self {
         ThreadPool {
+            rw_sender: None,
             senders: Vec::new(),
             total: 0,
             idle: 0,
         }
     }
+
+    pub fn create_rw_txn(&mut self, env: Arc<Environment>) {
+        let (tx, rx) = bounded(1);
+        self.rw_sender = Some(tx);
+
+        thread::spawn(move || {
+            let mut rw_txn: Option<RwTransaction> = None;
+            loop {
+                match rx.recv() {
+                    Ok(LmdbMessage::Modify(items, cb)) => {
+                        for item in items.iter() {
+                            let db = match env.open_db(Some(&item.tab.to_string())) {
+                                Ok(db) => Some(db),
+                                Err(_) => Some(
+                                    env.create_db(
+                                        Some(&item.tab.to_string()),
+                                        DatabaseFlags::empty(),
+                                    )
+                                    .unwrap(),
+                                ),
+                            };
+
+                            if rw_txn.is_none() {
+                                rw_txn = env.begin_rw_txn().ok();
+                                unsafe {
+                                    mdb_set_compare(
+                                        rw_txn.as_ref().unwrap().txn(),
+                                        db.clone().unwrap().dbi(),
+                                        mdb_cmp_func as *mut MDB_cmp_func,
+                                    );
+                                }
+                            }
+
+                            if let Some(_) = item.clone().value {
+                                match rw_txn.as_mut().unwrap().put(
+                                    db.clone().unwrap(),
+                                    item.key.as_ref(),
+                                    item.clone().value.unwrap().as_ref(),
+                                    WriteFlags::empty()
+                                ) {
+                                    Ok(_) => {}
+                                    Err(e) => cb(Err(format!(
+                                        "insert data error: {:?}",
+                                        e.to_string()
+                                    ))),
+                                }
+                            } else {
+                                match rw_txn.as_mut().unwrap().del(db.clone().unwrap(), item.key.as_ref(), None) {
+                                    Ok(_) => {}
+                                    Err(Error::NotFound) => {}
+                                    Err(e) => cb(Err(format!(
+                                        "delete data error: {:?}",
+                                        e.to_string()
+                                    ))),
+                                };
+                            }
+                            cb(Ok(()))
+                        }
+                    }
+
+                    Ok(LmdbMessage::Commit(cb)) => {
+                        if let Some(txn) = rw_txn.take() {
+                            match txn.commit() {
+                                Ok(_) => cb(Ok(())),
+                                Err(e) => cb(Err(format!(
+                                    "commit failed with error: {:?}",
+                                    e.to_string()
+                                ))),
+                            }
+                        } else {
+                            cb(Ok(()))
+                        }
+                    }
+
+                    Ok(LmdbMessage::Rollback(cb)) => {
+                        if let Some(txn) = rw_txn.take() {
+                            txn.abort();
+                            cb(Ok(()))
+                        } else {
+                            cb(Ok(()))
+                        }
+                    }
+
+                    Ok(_) => {
+                        panic!("Unexpected message received in read-write transaction");
+                    }
+
+                    Err(_e) => {
+
+                    }
+                }
+            }
+        });
+    }
+
     pub fn start_pool(&mut self, cap: usize, env: Arc<Environment>) {
         for _ in 0..cap {
             let clone_env = env.clone();
