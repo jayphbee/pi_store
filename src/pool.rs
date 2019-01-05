@@ -24,6 +24,7 @@ pub enum LmdbMessage {
     Commit(TxCallback),
     Rollback(TxCallback),
     TableSize(Arc<Fn(SResult<usize>)>),
+    RwTxnActive(Sender<bool>),
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -58,13 +59,15 @@ impl ThreadPool {
                         for item in items.iter() {
                             let db = match env.open_db(Some(&item.tab.to_string())) {
                                 Ok(db) => Some(db),
-                                Err(_) => Some(
-                                    env.create_db(
-                                        Some(&item.tab.to_string()),
-                                        DatabaseFlags::empty(),
+                                Err(_) => {
+                                    Some(
+                                        env.create_db(
+                                            Some(&item.tab.to_string()),
+                                            DatabaseFlags::empty(),
+                                        )
+                                        .unwrap(),
                                     )
-                                    .unwrap(),
-                                ),
+                                }
                             };
 
                             if rw_txn.is_none() {
@@ -125,6 +128,14 @@ impl ThreadPool {
                             cb(Ok(()))
                         } else {
                             cb(Ok(()))
+                        }
+                    }
+
+                    Ok(LmdbMessage::RwTxnActive(tx)) => {
+                        if rw_txn.is_some() {
+                            let _ = tx.send(true);
+                        } else {
+                            let _ = tx.send(false);
                         }
                     }
 
@@ -279,6 +290,10 @@ impl ThreadPool {
                             panic!("Unexpected Lmdb::Modify message received in read-only transaction");
                         }
 
+                        Ok(LmdbMessage::RwTxnActive(_)) => {
+                            panic!("Unexpected Lmdb::RwTxnActive message received in read-only transaction");
+                        }
+
                         Ok(LmdbMessage::Commit(cb)) => {
                             if let Some(txn) = thread_local_txn.take() {
                                 match txn.commit() {
@@ -322,6 +337,10 @@ impl ThreadPool {
     pub fn pop(&mut self) -> Option<Sender<LmdbMessage>> {
         self.idle -= 1;
         self.senders.pop()
+    }
+
+    pub fn rw_sender(&self) -> Option<Sender<LmdbMessage>> {
+        self.rw_sender.clone()
     }
 
     pub fn push(&mut self, sender: Sender<LmdbMessage>) {

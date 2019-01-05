@@ -59,6 +59,14 @@ impl Tab for LmdbTable {
             ),
         };
 
+        let rw_sender = match THREAD_POOL.clone().lock() {
+            Ok(pool) => pool.rw_sender(),
+            Err(e) => panic!(
+                "get sender error when creating transaction: {:?}",
+                e.to_string()
+            )
+        };
+
         if sender.is_none() {
             println!("THREAD_POOL full, can't get one from it");
         }
@@ -78,6 +86,7 @@ impl Tab for LmdbTable {
             _writable: writable,
             state: Arc::new(Mutex::new(TxState::Ok)),
             sender,
+            rw_sender,
         })
     }
 }
@@ -87,6 +96,7 @@ pub struct LmdbTableTxn {
     _writable: bool,
     state: Arc<Mutex<TxState>>,
     sender: Option<Sender<LmdbMessage>>,
+    rw_sender: Option<Sender<LmdbMessage>>,
 }
 
 impl Drop for LmdbTableTxn {
@@ -122,22 +132,55 @@ impl Txn for LmdbTableTxn {
     fn commit(&self, cb: TxCallback) -> CommitResult {
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
+        let state2 = self.state.clone();
+        let cb2 = cb.clone();      
 
-        match self.sender.clone() {
-            Some(tx) => {
-                let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
-                    Ok(_) => {
-                        *state.lock().unwrap() = TxState::Commited;
-                        cb(Ok(()));
+        let (tx, rx) = bounded(1);
+        let _ = self.rw_sender.as_ref().unwrap().send(LmdbMessage::RwTxnActive(tx));
+        match rx.recv() {
+            Ok(active) => {
+                // if read-write transaction is active, then commit
+                if active {
+                    match self.rw_sender.clone() {
+                        Some(tx) => {
+                            let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
+                                Ok(_) => {
+                                    *state.lock().unwrap() = TxState::Commited;
+                                    cb(Ok(()));
+                                }
+                                Err(e) => {
+                                    *state.lock().unwrap() = TxState::CommitFail;
+                                    cb(Err(e.to_string()));
+                                }
+                            })));
+                        }
+                        None => cb(Err("Can't get rw_sender".to_string())),
                     }
-                    Err(e) => {
-                        *state.lock().unwrap() = TxState::CommitFail;
-                        cb(Err(e.to_string()));
+                } else {
+                    // otherwise close read-only transaction
+                    match self.sender.clone() {
+                        Some(tx) => {
+                            let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
+                                Ok(_) => {
+                                    *state2.lock().unwrap() = TxState::Commited;
+                                    cb2(Ok(()));
+                                }
+                                Err(e) => {
+                                    *state2.lock().unwrap() = TxState::CommitFail;
+                                    cb2(Err(e.to_string()));
+                                }
+                            })));
+                        }
+                        None => cb2(Err("Can't get sender".to_string())),
                     }
-                })));
+                }
             }
-            None => cb(Err("Can't get sender".to_string())),
+
+            Err(_) => {
+
+            }
         }
+
         None
     }
 
@@ -145,21 +188,52 @@ impl Txn for LmdbTableTxn {
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state = self.state.clone();
 
-        match self.sender.clone() {
-            Some(tx) => {
-                let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
-                    Ok(_) => {
-                        *state.lock().unwrap() = TxState::Rollbacked;
-                        cb(Ok(()));
+        let (tx, rx) = bounded(1);
+        let _ = self.rw_sender.as_ref().unwrap().send(LmdbMessage::RwTxnActive(tx));
+
+        match rx.recv() {
+            Ok(active) => {
+                if active {
+                    match self.rw_sender.clone() {
+                        Some(tx) => {
+                            let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
+                                Ok(_) => {
+                                    *state.lock().unwrap() = TxState::Rollbacked;
+                                    cb(Ok(()));
+                                }
+                                Err(e) => {
+                                    *state.lock().unwrap() = TxState::RollbackFail;
+                                    cb(Err(e.to_string()));
+                                }
+                            })));
+                        }
+                        None => {
+                            cb(Err("Can't get rw_sender".to_string()));
+                        }
                     }
-                    Err(e) => {
-                        *state.lock().unwrap() = TxState::RollbackFail;
-                        cb(Err(e.to_string()));
+                } else {
+                    match self.sender.clone() {
+                        Some(tx) => {
+                            let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
+                                Ok(_) => {
+                                    *state.lock().unwrap() = TxState::Rollbacked;
+                                    cb(Ok(()));
+                                }
+                                Err(e) => {
+                                    *state.lock().unwrap() = TxState::RollbackFail;
+                                    cb(Err(e.to_string()));
+                                }
+                            })));
+                        }
+                        None => {
+                            cb(Err("Can't get sender".to_string()));
+                        }
                     }
-                })));
+                }
             }
-            None => {
-                cb(Err("Can't get sender".to_string()));
+
+            Err(_) => {
+
             }
         }
 
@@ -210,7 +284,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        match self.sender.clone() {
+        match self.rw_sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Modify(
                     arr.clone(),
@@ -404,7 +478,7 @@ impl MetaTxn for LmdbMetaTxn {
 
         let tabkv = TabKV {
             ware: Atom::from(""),
-            tab: Atom::from(""),
+            tab: Atom::from(tab.clone().to_string()),
             key: key,
             index: 0,
             value: value,
@@ -476,6 +550,7 @@ impl DB {
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
         THREAD_POOL.lock().unwrap().start_pool(32, env.clone());
+        THREAD_POOL.lock().unwrap().create_rw_txn(env.clone());
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(

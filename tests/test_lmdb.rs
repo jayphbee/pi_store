@@ -86,11 +86,7 @@ fn test_lmdb_single_thread() {
 
     // newly created table should be there
     assert!(snapshot.tab_info(&Atom::from("_$sinfo")).is_some());
-    assert!(snapshot.tab_info(&Atom::from("test_table_1")).is_some());
-
-    for t in snapshot.list().into_iter() {
-        println!("tables: {:?}", t);
-    }
+    assert!(snapshot.tab_info(&Atom::from("test_table_1")).is_some());    
 
     // insert items to "test_table_1"
     let tab_txn = snapshot
@@ -141,36 +137,48 @@ fn test_lmdb_single_thread() {
 
     let txn1 = tab_txn.clone();
 
-    txn1.modify(
-        arr.clone(),
-        None,
-        false,
-        Arc::new(move |m1| {
-            assert!(m1.is_ok());
-            let txn2 = tab_txn.clone();
-            let tab_txn = tab_txn.clone();
-            txn2.modify(
-                arr2.clone(),
-                None,
-                false,
-                Arc::new(move |m2| {
-                    assert!(m2.is_ok());
-                    let txn3 = tab_txn.clone();
-                    let tab_txn = tab_txn.clone();
-                    txn3.prepare(
-                        1000,
-                        Arc::new(move |p| {
-                            assert!(p.is_ok());
-                            let txn4 = tab_txn.clone();
-                            txn4.commit(Arc::new(move |c| {
-                                assert!(c.is_ok());
-                            }));
-                        }),
-                    );
-                }),
-            );
-        }),
-    );
+    txn1.modify(arr.clone(), None, false, Arc::new(move |m| {}));
+    txn1.prepare(1000, Arc::new(move |p| {}));
+    txn1.commit(Arc::new(move |c| {}));
+
+    // txn1.modify(
+    //     arr.clone(),
+    //     None,
+    //     false,
+    //     Arc::new(move |m1| {
+    //         assert!(m1.is_ok());
+    //         let txn2 = tab_txn.clone();
+    //         let tab_txn = tab_txn.clone();
+    //         txn2.modify(
+    //             arr2.clone(),
+    //             None,
+    //             false,
+    //             Arc::new(move |m2| {
+    //                 assert!(m2.is_ok());
+    //                 let txn3 = tab_txn.clone();
+    //                 let tab_txn = tab_txn.clone();
+    //                 txn3.prepare(1000, Arc::new(move|p| {}));
+    //                 println!("xxx");
+    //                 tab_txn.commit(Arc::new(move |c| {
+    //                     println!("chained commit");
+    //                     assert!(c.is_ok());
+    //                 }));
+    //                 // txn3.prepare(
+    //                 //     1000,
+    //                 //     Arc::new(move |p| {
+    //                 //         assert!(p.is_ok());
+    //                 //         let txn4 = tab_txn.clone();
+    //                 //         txn4.commit(Arc::new(move |c| {
+    //                 //             assert!(c.is_ok());
+    //                 //         }));
+    //                 //     }),
+    //                 // );
+    //             }),
+    //         );
+    //     }),
+    // );
+
+    thread::sleep(time::Duration::from_millis(500));
 
     let tab_txn = snapshot
         .tab_txn(
@@ -187,6 +195,7 @@ fn test_lmdb_single_thread() {
         None,
         false,
         Arc::new(|q| {
+            println!("query: {:?}", q);
             assert!(q.is_ok());
         }),
     );
@@ -198,7 +207,7 @@ fn test_lmdb_multi_thread() {
         let _ = fs::remove_dir_all("testdb");
     }
 
-    let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 100).unwrap();
+    let db = DB::new(Atom::from("testdb"), 1024*1024*100).unwrap();
 
     let snapshot = db.snapshot();
     // newly created DB should have a "_$sinfo" table
@@ -226,16 +235,24 @@ fn test_lmdb_multi_thread() {
             assert!(p.is_ok());
         }),
     );
+
+    thread::sleep(time::Duration::from_millis(500));
     meta_txn.commit(Arc::new(move |c| {
         assert!(c.is_ok());
     }));
 
-    thread::sleep(time::Duration::from_millis(500));
+    thread::sleep(time::Duration::from_millis(1000));
+
+    assert!(snapshot.tab_info(&Atom::from("_$sinfo")).is_some());
+    assert!(snapshot.tab_info(&Atom::from("test_table_2")).is_some());
 
     // concurrently insert 3000 items with 3 threads
-    let h1 = thread::spawn(move || {
+    let h1 = thread::spawn( move || {
         let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 100).unwrap();
         let snapshot = db.snapshot();
+
+        assert!(snapshot.tab_info(&Atom::from("test_table_2")).is_some());
+
         let txn1 = snapshot
             .tab_txn(
                 &Atom::from("test_table_2"),
@@ -245,6 +262,10 @@ fn test_lmdb_multi_thread() {
             )
             .unwrap()
             .unwrap();
+
+        for t in snapshot.list().into_iter() {
+            println!("tables1111: {:?}", t);
+        }
 
         for i in 0..1000 {
             let k = build_db_key(&format!("test_key{:?}", i));
@@ -257,7 +278,7 @@ fn test_lmdb_multi_thread() {
                 Some(v.clone()),
             );
 
-            txn1.modify(
+            let m = txn1.modify(
                 Arc::new(vec![item]),
                 None,
                 false,
