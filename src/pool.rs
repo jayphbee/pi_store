@@ -6,7 +6,7 @@ use std::thread;
 
 use lmdb::{
     mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error, Iter as LmdbIter,
-    MDB_cmp_func, MDB_val, RwTransaction, Transaction, WriteFlags,
+    MDB_cmp_func, MDB_val, RwTransaction, RoTransaction, Transaction, WriteFlags,
 };
 
 use pi_db::db::{Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback};
@@ -147,7 +147,7 @@ impl ThreadPool {
 
             thread::spawn(move || {
                 let env = clone_env;
-                let mut thread_local_txn: Option<RwTransaction> = None;
+                let mut thread_local_txn: Option<RoTransaction> = None;
                 let mut thread_local_iter: Option<LmdbIter> = None;
                 let mut db: Option<Database> = None;
 
@@ -172,7 +172,7 @@ impl ThreadPool {
                             let mut values = Vec::new();
 
                             if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
+                                thread_local_txn = env.begin_ro_txn().ok();
                                 unsafe {
                                     mdb_set_compare(
                                         thread_local_txn.as_ref().unwrap().txn(),
@@ -218,7 +218,7 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::CreateItemIter(descending, key, tx)) => {
                             if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
+                                thread_local_txn = env.begin_ro_txn().ok();
                                 let txn = thread_local_txn.as_mut().unwrap();
                                 let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
                                 if let Some(k) = key {
@@ -249,7 +249,7 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::CreateKeyIter(descending, key, tx)) => {
                             if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
+                                thread_local_txn = env.begin_ro_txn().ok();
                                 let txn = thread_local_txn.as_mut().unwrap();
                                 let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
                                 if let Some(k) = key {
@@ -275,47 +275,8 @@ impl ThreadPool {
                             }
                         }
 
-                        Ok(LmdbMessage::Modify(keys, cb)) => {
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
-
-                                unsafe {
-                                    mdb_set_compare(
-                                        thread_local_txn.as_ref().unwrap().txn(),
-                                        db.clone().unwrap().dbi(),
-                                        mdb_cmp_func as *mut MDB_cmp_func,
-                                    );
-                                }
-                            }
-
-                            let rw_txn = thread_local_txn.as_mut().unwrap();
-
-                            for kv in keys.iter() {
-                                if let Some(_) = kv.value {
-                                    match rw_txn.put(
-                                        db.clone().unwrap(),
-                                        kv.key.as_ref(),
-                                        kv.clone().value.unwrap().as_ref(),
-                                        WriteFlags::empty(),
-                                    ) {
-                                        Ok(_) => {}
-                                        Err(e) => cb(Err(format!(
-                                            "insert data error: {:?}",
-                                            e.to_string()
-                                        ))),
-                                    };
-                                } else {
-                                    match rw_txn.del(db.clone().unwrap(), kv.key.as_ref(), None) {
-                                        Ok(_) => {}
-                                        Err(Error::NotFound) => {}
-                                        Err(e) => cb(Err(format!(
-                                            "delete data error: {:?}",
-                                            e.to_string()
-                                        ))),
-                                    };
-                                }
-                            }
-                            cb(Ok(()))
+                        Ok(LmdbMessage::Modify(_, _)) => {
+                            panic!("Unexpected Lmdb::Modify message received in read-only transaction");
                         }
 
                         Ok(LmdbMessage::Commit(cb)) => {
