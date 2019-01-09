@@ -24,6 +24,7 @@ pub enum LmdbMessage {
     Commit(TxCallback),
     Rollback(TxCallback),
     TableSize(Arc<Fn(SResult<usize>)>),
+    NoOp(TxCallback),
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -56,6 +57,11 @@ impl ThreadPool {
 
                 loop {
                     match rx.recv() {
+                        Ok(LmdbMessage::NoOp(cb)) => {
+                            println!("NoOpcommit !!!!! ------");
+                            cb(Ok(()))
+                        }
+
                         Ok(LmdbMessage::CreateDb(db_name, tx)) => {
                             db = match env.open_db(Some(&db_name.to_string())) {
                                 Ok(db) => Some(db),
@@ -182,7 +188,10 @@ impl ThreadPool {
                         Ok(LmdbMessage::Modify(keys, cb)) => {
                             println!("starting modify {:?}", thread::current().id());
                             if thread_local_txn.is_none() {
+                                println!("thrad local txn is none");
+                                println!("before begin rw txn");
                                 thread_local_txn = env.begin_rw_txn().ok();
+                                println!("after begin rw txn");
 
                                 unsafe {
                                     mdb_set_compare(
