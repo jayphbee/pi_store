@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, RwLock, Mutex};
+use std::collections::HashMap;
 
 use crossbeam_channel::{bounded, Sender};
 
@@ -32,6 +33,11 @@ pub const MDB_LAST: u32 = 6;
 
 const TIMEOUT: usize = 100;
 
+lazy_static! {
+    pub static ref TXN_MAP: Arc<Mutex<HashMap<Guid, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+    pub static ref TXN_INDEX: Arc<Mutex<HashMap<Guid, Arc<LmdbTableTxn>>>> = Arc::new(Mutex::new(HashMap::new()));
+}
+
 #[derive(Debug, Clone)]
 pub struct LmdbTable {
     name: Atom,
@@ -51,6 +57,18 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
+        TXN_MAP.lock().unwrap()
+            .entry(id.clone())
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
+            
+        if let Some(txn) = TXN_INDEX.lock().unwrap().get(&id) {
+            return txn.clone()
+        }
+
+        println!("guid: {:?} want to create new txn", id.0);
+        println!("txid: {:?} => {:?}", id.0, TXN_MAP.lock().unwrap().get(&id.clone()));
+
         let sender = match THREAD_POOL.clone().lock() {
             Ok(mut pool) => pool.pop(),
             Err(e) => panic!(
@@ -73,15 +91,20 @@ impl Tab for LmdbTable {
             panic!("Open db error: {:?}", e.to_string());
         }
 
-        Arc::new(LmdbTableTxn {
+        let t = Arc::new(LmdbTableTxn {
             _id: id.clone(),
             _writable: writable,
             state: Arc::new(Mutex::new(TxState::Ok)),
             sender,
-        })
+        });
+
+        TXN_INDEX.lock().unwrap().insert(id.clone(), t.clone());
+
+        t
     }
 }
 
+#[derive(Clone)]
 pub struct LmdbTableTxn {
     _id: Guid,
     _writable: bool,
@@ -97,7 +120,7 @@ impl Drop for LmdbTableTxn {
                     pool.push(sender);
                     self.sender = None;
                 } else {
-                    panic!("Push None value to thread pool");
+                    // panic!("Push None value to thread pool");
                 }
             }
             Err(e) => panic!("Give back sender failed: {:?}", e.to_string()),
@@ -120,23 +143,38 @@ impl Txn for LmdbTableTxn {
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
+        println!("called commit ------- !!!!!!!!!!! ------------ ");
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
 
-        match self.sender.clone() {
-            Some(tx) => {
-                let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
-                    Ok(_) => {
-                        *state.lock().unwrap() = TxState::Commited;
-                        cb(Ok(()));
+        if let Some(x) = TXN_MAP.lock().unwrap().get(&self._id) {
+            println!("commit to lmdb: {:?}", self._id);
+            if *x == 1 {
+                match self.sender.clone() {
+                    Some(tx) => {
+                        let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
+                            Ok(_) => {
+                                *state.lock().unwrap() = TxState::Commited;
+                                cb(Ok(()));
+                                println!("after commit cb --------------- ");
+                            }
+                            Err(e) => {
+                                *state.lock().unwrap() = TxState::CommitFail;
+                                cb(Err(e.to_string()));
+                            }
+                        })));
                     }
-                    Err(e) => {
-                        *state.lock().unwrap() = TxState::CommitFail;
-                        cb(Err(e.to_string()));
+                    None => {
+                        cb(Err("Can't get sender".to_string()));
                     }
-                })));
+                }
+                TXN_MAP.lock().unwrap().remove(&self._id);
+                TXN_INDEX.lock().unwrap().remove(&self._id);
+            } else {
+                TXN_MAP.lock().unwrap()
+                    .entry(self._id.clone())
+                    .and_modify(|x| *x -= 1);
             }
-            None => cb(Err("Can't get sender".to_string())),
         }
         None
     }
@@ -210,6 +248,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
+        println!("called modify ------- !!!!!!!!!!! ------------ ");
         match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Modify(
@@ -324,6 +363,7 @@ impl Iter for LmdbItemsIter {
     type Item = (Bin, Bin);
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
+        println!("called nextItem ------- !!!!!!!!!!! ------------ ");
         let _ = self
             .sender
             .send(LmdbMessage::NextItem(Arc::new(move |item| match item {

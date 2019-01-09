@@ -128,6 +128,7 @@ impl ThreadPool {
                                     thread_local_iter = Some(
                                         cursor.iter_from_with_direction(k.to_vec(), descending),
                                     );
+                                    println!("create item iter success");
                                 } else {
                                     thread_local_iter =
                                         Some(cursor.iter_items_with_direction(descending));
@@ -179,6 +180,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(keys, cb)) => {
+                            println!("starting modify {:?}", thread::current().id());
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
 
@@ -218,21 +220,30 @@ impl ThreadPool {
                                     };
                                 }
                             }
+                            println!("modify finished {:?}", thread::current().id());
                             cb(Ok(()))
                         }
 
                         Ok(LmdbMessage::Commit(cb)) => {
+                            println!("starting commit{:?}", thread::current().id());
                             if let Some(txn) = thread_local_txn.take() {
+                                println!("thread local txn is some");
                                 match txn.commit() {
-                                    Ok(_) => cb(Ok(())),
+                                    Ok(_) => {
+                                        println!("commit before cb");
+                                        cb(Ok(()));
+                                        println!("commit after cb");
+                                    }
                                     Err(e) => cb(Err(format!(
                                         "commit failed with error: {:?}",
                                         e.to_string()
                                     ))),
                                 }
                             } else {
+                                println!("empty commit");
                                 cb(Ok(()))
                             }
+                            println!("txn commited --------- ");
                         }
 
                         Ok(LmdbMessage::Rollback(cb)) => {
