@@ -14,7 +14,7 @@ use std::thread;
 use std::time;
 
 use atom::Atom;
-use bon::WriteBuffer;
+use bon::{Decode, Encode, ReadBonErr, ReadBuffer, WriteBuffer};
 use guid::Guid;
 use sinfo::{EnumType, StructInfo};
 
@@ -904,4 +904,198 @@ fn test_exception() {
         .for_each(drop);
 
     thread::sleep(time::Duration::from_millis(500));
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct Player {
+    name: String,
+    id: u32,
+}
+
+#[cfg(test)]
+impl Encode for Player {
+    fn encode(&self, bb: &mut WriteBuffer) {
+        self.name.encode(bb);
+        self.id.encode(bb);
+    }
+}
+
+#[cfg(test)]
+impl Decode for Player {
+    fn decode(bb: &mut ReadBuffer) -> Result<Self, ReadBonErr> {
+        Ok(Player {
+            name: String::decode(bb)?,
+            id: u32::decode(bb)?,
+        })
+    }
+}
+
+#[test]
+fn test_file_db_mgr() {
+    use guid::GuidGen;
+    use pi_db::db::SResult;
+    use pi_db::mgr::Mgr;
+    use std::collections::HashMap;
+
+    let mgr = Mgr::new(GuidGen::new(1, 1));
+    let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 10).unwrap();
+    mgr.register(Atom::from("testdb"), Arc::new(db));
+    let mgr = Arc::new(mgr);
+
+    let tr = mgr.transaction(true);
+    let tr1 = tr.clone();
+    let sinfo = EnumType::Struct(Arc::new(StructInfo::new(Atom::from("Player"), 55555555)));
+    let mut m = HashMap::new();
+
+    m.insert(Atom::from("class"), Atom::from("testdb"));
+
+    let alter_back = Arc::new(move |r: SResult<()>| {
+        println!("alter: {:?}", r);
+        assert!(r.is_ok());
+        match tr1.prepare(Arc::new(|r| println!("xxxxxxxxxxxxx"))) {
+            Some(r) => {
+                println!("prepare_alter ----------- :{:?}", r);
+                match tr1.commit(Arc::new(|r| {
+                    assert!(r.is_ok());
+                    println!("commit_alter:{:?}", r);
+                })) {
+                    Some(r) => {
+                        assert!(r.is_ok());
+                        println!("commit_alter:{:?}", r);
+                    }
+                    None => println!("commit_alter:fail"),
+                };
+                println!("after prepare !!!!!! -------------- ");
+            }
+            None => println!("prepare_alter:fail"),
+        };
+        // match tr1.commit(Arc::new(|r|{
+        //         assert!(r.is_ok());
+        //         println!("commit_alter:{:?}", r)
+        //     }))
+        // {
+        // 	Some(r) => {
+        //         assert!(r.is_ok());
+        //         println!("commit_alter:{:?}", r)
+        //     },
+        // 	_ => println!("commit_alter:fail"),
+        // };
+        println!("alter_succsess");
+        let mgr1 = mgr.clone();
+        let write = move || {
+            let mgr2 = mgr1.clone();
+            let read = move || {
+                let tr = mgr2.transaction(false);
+                let tr1 = tr.clone();
+                let mut arr = Vec::new();
+
+                let mut key1 = WriteBuffer::new();
+                key1.write_u8(5);
+
+                let t1 = TabKV {
+                    ware: Atom::from("testdb"),
+                    tab: Atom::from("Player"),
+                    key: Arc::new(key1.unwrap()),
+                    index: 0,
+                    value: None,
+                };
+                arr.push(t1);
+
+                let read_back = Arc::new(move |r: SResult<Vec<TabKV>>| {
+                    assert!(r.is_ok());
+                    match r {
+                        Ok(mut v) => {
+                            println!("read:ok");
+                            for elem in v.iter_mut() {
+                                match elem.value {
+                                    Some(ref mut v) => {
+                                        println!("kkkkkkkkkkkkk{:?}", v.len());
+                                        let mut buf = ReadBuffer::new(Arc::make_mut(v), 0);
+                                        let p = Player::decode(&mut buf);
+                                        println!("{:?}", p);
+                                    }
+                                    None => (),
+                                }
+                            }
+                        }
+                        Err(v) => println!("read:fail, {}", v),
+                    }
+                    //println!("read: {:?}", r);
+                    match tr1.prepare(Arc::new(|r| println!("prepare_read:{:?}", r))) {
+                        Some(r) => println!("prepare_read:{:?}", r),
+                        _ => println!("prepare_read:fail"),
+                    };
+                    match tr1.commit(Arc::new(|r| println!("commit_read:{:?}", r))) {
+                        Some(r) => println!("commit_read:{:?}", r),
+                        _ => println!("commit_read:fail"),
+                    };
+                    //println!("succsess:{}", arr.len());
+                });
+
+                let r = tr.query(arr, Some(100), true, read_back.clone());
+                if r.is_some() {
+                    read_back(r.unwrap());
+                }
+            };
+
+            let tr = mgr1.transaction(true);
+            let tr1 = tr.clone();
+            let p = Player {
+                name: String::from("chuanyan"),
+                id: 5,
+            };
+            let mut bonbuf = WriteBuffer::new();
+            p.encode(&mut bonbuf);
+            let v = bonbuf.unwrap();
+            println!("vvvvvvvvvvvvvvvvvvvvvvvvvvvvv{}", v.len());
+
+            let mut arr = Vec::new();
+            let mut key = WriteBuffer::new();
+            key.write_u8(5);
+            let t1 = TabKV {
+                ware: Atom::from("testdb"),
+                tab: Atom::from("Player"),
+                key: Arc::new(key.unwrap()),
+                index: 0,
+                value: Some(Arc::new(v)),
+            };
+            arr.push(t1);
+
+            let write_back = Arc::new(move |r: SResult<()>| {
+                println!("write: {:?}", r);
+                assert!(r.is_ok());
+                match tr1.prepare(Arc::new(|r| println!("prepare_write:{:?}", r))) {
+                    Some(r) => println!("prepare_write:{:?}", r),
+                    _ => println!("prepare_write:fail"),
+                };
+                match tr1.commit(Arc::new(|r| println!("commit_write:{:?}", r))) {
+                    Some(r) => println!("commit_write:{:?}", r),
+                    _ => println!("commit_write:fail"),
+                };
+                &read();
+            });
+            let r = tr.modify(arr, Some(100), false, write_back.clone());
+            if r.is_some() {
+                write_back(r.unwrap());
+            }
+        };
+        write();
+    });
+    let r = tr.alter(
+        &Atom::from("testdb"),
+        &Atom::from("Player"),
+        Some(Arc::new(TabMeta {
+            k: EnumType::U8,
+            v: sinfo,
+        })),
+        alter_back.clone(),
+    );
+
+    thread::sleep_ms(3000);
+    // alter_back(r.unwrap());
+
+    // if r.is_some(){
+    // 	alter_back(r.unwrap());
+    // }
 }

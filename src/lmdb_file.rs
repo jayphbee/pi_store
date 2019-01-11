@@ -155,18 +155,26 @@ impl Txn for LmdbTableTxn {
                 println!("commit to lmdb: {:?}", self._id);
                 match sender {
                     Some(tx) => {
-                        let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
+                        println!("sender is some");
+                        let e = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
                             Ok(_) => {
+                                println!("lock ------------------");
                                 *state.lock().unwrap() = TxState::Commited;
+                                println!("before call commit cb");
                                 cb(Ok(()));
+                                println!("after call commit cb");
+
                             }
                             Err(e) => {
+                                println!("wwwwtttttfffff");
                                 *state.lock().unwrap() = TxState::CommitFail;
                                 cb(Err(e.to_string()));
                             }
                         })));
+                        println!("after sender: {:?}", e);
                     }
                     None => {
+                        println!("wtffffffffffff");
                         return Some(Err("Can't get sender".to_string()));
                     }
                 }
@@ -525,6 +533,7 @@ impl Txn for LmdbMetaTxn {
     }
     // 提交一个事务
     fn commit(&self, cb: TxCallback) -> CommitResult {
+        println!("commit meta txn !!!!! -------------");
         self.0.commit(cb)
     }
     // 回滚一个事务
