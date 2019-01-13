@@ -94,7 +94,6 @@ impl Tab for LmdbTable {
         });
 
         TXN_INDEX.lock().unwrap().insert(id.clone(), t.clone());
-        println!("current txns: {:?}", TXN_MAP.lock().unwrap().keys());
 
         t
     }
@@ -167,6 +166,12 @@ impl Txn for LmdbTableTxn {
             }
         } else {
             let _ = self.txns.lock().unwrap().pop();
+            match self.sender.clone() {
+                Some(tx) => {
+                    let _ = tx.send(LmdbMessage::NoOp(cb));
+                }
+                None => return Some(Err("Can't get sender".to_string()))
+            }
         }
 
         None
