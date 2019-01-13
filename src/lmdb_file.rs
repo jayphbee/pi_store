@@ -148,10 +148,10 @@ impl Txn for LmdbTableTxn {
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
 
-        if let Some(x) = TXN_MAP.lock().unwrap().get(&self._id) {
+        if let Ok(mut lock) = TXN_MAP.lock() {
             let sender = self.sender.clone();
-            println!("{:?} has {:?} txns left", self._id, x);
-            if *x == 1 {
+            // println!("{:?} has {:?} txns left", self._id, x);
+            if let Some(1) = lock.get(&self._id) {
                 println!("commit to lmdb: {:?}", self._id);
                 match sender {
                     Some(tx) => {
@@ -178,10 +178,14 @@ impl Txn for LmdbTableTxn {
                         return Some(Err("Can't get sender".to_string()));
                     }
                 }
-                TXN_MAP.lock().unwrap().remove(&self._id);
+                println!("before TXN_MAP lock -------- !!!!!!!!!!");
+                lock.remove(&self._id);
+                println!("after TXN_MAP lock -------- !!!!!!!!!!");
+
+                println!("before TXN_INDEX lock -------- !!!!!!!!!!");
                 TXN_INDEX.lock().unwrap().remove(&self._id);
+                println!("after TXN_INDEX remove ------------ !!!!!!");
             } else {
-                println!("before lmdb commit callback: {:?}", x);
                 match sender.clone() {
                     Some(tx) => {
                         let _ = tx.send(LmdbMessage::NoOp(cb));
@@ -190,7 +194,6 @@ impl Txn for LmdbTableTxn {
                         return Some(Err("Can't get sender".to_string()));
                     }
                 }
-                println!("after lmdb commit callback: {:?}", x);
             }
         }
 
@@ -199,7 +202,7 @@ impl Txn for LmdbTableTxn {
             .and_modify(|x| *x -= 1);
         
         println!("after reduce x: {:?} ----- !!!!!! -------- ", TXN_MAP.lock().unwrap().get(&self._id.clone()));
-        
+
         None
     }
 
@@ -298,10 +301,11 @@ impl TabTxn for LmdbTableTxn {
             .entry(self._id.clone())
             .and_modify(|x| *x += 1);
         println!("called modify ------- !!!!!!!!!!! ------------ ");
-        println!("tnxs: {:?}", TXN_MAP.lock().unwrap().get(&self._id)); 
+        println!("tnxs: {:?}", TXN_MAP.lock().unwrap().get(&self._id));
 
         match self.sender.clone() {
             Some(tx) => {
+                println!("modify sender is some");
                 let _ = tx.send(LmdbMessage::Modify(
                     arr.clone(),
                     Arc::new(move |m| match m {
@@ -311,7 +315,7 @@ impl TabTxn for LmdbTableTxn {
                 ));
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
 

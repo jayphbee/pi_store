@@ -62,25 +62,38 @@ fn test_lmdb_single_thread() {
         EnumType::Struct(Arc::new(StructInfo::new(Atom::from("test_table_1"), 8888))),
     ));
     snapshot.alter(&Atom::from("test_table_1"), Some(sinfo.clone()));
+    snapshot.prepare(&Guid(0));
+    snapshot.commit(&Guid(0));
 
     let meta_txn = snapshot.meta_txn(&Guid(0));
+    let m1 = meta_txn.clone();
+    let m2 = meta_txn.clone();
 
     meta_txn.alter(
         &Atom::from("test_table_1"),
         Some(sinfo.clone()),
         Arc::new(move |alter| {
             assert!(alter.is_ok());
+            match m1.prepare(1000, Arc::new(move |_p|{})) {
+                Some(_) => {
+                    match m2.commit(Arc::new(move |c| {
+                        assert!(c.is_ok());
+                    })) {
+                        Some(c) => {
+                            println!("commit success: {:?}", c);
+                        }
+
+                        None => {
+                            println!("async commit");
+                        }
+                    }
+                }
+                None => {
+
+                }
+            }
         }),
     );
-    meta_txn.prepare(
-        1000,
-        Arc::new(move |p| {
-            assert!(p.is_ok());
-        }),
-    );
-    meta_txn.commit(Arc::new(move |c| {
-        assert!(c.is_ok());
-    }));
 
     thread::sleep(time::Duration::from_millis(500));
 
@@ -146,6 +159,7 @@ fn test_lmdb_single_thread() {
         None,
         false,
         Arc::new(move |m1| {
+            println!("hello world  --------------------- ");
             assert!(m1.is_ok());
             let txn2 = tab_txn.clone();
             let tab_txn = tab_txn.clone();
@@ -156,21 +170,19 @@ fn test_lmdb_single_thread() {
                 Arc::new(move |m2| {
                     assert!(m2.is_ok());
                     let txn3 = tab_txn.clone();
-                    let tab_txn = tab_txn.clone();
                     txn3.prepare(
                         1000,
-                        Arc::new(move |p| {
-                            assert!(p.is_ok());
-                            let txn4 = tab_txn.clone();
-                            txn4.commit(Arc::new(move |c| {
-                                assert!(c.is_ok());
-                            }));
-                        }),
+                        Arc::new(move |_p| {}),
                     );
+                    txn3.commit(Arc::new(move |c| {
+                        assert!(c.is_ok());
+                    }));
                 }),
             );
         }),
     );
+
+    thread::sleep(time::Duration::from_millis(500));
 
     let tab_txn = snapshot
         .tab_txn(
@@ -181,15 +193,22 @@ fn test_lmdb_single_thread() {
         )
         .unwrap()
         .unwrap();
-
+    let t1 = tab_txn.clone();
     tab_txn.query(
         Arc::new(vec![item1.clone()]),
         None,
         false,
-        Arc::new(|q| {
+        Arc::new(move |q| {
             assert!(q.is_ok());
+            println!("q: {:?}", q);
+            t1.prepare(1000, Arc::new(move |_p| {}));
+            t1.commit(Arc::new(move |c| {
+                c.is_ok();
+            }));
         }),
     );
+
+    thread::sleep(time::Duration::from_millis(500));
 }
 
 #[test]
@@ -904,6 +923,11 @@ fn test_exception() {
         .for_each(drop);
 
     thread::sleep(time::Duration::from_millis(500));
+}
+
+#[test]
+fn test_lmdb_mgr() {
+
 }
 
 #[cfg(test)]
