@@ -62,7 +62,7 @@ fn test_lmdb_single_thread() {
         EnumType::Struct(Arc::new(StructInfo::new(Atom::from("test_table_1"), 8888))),
     ));
     snapshot.alter(&Atom::from("test_table_1"), Some(sinfo.clone()));
-    snapshot.prepare(&Guid(0));
+    let _ = snapshot.prepare(&Guid(0));
     snapshot.commit(&Guid(0));
 
     let meta_txn = snapshot.meta_txn(&Guid(0));
@@ -74,7 +74,7 @@ fn test_lmdb_single_thread() {
         Some(sinfo.clone()),
         Arc::new(move |alter| {
             assert!(alter.is_ok());
-            match m1.prepare(1000, Arc::new(move |_p|{})) {
+            match m1.prepare(1000, Arc::new(move |_p| {})) {
                 Some(_) => {
                     match m2.commit(Arc::new(move |c| {
                         assert!(c.is_ok());
@@ -88,9 +88,7 @@ fn test_lmdb_single_thread() {
                         }
                     }
                 }
-                None => {
-
-                }
+                None => {}
             }
         }),
     );
@@ -170,10 +168,7 @@ fn test_lmdb_single_thread() {
                 Arc::new(move |m2| {
                     assert!(m2.is_ok());
                     let txn3 = tab_txn.clone();
-                    txn3.prepare(
-                        1000,
-                        Arc::new(move |_p| {}),
-                    );
+                    txn3.prepare(1000, Arc::new(move |_p| {}));
                     txn3.commit(Arc::new(move |c| {
                         assert!(c.is_ok());
                     }));
@@ -265,7 +260,7 @@ fn test_lmdb_multi_thread() {
             .unwrap()
             .unwrap();
 
-        for i in 0..1000 {
+        for i in 0..10 {
             let k = build_db_key(&format!("test_key{:?}", i));
             let v = build_db_val(&format!("test_value{:?}", i));
             let item = create_tabkv(
@@ -285,6 +280,7 @@ fn test_lmdb_multi_thread() {
                 }),
             );
         }
+        println!("multi thread 1: modify XXXXXXXXXXXXXXXXXXXXXXXXX ");
 
         txn1.prepare(
             1000,
@@ -292,10 +288,19 @@ fn test_lmdb_multi_thread() {
                 assert!(p.is_ok());
             }),
         );
-        txn1.commit(Arc::new(move |c| {
-            assert!(c.is_ok());
-        }));
-    });
+        println!("multi thread 1: prepare XXXXXXXXXXXXXXXXXXXXXXXXX ");
+        thread::sleep(time::Duration::from_millis(500));
+        for i in 0..10 {
+            txn1.commit(Arc::new(move |c| {
+                assert!(c.is_ok());
+            }));
+            println!("commit for the {:?} time", i);
+            thread::sleep(time::Duration::from_millis(500));
+        }
+    })
+    .join();
+
+    thread::sleep(time::Duration::from_millis(500));
 
     let h2 = thread::spawn(move || {
         let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 100).unwrap();
@@ -310,7 +315,7 @@ fn test_lmdb_multi_thread() {
             .unwrap()
             .unwrap();
 
-        for i in 1000..2000 {
+        for i in 10..20 {
             let k = build_db_key(&format!("test_key{:?}", i));
             let v = build_db_val(&format!("test_value{:?}", i));
             let item = create_tabkv(
@@ -337,10 +342,17 @@ fn test_lmdb_multi_thread() {
                 assert!(p.is_ok());
             }),
         );
-        txn2.commit(Arc::new(move |c| {
-            assert!(c.is_ok());
-        }));
-    });
+        for i in 0..10 {
+            txn2.commit(Arc::new(move |c| {
+                assert!(c.is_ok());
+            }));
+            println!("commit for the {:?} time", i);
+            thread::sleep(time::Duration::from_millis(500));
+        }
+    })
+    .join();
+
+    thread::sleep(time::Duration::from_millis(500));
 
     let h3 = thread::spawn(move || {
         let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 100).unwrap();
@@ -355,7 +367,7 @@ fn test_lmdb_multi_thread() {
             .unwrap()
             .unwrap();
 
-        for i in 2000..3000 {
+        for i in 20..30 {
             let k = build_db_key(&format!("test_key{:?}", i));
             let v = build_db_val(&format!("test_value{:?}", i));
             let item = create_tabkv(
@@ -382,17 +394,25 @@ fn test_lmdb_multi_thread() {
                 assert!(p.is_ok());
             }),
         );
-        txn3.commit(Arc::new(move |c| {
-            assert!(c.is_ok());
-        }));
-    });
+        for i in 0..10 {
+            txn3.commit(Arc::new(move |c| {
+                assert!(c.is_ok());
+            }));
+            println!("commit for the {:?} time", i);
+            thread::sleep(time::Duration::from_millis(500));
+        }
+    })
+    .join();
 
-    assert!(h1.join().is_ok());
-    assert!(h2.join().is_ok());
-    assert!(h3.join().is_ok());
+    thread::sleep(time::Duration::from_millis(500));
+
+    // assert!(h1.join().is_ok());
+    // assert!(h2.join().is_ok());
+    // assert!(h3.join().is_ok());
 
     // thread 4 iterate all the inserted value from begining to end
     let h4 = thread::spawn(move || {
+        println!("in thread 4 *****************");
         let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 100).unwrap();
         let snapshot = db.snapshot();
         let txn4 = snapshot
@@ -405,30 +425,20 @@ fn test_lmdb_multi_thread() {
             .unwrap()
             .unwrap();
 
-        txn4.iter(
-            None,
-            true,
-            None,
-            Arc::new(move |iter| {
-                assert!(iter.is_ok());
-
-                let mut it = iter.unwrap();
-                for i in 0..3001 {
-                    it.next(Arc::new(move |item| {
-                        if let Ok(elem) = item {
-                            if elem.is_none() {
-                                // the 3000th item is None
-                                assert_eq!(3000, i);
-                                println!("multi thread item {:?}: {:?}", i, elem);
-                            } else {
-                                assert_ne!(3000, i);
-                            }
-                        }
-                    }));
+        txn4.iter(None, true, None, Arc::new(move |_iter| {}));
+        let mut iter = txn4
+            .iter(None, true, None, Arc::new(move |_| {}))
+            .unwrap()
+            .unwrap();
+        for i in 0..31 {
+            iter.next(Arc::new(move |item| {
+                if let Ok(elem) = item {
+                    println!("multi thread item {:?}: {:?}", i, elem);
                 }
-            }),
-        );
+            }));
+        }
 
+        thread::sleep(time::Duration::from_millis(500));
         txn4.prepare(
             1000,
             Arc::new(move |p| {
@@ -437,12 +447,17 @@ fn test_lmdb_multi_thread() {
         );
 
         // NOTE: txn4 should be committed, or will block other write txns
-        txn4.commit(Arc::new(move |c| {
-            assert!(c.is_ok());
-        }));
-    });
+        for i in 0..10 {
+            txn4.commit(Arc::new(move |c| {
+                assert!(c.is_ok());
+            }));
+            println!("commit for the {:?} time", i);
+            thread::sleep(time::Duration::from_millis(500));
+        }
+    })
+    .join();
 
-    assert!(h4.join().is_ok());
+    // assert!(h4.join().is_ok());
 
     thread::sleep(time::Duration::from_millis(500));
 
@@ -461,7 +476,7 @@ fn test_lmdb_multi_thread() {
             .unwrap();
 
         // even indexed items should be there
-        (0..3000)
+        (0..30)
             .step_by(2)
             .map(|i| {
                 let k = build_db_key(&format!("test_key{:?}", i));
@@ -484,9 +499,14 @@ fn test_lmdb_multi_thread() {
                 );
             })
             .for_each(drop);
-    });
+        txn5.prepare(1000, Arc::new(|p| {}));
+        txn5.commit(Arc::new(|c| {
+            assert!(c.is_ok());
+        }));
+    })
+    .join();
 
-    assert!(h.join().is_ok());
+    // assert!(h.join().is_ok());
 
     // thread 5, 6, 7 concurrently delete all data inserted before
     let h5 = thread::spawn(move || {
@@ -503,7 +523,7 @@ fn test_lmdb_multi_thread() {
             .unwrap()
             .unwrap();
 
-        for i in 0..1000 {
+        for i in 0..10 {
             let k = build_db_key(&format!("test_key{:?}", i));
             let item = create_tabkv(
                 Atom::from("testdb"),
@@ -528,10 +548,16 @@ fn test_lmdb_multi_thread() {
                 assert!(p.is_ok());
             }),
         );
-        txn5.commit(Arc::new(move |c| {
-            assert!(c.is_ok());
-        }));
-    });
+        for i in 0..10 {
+            txn5.commit(Arc::new(move |c| {
+                assert!(c.is_ok());
+            }));
+            println!("thread 5 commit for the {:?} time", i);
+        }
+    })
+    .join();
+
+    thread::sleep(time::Duration::from_millis(500));
 
     let h6 = thread::spawn(move || {
         println!("delete item in thread 6");
@@ -547,7 +573,7 @@ fn test_lmdb_multi_thread() {
             .unwrap()
             .unwrap();
 
-        for i in 1000..2000 {
+        for i in 10..20 {
             let k = build_db_key(&format!("test_key{:?}", i));
             let item = create_tabkv(
                 Atom::from("testdb"),
@@ -572,10 +598,16 @@ fn test_lmdb_multi_thread() {
                 assert!(p.is_ok());
             }),
         );
-        txn6.commit(Arc::new(move |c| {
-            assert!(c.is_ok());
-        }));
-    });
+        for i in 0..10 {
+            txn6.commit(Arc::new(move |c| {
+                assert!(c.is_ok());
+            }));
+            println!("thread 6 commit for the {:?} time", i);
+        }
+    })
+    .join();
+
+    thread::sleep(time::Duration::from_millis(500));
 
     let h7 = thread::spawn(move || {
         println!("delete item in thread 7");
@@ -591,7 +623,7 @@ fn test_lmdb_multi_thread() {
             .unwrap()
             .unwrap();
 
-        for i in 2000..3000 {
+        for i in 20..30 {
             let k = build_db_key(&format!("test_key{:?}", i));
             let item = create_tabkv(
                 Atom::from("testdb"),
@@ -616,14 +648,20 @@ fn test_lmdb_multi_thread() {
                 assert!(p.is_ok());
             }),
         );
-        txn7.commit(Arc::new(move |c| {
-            assert!(c.is_ok());
-        }));
-    });
+        for i in 0..10 {
+            txn7.commit(Arc::new(move |c| {
+                assert!(c.is_ok());
+            }));
+            println!("thread 7 commit for the {:?} time", i);
+        }
+    })
+    .join();
 
-    assert!(h5.join().is_ok());
-    assert!(h6.join().is_ok());
-    assert!(h7.join().is_ok());
+    thread::sleep(time::Duration::from_millis(500));
+
+    // assert!(h5.join().is_ok());
+    // assert!(h6.join().is_ok());
+    // assert!(h7.join().is_ok());
 
     // check that all items are deleted
     let h8 = thread::spawn(move || {
@@ -925,11 +963,6 @@ fn test_exception() {
     thread::sleep(time::Duration::from_millis(500));
 }
 
-#[test]
-fn test_lmdb_mgr() {
-
-}
-
 #[cfg(test)]
 #[derive(Debug)]
 struct Player {
@@ -960,7 +993,6 @@ fn test_file_db_mgr() {
     use guid::GuidGen;
     use pi_db::db::SResult;
     use pi_db::mgr::Mgr;
-    use std::collections::HashMap;
 
     let mgr = Mgr::new(GuidGen::new(1, 1));
     let db = DB::new(Atom::from("testdb"), 1024 * 1024 * 10).unwrap();
@@ -969,157 +1001,158 @@ fn test_file_db_mgr() {
 
     let tr = mgr.transaction(true);
     let tr1 = tr.clone();
-    let sinfo = EnumType::Struct(Arc::new(StructInfo::new(Atom::from("Player"), 55555555)));
-    let mut m = HashMap::new();
+    let tr2 = tr.clone();
 
-    m.insert(Atom::from("class"), Atom::from("testdb"));
-
-    let alter_back = Arc::new(move |r: SResult<()>| {
-        println!("alter: {:?}", r);
-        assert!(r.is_ok());
-        match tr1.prepare(Arc::new(|r| println!("xxxxxxxxxxxxx"))) {
-            Some(r) => {
-                println!("prepare_alter ----------- :{:?}", r);
-                match tr1.commit(Arc::new(|r| {
-                    assert!(r.is_ok());
-                    println!("commit_alter:{:?}", r);
-                })) {
-                    Some(r) => {
-                        assert!(r.is_ok());
-                        println!("commit_alter:{:?}", r);
-                    }
-                    None => println!("commit_alter:fail"),
-                };
-                println!("after prepare !!!!!! -------------- ");
-            }
-            None => println!("prepare_alter:fail"),
-        };
-        // match tr1.commit(Arc::new(|r|{
-        //         assert!(r.is_ok());
-        //         println!("commit_alter:{:?}", r)
-        //     }))
-        // {
-        // 	Some(r) => {
-        //         assert!(r.is_ok());
-        //         println!("commit_alter:{:?}", r)
-        //     },
-        // 	_ => println!("commit_alter:fail"),
-        // };
-        println!("alter_succsess");
-        let mgr1 = mgr.clone();
-        let write = move || {
-            let mgr2 = mgr1.clone();
-            let read = move || {
-                let tr = mgr2.transaction(false);
-                let tr1 = tr.clone();
-                let mut arr = Vec::new();
-
-                let mut key1 = WriteBuffer::new();
-                key1.write_u8(5);
-
-                let t1 = TabKV {
-                    ware: Atom::from("testdb"),
-                    tab: Atom::from("Player"),
-                    key: Arc::new(key1.unwrap()),
-                    index: 0,
-                    value: None,
-                };
-                arr.push(t1);
-
-                let read_back = Arc::new(move |r: SResult<Vec<TabKV>>| {
-                    assert!(r.is_ok());
-                    match r {
-                        Ok(mut v) => {
-                            println!("read:ok");
-                            for elem in v.iter_mut() {
-                                match elem.value {
-                                    Some(ref mut v) => {
-                                        println!("kkkkkkkkkkkkk{:?}", v.len());
-                                        let mut buf = ReadBuffer::new(Arc::make_mut(v), 0);
-                                        let p = Player::decode(&mut buf);
-                                        println!("{:?}", p);
-                                    }
-                                    None => (),
-                                }
-                            }
-                        }
-                        Err(v) => println!("read:fail, {}", v),
-                    }
-                    //println!("read: {:?}", r);
-                    match tr1.prepare(Arc::new(|r| println!("prepare_read:{:?}", r))) {
-                        Some(r) => println!("prepare_read:{:?}", r),
-                        _ => println!("prepare_read:fail"),
-                    };
-                    match tr1.commit(Arc::new(|r| println!("commit_read:{:?}", r))) {
-                        Some(r) => println!("commit_read:{:?}", r),
-                        _ => println!("commit_read:fail"),
-                    };
-                    //println!("succsess:{}", arr.len());
-                });
-
-                let r = tr.query(arr, Some(100), true, read_back.clone());
-                if r.is_some() {
-                    read_back(r.unwrap());
-                }
-            };
-
-            let tr = mgr1.transaction(true);
-            let tr1 = tr.clone();
-            let p = Player {
-                name: String::from("chuanyan"),
-                id: 5,
-            };
-            let mut bonbuf = WriteBuffer::new();
-            p.encode(&mut bonbuf);
-            let v = bonbuf.unwrap();
-            println!("vvvvvvvvvvvvvvvvvvvvvvvvvvvvv{}", v.len());
-
-            let mut arr = Vec::new();
-            let mut key = WriteBuffer::new();
-            key.write_u8(5);
-            let t1 = TabKV {
-                ware: Atom::from("testdb"),
-                tab: Atom::from("Player"),
-                key: Arc::new(key.unwrap()),
-                index: 0,
-                value: Some(Arc::new(v)),
-            };
-            arr.push(t1);
-
-            let write_back = Arc::new(move |r: SResult<()>| {
-                println!("write: {:?}", r);
-                assert!(r.is_ok());
-                match tr1.prepare(Arc::new(|r| println!("prepare_write:{:?}", r))) {
-                    Some(r) => println!("prepare_write:{:?}", r),
-                    _ => println!("prepare_write:fail"),
-                };
-                match tr1.commit(Arc::new(|r| println!("commit_write:{:?}", r))) {
-                    Some(r) => println!("commit_write:{:?}", r),
-                    _ => println!("commit_write:fail"),
-                };
-                &read();
-            });
-            let r = tr.modify(arr, Some(100), false, write_back.clone());
-            if r.is_some() {
-                write_back(r.unwrap());
-            }
-        };
-        write();
-    });
-    let r = tr.alter(
+    tr.alter(
         &Atom::from("testdb"),
-        &Atom::from("Player"),
+        &Atom::from("test_table_mgr_1"),
         Some(Arc::new(TabMeta {
-            k: EnumType::U8,
-            v: sinfo,
+            k: EnumType::Str,
+            v: EnumType::Str,
         })),
-        alter_back.clone(),
+        Arc::new(move |a| {
+            assert!(a.is_ok());
+            match tr1.prepare(Arc::new(move |p| {
+                assert!(p.is_ok());
+            })) {
+                Some(p) => println!("prepare: {:?}", p),
+                None => println!("None arm"),
+            }
+        }),
     );
 
-    thread::sleep_ms(3000);
-    // alter_back(r.unwrap());
+    tr.alter(
+        &Atom::from("testdb"),
+        &Atom::from("test_table_mgr_2"),
+        Some(Arc::new(TabMeta {
+            k: EnumType::Str,
+            v: EnumType::Str,
+        })),
+        Arc::new(move |a| {
+            assert!(a.is_ok());
+            match tr2.prepare(Arc::new(move |p| {
+                assert!(p.is_ok());
+            })) {
+                Some(p) => println!("prepare: {:?}", p),
+                None => println!("None arm"),
+            }
+        }),
+    );
 
-    // if r.is_some(){
-    // 	alter_back(r.unwrap());
-    // }
+    thread::sleep_ms(1000);
+
+    tr.commit(Arc::new(|c| {
+        assert!(c.is_ok());
+    }));
+
+    let t1 = mgr.transaction(true);
+    let t2 = t1.clone();
+    let t3 = t1.clone();
+
+    let mut arr = Vec::new();
+    let mut arr2 = Vec::new();
+
+    for i in 0..10 {
+        let k = build_db_key(&format!("test_key{:?}", i));
+        let v = build_db_val(&format!("test_value{:?}", i));
+        let item = create_tabkv(
+            Atom::from("testdb"),
+            Atom::from("test_table_mgr_1"),
+            k.clone(),
+            0,
+            Some(v.clone()),
+        );
+
+        arr.push(item);
+    }
+
+    for i in 0..10 {
+        let k = build_db_key(&format!("test_key{:?}", i));
+        let v = build_db_val(&format!("test_value{:?}", i));
+        let item = create_tabkv(
+            Atom::from("testdb"),
+            Atom::from("test_table_mgr_2"),
+            k.clone(),
+            0,
+            Some(v.clone()),
+        );
+
+        arr2.push(item);
+    }
+
+    t1.modify(
+        arr.clone(),
+        None,
+        false,
+        Arc::new(move |m| {
+            assert!(m.is_ok());
+
+            match t2.prepare(Arc::new(move |p| {
+                unreachable!();
+            })) {
+                Some(p) => {
+                    match t3.commit(Arc::new(|c| {
+                        assert!(c.is_ok());
+                    })) {
+                        Some(c) => println!("commit {:?}", c),
+                        None => println!("commit none arm"),
+                    }
+                }
+                None => println!("prepare none arm"),
+            }
+        }),
+    );
+    thread::sleep_ms(2000);
+
+    println!("-------------------------------------------------- ");
+
+    let tt1 = mgr.transaction(true);
+    let tt2 = tt1.clone();
+
+    let ttt1 = mgr.transaction(true);
+    let ttt2 = ttt1.clone();
+
+    tt1.modify(
+        arr.clone(),
+        None,
+        true,
+        Arc::new(|q| {
+            assert!(q.is_ok());
+            println!("modify ====================== : {:?}", q);
+        }),
+    );
+    thread::sleep_ms(2000);
+
+    tt1.modify(
+        arr.clone(),
+        None,
+        true,
+        Arc::new(|q| {
+            assert!(q.is_ok());
+            println!("modify ====================== : {:?}", q);
+        }),
+    );
+
+    thread::sleep_ms(2000);
+
+    tt1.prepare(Arc::new(|p| {}));
+    tt1.commit(Arc::new(|c| {}));
+
+    thread::sleep_ms(2000);
+
+    ttt1.modify(
+        arr.clone(),
+        None,
+        true,
+        Arc::new(|q| {
+            assert!(q.is_ok());
+            println!("modify ********************* : {:?}", q);
+        }),
+    );
+    thread::sleep_ms(2000);
+
+    ttt1.prepare(Arc::new(|p| {}));
+    ttt1.commit(Arc::new(|c| {}));
+
+    thread::sleep_ms(2000);
 }
