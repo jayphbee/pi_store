@@ -33,10 +33,10 @@ pub const MDB_LAST: u32 = 6;
 
 const TIMEOUT: usize = 100;
 
-// lazy_static! {
-//     pub static ref TXN_INDEX: Arc<Mutex<HashMap<Guid, Arc<LmdbTableTxn>>>> =
-//         Arc::new(Mutex::new(HashMap::new()));
-// }
+lazy_static! {
+    pub static ref TXN_INDEX: Arc<Mutex<HashMap<Guid, Arc<LmdbTableTxn>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+}
 
 #[derive(Debug, Clone)]
 pub struct LmdbTable {
@@ -57,11 +57,11 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        // if let Some(txn) = TXN_INDEX.lock().unwrap().get(&id) {
-        //     return txn.clone();
-        // }
+        if let Some(txn) = TXN_INDEX.lock().unwrap().get(&id) {
+            return txn.clone();
+        }
 
-        // println!("create new lmdb txn: {:?}", id);
+        println!("create new lmdb txn: {:?}", id);
 
         let sender = match THREAD_POOL.clone().lock() {
             Ok(mut pool) => pool.pop(),
@@ -85,13 +85,17 @@ impl Tab for LmdbTable {
             panic!("Open db error: {:?}", e.to_string());
         }
 
-        Arc::new(LmdbTableTxn {
+        let t = Arc::new(LmdbTableTxn {
             id: id.clone(),
             _writable: writable,
             txns: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(Mutex::new(TxState::Ok)),
             sender,
-        })
+        });
+
+        TXN_INDEX.lock().unwrap().insert(id.clone(), t.clone());
+
+        t
     }
 }
 
@@ -135,6 +139,8 @@ impl Txn for LmdbTableTxn {
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
+        println!("call lmdb commit, {:?} txns left ---------- !!!!!!!!!!!! --------------", self.txns.lock().unwrap().len());
+
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
 
@@ -142,7 +148,7 @@ impl Txn for LmdbTableTxn {
             println!("commit to lmdb: {:?}", self.id);
             match self.sender.clone() {
                 Some(tx) => {
-                    let e = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
+                    let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
                         Ok(_) => {
                             *state.lock().unwrap() = TxState::Commited;
                             cb(Ok(()));
@@ -158,6 +164,8 @@ impl Txn for LmdbTableTxn {
                     return Some(Err("Can't get sender".to_string()));
                 }
             }
+            TXN_INDEX.lock().unwrap().remove(&self.id);
+            println!("remove committed txn: {:?}", self.id.clone());
         } else {
             let _ = self.txns.lock().unwrap().pop();
             match self.sender.clone() {
@@ -172,6 +180,8 @@ impl Txn for LmdbTableTxn {
     }
 
     fn rollback(&self, cb: TxCallback) -> DBResult {
+        println!("call lmdb rollback ---------- !!!!!!!!!!!! --------------");
+
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state = self.state.clone();
 
@@ -195,6 +205,7 @@ impl Txn for LmdbTableTxn {
                     cb(Err("Can't get sender".to_string()));
                 }
             }
+            TXN_INDEX.lock().unwrap().remove(&self.id);
         } else {
             let _ = self.txns.lock().unwrap().pop();
             match self.sender.clone() {
@@ -227,6 +238,8 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
+        println!("call lmdb query ---------- !!!!!!!!!!!! --------------");
+
         for v in arr.clone().iter() {
             if !self
                 .txns
@@ -240,6 +253,8 @@ impl TabTxn for LmdbTableTxn {
                     .push((v.ware.clone(), v.tab.clone()));
             }
         }
+
+        println!("accumulated txns: {:?}", self.txns.lock().unwrap().len());
 
         match self.sender.clone() {
             Some(tx) => {
@@ -266,6 +281,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
+        println!("call lmdb modify ---------- !!!!!!!!!!!! --------------");
         for v in arr.clone().iter() {
             if !self
                 .txns
@@ -279,6 +295,7 @@ impl TabTxn for LmdbTableTxn {
                     .push((v.ware.clone(), v.tab.clone()));
             }
         }
+        println!("accumulated txns: {:?}", self.txns.lock().unwrap().len());
 
         match self.sender.clone() {
             Some(tx) => {
@@ -305,6 +322,8 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
+        println!("call lmdb iter ---------- !!!!!!!!!!!! --------------");
+
         // actuall once
         self.txns
             .lock()
@@ -411,7 +430,7 @@ impl Iter for LmdbItemsIter {
     type Item = (Bin, Bin);
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
-        println!("called nextItem ------- !!!!!!!!!!! ------------ ");
+        println!("call lmdb next item ---------- !!!!!!!!!!!! --------------");
         let _ = self
             .sender
             .send(LmdbMessage::NextItem(Arc::new(move |item| match item {
@@ -521,7 +540,6 @@ impl Txn for LmdbMetaTxn {
     }
     // 提交一个事务
     fn commit(&self, cb: TxCallback) -> CommitResult {
-        println!("commit meta txn !!!!! -------------");
         self.0.commit(cb)
     }
     // 回滚一个事务
