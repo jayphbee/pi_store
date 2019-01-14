@@ -1,4 +1,5 @@
 use crossbeam_channel::{bounded, Sender};
+use std::collections::HashMap;
 use std::slice::from_raw_parts;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -57,9 +58,7 @@ impl ThreadPool {
 
                 loop {
                     match rx.recv() {
-                        Ok(LmdbMessage::NoOp(cb)) => {
-                            cb(Ok(()))
-                        }
+                        Ok(LmdbMessage::NoOp(cb)) => cb(Ok(())),
 
                         Ok(LmdbMessage::CreateDb(db_name, tx)) => {
                             db = match env.open_db(Some(&db_name.to_string())) {
@@ -81,19 +80,21 @@ impl ThreadPool {
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
-                                unsafe {
-                                    mdb_set_compare(
-                                        thread_local_txn.as_ref().unwrap().txn(),
-                                        db.clone().unwrap().dbi(),
-                                        mdb_cmp_func as *mut MDB_cmp_func,
-                                    );
-                                }
                             }
 
                             let txn = thread_local_txn.take().unwrap();
 
                             for kv in keys.iter() {
-                                match txn.get(db.clone().unwrap(), kv.key.as_ref()) {
+                                let db = Self::db_handle(env.clone(), kv.clone().tab.to_string());
+                                unsafe {
+                                    mdb_set_compare(
+                                        thread_local_txn.as_ref().unwrap().txn(),
+                                        db.clone().dbi(),
+                                        mdb_cmp_func as *mut MDB_cmp_func,
+                                    );
+                                }
+
+                                match txn.get(db, kv.key.as_ref()) {
                                     Ok(v) => {
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
@@ -187,22 +188,23 @@ impl ThreadPool {
                         Ok(LmdbMessage::Modify(keys, cb)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
-
-                                unsafe {
-                                    mdb_set_compare(
-                                        thread_local_txn.as_ref().unwrap().txn(),
-                                        db.clone().unwrap().dbi(),
-                                        mdb_cmp_func as *mut MDB_cmp_func,
-                                    );
-                                }
                             }
 
                             let rw_txn = thread_local_txn.as_mut().unwrap();
 
                             for kv in keys.iter() {
+                                let db = Self::db_handle(env.clone(), kv.clone().tab.to_string());
+                                unsafe {
+                                    mdb_set_compare(
+                                        thread_local_txn.as_ref().unwrap().txn(),
+                                        db.clone().dbi(),
+                                        mdb_cmp_func as *mut MDB_cmp_func,
+                                    );
+                                }
+
                                 if let Some(_) = kv.value {
                                     match rw_txn.put(
-                                        db.clone().unwrap(),
+                                        db,
                                         kv.key.as_ref(),
                                         kv.clone().value.unwrap().as_ref(),
                                         WriteFlags::empty(),
@@ -214,7 +216,7 @@ impl ThreadPool {
                                         ))),
                                     };
                                 } else {
-                                    match rw_txn.del(db.clone().unwrap(), kv.key.as_ref(), None) {
+                                    match rw_txn.del(db.clone(), kv.key.as_ref(), None) {
                                         Ok(_) => {}
                                         Err(Error::NotFound) => {}
                                         Err(e) => cb(Err(format!(
@@ -269,6 +271,21 @@ impl ThreadPool {
         self.total = cap;
     }
 
+    pub fn db_handle(env: Arc<Environment>, db_name: String) -> Database {
+        match DBS.lock().unwrap().get(&db_name) {
+            Some(db) => {
+                DBS.lock().unwrap().insert(db_name, db.clone());
+                db.clone()
+            }
+            None => match env.open_db(Some(&db_name.to_string())) {
+                Ok(db) => db,
+                Err(_) => env
+                    .create_db(Some(&db_name.to_string()), DatabaseFlags::empty())
+                    .unwrap(),
+            },
+        }
+    }
+
     pub fn pop(&mut self) -> Option<Sender<LmdbMessage>> {
         self.idle -= 1;
         self.senders.pop()
@@ -308,5 +325,7 @@ fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
 }
 
 lazy_static! {
+    pub static ref DBS: Arc<Mutex<HashMap<String, Database>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new()));
 }

@@ -75,15 +75,15 @@ impl Tab for LmdbTable {
             println!("THREAD_POOL full, can't get one from it");
         }
 
-        let db_name = self.name.to_string();
-        let (tx, rx) = bounded(1);
-        let _ = sender
-            .clone()
-            .unwrap()
-            .send(LmdbMessage::CreateDb(db_name, tx));
-        if let Err(e) = rx.recv() {
-            panic!("Open db error: {:?}", e.to_string());
-        }
+        // let db_name = self.name.to_string();
+        // let (tx, rx) = bounded(1);
+        // let _ = sender
+        //     .clone()
+        //     .unwrap()
+        //     .send(LmdbMessage::CreateDb(db_name, tx));
+        // if let Err(e) = rx.recv() {
+        //     panic!("Open db error: {:?}", e.to_string());
+        // }
 
         let t = Arc::new(LmdbTableTxn {
             id: id.clone(),
