@@ -322,13 +322,14 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
-        println!("call lmdb iter ---------- !!!!!!!!!!!! --------------");
+        if self.txns.lock().unwrap().len() < 1 {
+            println!("call lmdb iter ---------- !!!!!!!!!!!! --------------");
 
-        // actuall once
-        self.txns
+            self.txns
             .lock()
             .unwrap()
             .push((Atom::from(""), Atom::from("")));
+        }        
 
         match self.sender.clone() {
             Some(tx) => {
@@ -356,10 +357,14 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(KeyIterResult)>,
     ) -> Option<KeyIterResult> {
-        self.txns
+        if self.txns.lock().unwrap().len() < 1 {
+            println!("call lmdb key iter ---------- !!!!!!!!!!!! --------------");
+
+            self.txns
             .lock()
             .unwrap()
             .push((Atom::from(""), Atom::from("")));
+        }
 
         match self.sender.clone() {
             Some(tx) => {
