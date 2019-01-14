@@ -202,7 +202,7 @@ impl Txn for LmdbTableTxn {
                     })));
                 }
                 None => {
-                    cb(Err("Can't get sender".to_string()));
+                    return Some(Err("Can't get sender".to_string()));
                 }
             }
             TXN_INDEX.lock().unwrap().remove(&self.id);
@@ -267,7 +267,7 @@ impl TabTxn for LmdbTableTxn {
                 ));
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
 
@@ -412,7 +412,7 @@ impl TabTxn for LmdbTableTxn {
                 })));
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
         None
