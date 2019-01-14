@@ -57,9 +57,7 @@ impl ThreadPool {
 
                 loop {
                     match rx.recv() {
-                        Ok(LmdbMessage::NoOp(cb)) => {
-                            cb(Ok(()))
-                        }
+                        Ok(LmdbMessage::NoOp(cb)) => cb(Ok(())),
 
                         Ok(LmdbMessage::CreateDb(db_name, tx)) => {
                             db = match env.open_db(Some(&db_name.to_string())) {
@@ -81,6 +79,9 @@ impl ThreadPool {
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
+                            }
+
+                            for kv in keys.iter() {
                                 unsafe {
                                     mdb_set_compare(
                                         thread_local_txn.as_ref().unwrap().txn(),
@@ -88,11 +89,9 @@ impl ThreadPool {
                                         mdb_cmp_func as *mut MDB_cmp_func,
                                     );
                                 }
-                            }
+                                let txn = thread_local_txn.take().unwrap();
+                                let db = Self::db(env.clone(), kv.clone().tab.to_string());
 
-                            let txn = thread_local_txn.take().unwrap();
-
-                            for kv in keys.iter() {
                                 match txn.get(db.clone().unwrap(), kv.key.as_ref()) {
                                     Ok(v) => {
                                         values.push(TabKV {
@@ -187,6 +186,15 @@ impl ThreadPool {
                         Ok(LmdbMessage::Modify(keys, cb)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
+                            }
+
+                            for kv in keys.iter() {
+                                println!(
+                                    "tab name: {:?} +++++++++++++++++++",
+                                    kv.clone().tab.to_string()
+                                );
+                                let db = Self::db(env.clone(), kv.clone().tab.to_string());
+                                println!("create db: {:?} --------------- ", db);
 
                                 unsafe {
                                     mdb_set_compare(
@@ -195,11 +203,9 @@ impl ThreadPool {
                                         mdb_cmp_func as *mut MDB_cmp_func,
                                     );
                                 }
-                            }
 
-                            let rw_txn = thread_local_txn.as_mut().unwrap();
+                                let rw_txn = thread_local_txn.as_mut().unwrap();
 
-                            for kv in keys.iter() {
                                 if let Some(_) = kv.value {
                                     match rw_txn.put(
                                         db.clone().unwrap(),
@@ -208,10 +214,17 @@ impl ThreadPool {
                                         WriteFlags::empty(),
                                     ) {
                                         Ok(_) => {}
-                                        Err(e) => cb(Err(format!(
-                                            "insert data error: {:?}",
-                                            e.to_string()
-                                        ))),
+                                        Err(e) => {
+                                            println!(
+                                                "insert error: {:?}, data: {:?}",
+                                                e.to_string(),
+                                                kv.clone()
+                                            );
+                                            cb(Err(format!(
+                                                "insert data error: {:?}",
+                                                e.to_string()
+                                            )))
+                                        }
                                     };
                                 } else {
                                     match rw_txn.del(db.clone().unwrap(), kv.key.as_ref(), None) {
@@ -285,6 +298,16 @@ impl ThreadPool {
 
     pub fn idle_threads(&self) -> usize {
         self.idle
+    }
+
+    fn db(env: Arc<Environment>, db_name: String) -> Option<Database> {
+        match env.open_db(Some(&db_name.to_string())) {
+            Ok(db) => Some(db),
+            Err(_) => Some(
+                env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty())
+                    .unwrap(),
+            ),
+        }
     }
 }
 
