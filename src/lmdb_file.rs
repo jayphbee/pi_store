@@ -515,8 +515,8 @@ impl MetaTxn for LmdbMetaTxn {
         };
 
         let tabkv = TabKV {
-            ware: Atom::from(""),
-            tab: Atom::from(""),
+            ware: Atom::from("file"), // hard code
+            tab: tab.clone(),
             key: key,
             index: 0,
             value: value,
