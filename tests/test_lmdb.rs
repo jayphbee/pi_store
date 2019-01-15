@@ -1124,7 +1124,7 @@ fn test_file_db_mgr() {
     thread::sleep_ms(2000);
 
     tt1.modify(
-        arr.clone(),
+        arr2.clone(),
         None,
         true,
         Arc::new(|q| {
