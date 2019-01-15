@@ -81,13 +81,6 @@ impl ThreadPool {
 
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
-                                // unsafe {
-                                //     mdb_set_compare(
-                                //         thread_local_txn.as_ref().unwrap().txn(),
-                                //         db.clone().unwrap().dbi(),
-                                //         mdb_cmp_func as *mut MDB_cmp_func,
-                                //     );
-                                // }
                             }
 
                             let txn = thread_local_txn.take().unwrap();
@@ -187,14 +180,6 @@ impl ThreadPool {
                         Ok(LmdbMessage::Modify(keys, cb)) => {
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
-
-                                // unsafe {
-                                //     mdb_set_compare(
-                                //         thread_local_txn.as_ref().unwrap().txn(),
-                                //         db.clone().unwrap().dbi(),
-                                //         mdb_cmp_func as *mut MDB_cmp_func,
-                                //     );
-                                // }
                             }
 
                             let rw_txn = thread_local_txn.as_mut().unwrap();
@@ -287,25 +272,6 @@ impl ThreadPool {
         self.idle
     }
 }
-
-// // comprator function
-// fn mdb_cmp_func(a: *const MDB_val, b: *const MDB_val) -> i32 {
-//     unsafe {
-//         let buf1 = from_raw_parts::<u8>((*a).mv_data as *const u8, (*a).mv_size);
-//         let buf2 = from_raw_parts::<u8>((*b).mv_data as *const u8, (*b).mv_size);
-
-//         let b1 = ReadBuffer::new(buf1, 0);
-//         let b2 = ReadBuffer::new(buf2, 0);
-
-//         if b1 > b2 {
-//             1
-//         } else if b1 == b2 {
-//             0
-//         } else {
-//             -1
-//         }
-//     }
-// }
 
 lazy_static! {
     pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new()));
