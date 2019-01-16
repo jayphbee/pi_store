@@ -582,9 +582,11 @@ impl DB {
         );
 
         // retrive meta table info of a DB
-        let db = env
-            .create_db(Some(SINFO), DatabaseFlags::empty())
-            .map_err(|e| e.to_string())?;
+        let db = match env.open_db(Some(SINFO)) {
+            Ok(db) => db,
+            Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).unwrap(),
+        };
+
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
