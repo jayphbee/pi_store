@@ -139,7 +139,10 @@ impl Txn for LmdbTableTxn {
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
-        println!("call lmdb commit, {:?} txns left ---------- !!!!!!!!!!!! --------------", self.txns.lock().unwrap().len());
+        println!(
+            "call lmdb commit, {:?} txns left ---------- !!!!!!!!!!!! --------------",
+            self.txns.lock().unwrap().len()
+        );
 
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
@@ -172,7 +175,7 @@ impl Txn for LmdbTableTxn {
                 Some(tx) => {
                     let _ = tx.send(LmdbMessage::NoOp(cb));
                 }
-                None => return Some(Err("Can't get sender".to_string()))
+                None => return Some(Err("Can't get sender".to_string())),
             }
         }
 
@@ -212,7 +215,7 @@ impl Txn for LmdbTableTxn {
                 Some(tx) => {
                     let _ = tx.send(LmdbMessage::NoOp(cb));
                 }
-                None => return Some(Err("Can't get sender".to_string()))
+                None => return Some(Err("Can't get sender".to_string())),
             }
         }
 
@@ -326,10 +329,10 @@ impl TabTxn for LmdbTableTxn {
             println!("call lmdb iter ---------- !!!!!!!!!!!! --------------");
 
             self.txns
-            .lock()
-            .unwrap()
-            .push((Atom::from(""), Atom::from("")));
-        }        
+                .lock()
+                .unwrap()
+                .push((Atom::from(""), Atom::from("")));
+        }
 
         match self.sender.clone() {
             Some(tx) => {
@@ -361,9 +364,9 @@ impl TabTxn for LmdbTableTxn {
             println!("call lmdb key iter ---------- !!!!!!!!!!!! --------------");
 
             self.txns
-            .lock()
-            .unwrap()
-            .push((Atom::from(""), Atom::from("")));
+                .lock()
+                .unwrap()
+                .push((Atom::from(""), Atom::from("")));
         }
 
         match self.sender.clone() {
