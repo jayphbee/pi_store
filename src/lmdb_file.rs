@@ -604,6 +604,9 @@ impl DB {
             Arc::new(TabMeta::new(EnumType::Str, EnumType::Bool)),
         );
 
+        std::mem::drop(cursor);
+        let _ = txn.commit().unwrap();
+
         Ok(DB {
             name: name,
             tabs: Arc::new(RwLock::new(tabs)),
