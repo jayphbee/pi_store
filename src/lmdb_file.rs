@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc, Mutex, RwLock};
 
 use crossbeam_channel::{bounded, Sender};
 
@@ -88,6 +88,7 @@ impl Tab for LmdbTable {
         let t = Arc::new(LmdbTableTxn {
             id: id.clone(),
             _writable: writable,
+            is_meta_txn: AtomicBool::new(false),
             txns: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(Mutex::new(TxState::Ok)),
             sender,
@@ -99,10 +100,10 @@ impl Tab for LmdbTable {
     }
 }
 
-#[derive(Clone)]
 pub struct LmdbTableTxn {
     id: Guid,
     _writable: bool,
+    is_meta_txn: AtomicBool,
     txns: Arc<Mutex<Vec<(Atom, Atom)>>>,
     state: Arc<Mutex<TxState>>,
     sender: Option<Sender<LmdbMessage>>,
@@ -147,7 +148,7 @@ impl Txn for LmdbTableTxn {
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
 
-        if self.txns.lock().unwrap().len() <= 1 {
+        if self.is_meta_txn.load(SeqCst) || self.txns.lock().unwrap().len() <= 1 {
             println!("commit to lmdb: {:?}", self.id);
             match self.sender.clone() {
                 Some(tx) => {
@@ -284,6 +285,12 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
+        // this is an meta txn
+        if arr[0].ware == Atom::from("") && arr[0].tab == Atom::from("") {
+            println!("------------ this is a meta txn !!!!! --------- ");
+            self.is_meta_txn.store(true, SeqCst);
+        }
+
         println!("call lmdb modify ---------- !!!!!!!!!!!! --------------");
         for v in arr.clone().iter() {
             if !self
@@ -291,6 +298,7 @@ impl TabTxn for LmdbTableTxn {
                 .lock()
                 .unwrap()
                 .contains(&(v.ware.clone(), v.tab.clone()))
+                && (arr[0].ware != Atom::from("") && arr[0].tab != Atom::from(""))
             {
                 self.txns
                     .lock()
@@ -524,7 +532,23 @@ impl MetaTxn for LmdbMetaTxn {
             index: 0,
             value: value,
         };
-        self.0.modify(Arc::new(vec![tabkv]), None, false, cb)
+
+        self.0.modify(
+            Arc::new(vec![
+                // placeholder for meta txn
+                TabKV {
+                    ware: Atom::from(""),
+                    tab: Atom::from(""),
+                    key: Arc::new(Vec::new()),
+                    index: 0,
+                    value: None,
+                },
+                tabkv,
+            ]),
+            None,
+            false,
+            cb,
+        )
     }
 
     // 快照拷贝表

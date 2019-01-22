@@ -12,6 +12,7 @@ use lmdb::{
 use pi_db::db::{Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback};
 
 use bon::ReadBuffer;
+use atom::Atom;
 
 pub enum LmdbMessage {
     CreateDb(String, Sender<()>),
@@ -185,6 +186,10 @@ impl ThreadPool {
                             let rw_txn = thread_local_txn.as_mut().unwrap();
 
                             for kv in keys.iter() {
+                                if kv.ware == Atom::from("") && kv.tab == Atom::from("") {
+                                    continue;
+                                }
+
                                 if let Some(_) = kv.value {
                                     match rw_txn.put(
                                         db.clone().unwrap(),
