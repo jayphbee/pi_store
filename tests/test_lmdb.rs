@@ -1,3 +1,4 @@
+extern crate lmdb;
 extern crate pi_db;
 extern crate pi_store;
 extern crate tempdir;
@@ -1155,4 +1156,45 @@ fn test_file_db_mgr() {
     ttt1.commit(Arc::new(|c| {}));
 
     thread::sleep_ms(2000);
+}
+
+#[test]
+fn test_lmdb_iter() {
+    use lmdb::{Environment, Transaction, WriteFlags, Cursor};
+    use tempdir::TempDir;
+
+    let dir = TempDir::new("test").unwrap();
+    let env = Environment::new().open(dir.path()).unwrap();
+    let db = env.open_db(None).unwrap();
+
+    let mut items = Vec::<(Vec<u8>, Vec<u8>)>::new();
+
+    for i in 0..10000 {
+        let mut wb = WriteBuffer::new();
+        wb.write_utf8(&format!("key{}", i));
+        let key = wb.get_byte().to_vec();
+
+        let mut wb1 = WriteBuffer::new();
+        wb1.write_utf8(&format!("val{}", i));
+        let val = wb.get_byte().to_vec();
+
+        // println!("index: {}, key: {:?}, val: {:?}", i, key, val);
+
+        items.push((key, val));
+    }
+
+    {
+        let mut txn = env.begin_rw_txn().unwrap();
+        for &(ref key, ref data) in &items {
+            txn.put(db, key, data, WriteFlags::empty()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let txn = env.begin_ro_txn().unwrap();
+    let mut cursor = txn.open_ro_cursor(db).unwrap();
+
+    cursor.iter().for_each(|x| {
+        println!("item: {:?}", x);
+    })
 }
