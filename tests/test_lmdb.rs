@@ -1160,7 +1160,7 @@ fn test_file_db_mgr() {
 
 #[test]
 fn test_lmdb_iter() {
-    use lmdb::{Environment, Transaction, WriteFlags, Cursor};
+    use lmdb::{Cursor, Environment, Transaction, WriteFlags};
     use tempdir::TempDir;
 
     let dir = TempDir::new("test").unwrap();
@@ -1197,4 +1197,52 @@ fn test_lmdb_iter() {
     cursor.iter().for_each(|x| {
         println!("item: {:?}", x);
     })
+}
+
+#[test]
+fn test_write_to_many_dbs() {
+    use lmdb::{Cursor, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
+    use tempdir::TempDir;
+
+    let dir = TempDir::new("test").unwrap();
+
+    let env = Environment::new()
+        .set_max_dbs(1024)
+        .set_map_size(10 * 1024 * 1024)
+        .set_flags(EnvironmentFlags::NO_TLS)
+        .open(dir.path())
+        .unwrap();
+
+    let db1 = env.create_db(Some("foo1"), DatabaseFlags::empty()).unwrap();
+    let db2 = env.create_db(Some("foo2"), DatabaseFlags::empty()).unwrap();
+    let db3 = env.create_db(Some("foo3"), DatabaseFlags::empty()).unwrap();
+    let db4 = env.create_db(Some("foo4"), DatabaseFlags::empty()).unwrap();
+    let db5 = env.create_db(Some("foo5"), DatabaseFlags::empty()).unwrap();
+
+    let dbs = vec![db1, db2, db3, db4, db5];
+
+    let mut items = Vec::<(Vec<u8>, Vec<u8>)>::new();
+
+    for i in 0..10000 {
+        let mut wb = WriteBuffer::new();
+        wb.write_utf8(&format!("key{}", i));
+        let key = wb.get_byte().to_vec();
+
+        let mut wb1 = WriteBuffer::new();
+        wb1.write_utf8(&format!("val{}", i));
+        let val = wb.get_byte().to_vec();
+
+        // println!("index: {}, key: {:?}, val: {:?}", i, key, val);
+
+        items.push((key, val));
+    }
+
+    let mut txn = env.begin_rw_txn().unwrap();
+
+    items.iter().enumerate().for_each(|(i, item)| {
+        txn.put(dbs[i % 5 as usize], &item.0, &item.1, WriteFlags::empty())
+            .unwrap();
+    });
+
+    txn.commit().unwrap();
 }
