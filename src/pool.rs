@@ -37,6 +37,55 @@ pub struct ThreadPool {
     idle: usize,
 }
 
+pub enum NopMessage {
+    Nop(TxCallback)
+}
+
+#[derive(Debug)]
+pub struct NopPool {
+    senders: Vec<Sender<NopMessage>>,
+}
+
+unsafe impl Send for NopMessage {}
+
+impl NopPool {
+    pub fn new() -> Self {
+        Self {
+            senders: Vec::new(),
+        }
+    }
+
+    pub fn start_nop_pool(&mut self, cap: usize) {
+        for _ in 0..cap {
+            let (tx, rx) = bounded(1);
+
+            thread::spawn(move || {
+                loop {
+                    match rx.recv() {
+                        Ok(NopMessage::Nop(cb)) => {
+                            cb(Ok(()))
+                        },
+
+                        Err(_) => {
+
+                        }
+                    }
+                }
+            });
+
+            self.senders.push(tx);
+        }
+    }
+
+    pub fn push(&mut self, sender: Sender<NopMessage>) {
+        self.senders.push(sender);
+    }
+
+    pub fn pop (&mut self) -> Option<Sender<NopMessage>> {
+        self.senders.pop()
+    }
+}
+
 impl ThreadPool {
     pub fn new() -> Self {
         ThreadPool {
@@ -280,4 +329,5 @@ impl ThreadPool {
 
 lazy_static! {
     pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new()));
+    pub static ref NO_OP_POOL: Arc<Mutex<NopPool>> = Arc::new(Mutex::new(NopPool::new()));
 }
