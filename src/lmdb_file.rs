@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc, Mutex, RwLock};
+use std::thread;
 
 use crossbeam_channel::{bounded, Sender};
 
@@ -20,7 +21,7 @@ use pi_db::tabs::{TabLog, Tabs};
 
 use lmdb::{Cursor, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
-use pool::{LmdbMessage, THREAD_POOL};
+use pool::{LmdbMessage, THREAD_POOL, NO_OP_POOL, NopMessage};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
@@ -92,6 +93,7 @@ impl Tab for LmdbTable {
             txns: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(Mutex::new(TxState::Ok)),
             sender,
+            no_op_senders: Arc::new(Mutex::new(Vec::new())),
         });
 
         TXN_INDEX.lock().unwrap().insert(id.clone(), t.clone());
@@ -107,6 +109,7 @@ pub struct LmdbTableTxn {
     txns: Arc<Mutex<Vec<(Atom, Atom)>>>,
     state: Arc<Mutex<TxState>>,
     sender: Option<Sender<LmdbMessage>>,
+    no_op_senders: Arc<Mutex<Vec<Sender<NopMessage>>>>,
 }
 
 impl Drop for LmdbTableTxn {
@@ -122,6 +125,16 @@ impl Drop for LmdbTableTxn {
             }
             Err(e) => panic!("Give back sender failed: {:?}", e.to_string()),
         };
+
+        match NO_OP_POOL.clone().lock() {
+            Ok(mut pool) => {
+                for sender in self.no_op_senders.lock().unwrap().iter() {
+                    pool.push(sender.clone());
+                }
+            }
+
+            Err(e) => panic!("Give back no op sender failed: {:?}", e.to_string()),
+        }
     }
 }
 
@@ -172,11 +185,13 @@ impl Txn for LmdbTableTxn {
             println!("remove committed txn: {:?}", self.id.clone());
         } else {
             let _ = self.txns.lock().unwrap().pop();
-            match self.sender.clone() {
-                Some(tx) => {
-                    let _ = tx.send(LmdbMessage::NoOp(cb));
-                }
-                None => return Some(Err("Can't get sender".to_string())),
+            match NO_OP_POOL.lock().unwrap().pop() {
+                Some(sender) => {
+                    let _ = sender.send(NopMessage::Nop(cb));
+                    self.no_op_senders.lock().unwrap().push(sender);
+                },
+
+                None => return Some(Err("Can't get no op sender".to_string())),
             }
         }
 
@@ -615,6 +630,7 @@ impl DB {
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
         THREAD_POOL.lock().unwrap().start_pool(32, env.clone());
+        NO_OP_POOL.lock().unwrap().start_nop_pool(32);
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
