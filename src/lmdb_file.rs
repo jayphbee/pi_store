@@ -34,11 +34,6 @@ pub const MDB_LAST: u32 = 6;
 
 const TIMEOUT: usize = 100;
 
-lazy_static! {
-    pub static ref TXN_INDEX: Arc<Mutex<HashMap<Guid, Arc<LmdbTableTxn>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-}
-
 #[derive(Debug, Clone)]
 pub struct LmdbTable {
     name: Atom,
@@ -58,10 +53,6 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        if let Some(txn) = TXN_INDEX.lock().unwrap().get(&id) {
-            return txn.clone();
-        }
-
         println!("create new lmdb txn: {:?}", id);
 
         let sender = match THREAD_POOL.clone().lock() {
@@ -95,8 +86,6 @@ impl Tab for LmdbTable {
             sender,
             no_op_senders: Arc::new(Mutex::new(Vec::new())),
         });
-
-        TXN_INDEX.lock().unwrap().insert(id.clone(), t.clone());
 
         t
     }
@@ -181,7 +170,6 @@ impl Txn for LmdbTableTxn {
                     return Some(Err("Can't get sender".to_string()));
                 }
             }
-            TXN_INDEX.lock().unwrap().remove(&self.id);
             println!("remove committed txn: {:?}", self.id.clone());
         } else {
             let _ = self.txns.lock().unwrap().pop();
@@ -224,7 +212,6 @@ impl Txn for LmdbTableTxn {
                     return Some(Err("Can't get sender".to_string()));
                 }
             }
-            TXN_INDEX.lock().unwrap().remove(&self.id);
         } else {
             let _ = self.txns.lock().unwrap().pop();
             match self.sender.clone() {
