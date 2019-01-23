@@ -310,11 +310,13 @@ impl ThreadPool {
 
     pub fn pop(&mut self) -> Option<Sender<LmdbMessage>> {
         self.idle -= 1;
+        println!("-------------------- total idle pool thread after pop: {:?}", self.idle);
         self.senders.pop()
     }
 
     pub fn push(&mut self, sender: Sender<LmdbMessage>) {
         self.idle += 1;
+        println!("-------------------- total idle pool thread after push: {:?}", self.idle);
         self.senders.push(sender);
     }
 
