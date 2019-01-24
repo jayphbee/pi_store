@@ -117,6 +117,7 @@ impl Drop for LmdbTableTxn {
         match THREAD_POOL.clone().lock() {
             Ok(mut pool) => {
                 if let Some(sender) = self.sender.clone() {
+                    let _ = sender.send(LmdbMessage::CleanUp);
                     pool.push(sender);
                     self.sender = None;
                 } else {

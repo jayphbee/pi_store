@@ -26,6 +26,7 @@ pub enum LmdbMessage {
     Rollback(TxCallback),
     TableSize(Arc<Fn(SResult<usize>)>),
     NoOp(TxCallback),
+    CleanUp,
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -107,6 +108,12 @@ impl ThreadPool {
 
                 loop {
                     match rx.recv() {
+                        Ok(LmdbMessage::CleanUp) => {
+                            thread_local_txn = None;
+                            thread_local_iter = None;
+                            db = None;
+                        }
+
                         Ok(LmdbMessage::NoOp(cb)) => {
                             cb(Ok(()))
                         }
