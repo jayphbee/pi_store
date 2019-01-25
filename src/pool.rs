@@ -105,6 +105,8 @@ impl ThreadPool {
                 let mut thread_local_cursor: Option<RoCursor> = None;
                 let mut db: Option<Database> = None;
                 let mut desc = false;
+                let mut cur_iter_key: Option<Bin> = None;
+                let mut iter_from_start_or_end = true;
 
                 loop {
                     match rx.recv() {
@@ -132,10 +134,12 @@ impl ThreadPool {
                                 thread_local_txn = env.begin_rw_txn().ok();
                             }
 
-                            let txn = thread_local_txn.take().unwrap();
-
                             for kv in keys.iter() {
-                                match txn.get(db.clone().unwrap(), kv.key.as_ref()) {
+                                match thread_local_txn
+                                    .as_ref()
+                                    .unwrap()
+                                    .get(db.clone().unwrap(), kv.key.as_ref())
+                                {
                                     Ok(v) => {
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
@@ -167,66 +171,160 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateItemIter(descending, key, tx)) => {
+                            println!("key is: {:?} -------------- ", key);
                             desc = descending;
                             if thread_local_txn.is_none() {
-                                println!("create item iter ^^^^^^^^^^");
                                 thread_local_txn = env.begin_rw_txn().ok();
-                                let txn = thread_local_txn.as_ref().unwrap();
-                                thread_local_cursor =
-                                    Some(txn.open_ro_cursor(db.clone().unwrap()).unwrap());
-                                match key {
-                                    Some(k) => {
-                                        thread_local_cursor
-                                            .as_ref()
-                                            .unwrap()
-                                            .get(Some(k.as_ref()), None, MDB_SET)
-                                            .unwrap();
-                                    }
-
-                                    None => {
-                                        if descending {
-                                            thread_local_cursor
-                                                .as_ref()
-                                                .unwrap()
-                                                .get(None, None, MDB_FIRST)
-                                                .unwrap();
-                                        } else {
-                                            thread_local_cursor
-                                                .as_ref()
-                                                .unwrap()
-                                                .get(None, None, MDB_LAST)
-                                                .unwrap();
-                                        }
-                                    }
-                                }
                             }
-                            println!("before tx send");
+
+                            iter_from_start_or_end = if key.is_none() {
+                                println!("iter from start to end");
+                                true
+                            } else {
+                                println!("iter from some Key ----- ");
+                                cur_iter_key = key;
+                                false
+                            };
+
                             let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::NextItem(cb)) => {
-                            if let Some(ref cursor) = thread_local_cursor {
-                                if desc {
-                                    match cursor.get(None, None, MDB_NEXT) {
-                                        Ok(val) => cb(Ok(Some((
-                                            Arc::new(val.0.unwrap().to_vec()),
-                                            Arc::new(val.1.to_vec()),
-                                        )))),
+                            let cursor = thread_local_txn
+                                .as_ref()
+                                .unwrap()
+                                .open_ro_cursor(db.clone().unwrap())
+                                .unwrap();
 
-                                        Err(_) => cb(Ok(None)),
+                            if cur_iter_key.is_some() {
+                                println!("set cursor ++++++++++ {:?}", cur_iter_key);
+                                let _ = cursor.get(
+                                    Some(cur_iter_key.clone().unwrap().as_ref()),
+                                    None,
+                                    MDB_SET,
+                                );
+                            }
+
+                            if iter_from_start_or_end {
+                                println!("next item: from start to end");
+                                if desc {
+                                    println!("desc");
+                                    if cur_iter_key.is_none() {
+                                        println!("cur iter key is none");
+                                        match cursor.get(None, None, MDB_NEXT) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                cb(Ok(Some((
+                                                    Arc::new(val.0.unwrap().to_vec()),
+                                                    Arc::new(val.1.to_vec()),
+                                                ))));
+                                            }
+
+                                            Err(_) => cb(Ok(None)),
+                                        }
+                                    } else {
+                                        println!(
+                                            "cur iter key not none: get next item: {:?}",
+                                            cur_iter_key
+                                        );
+
+                                        match cursor.get(
+                                            // Some(cur_iter_key.clone().unwrap().as_ref()),
+                                            None, None, MDB_NEXT,
+                                        ) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                println!("after cursor get: {:?}", cur_iter_key);
+                                                cb(Ok(Some((
+                                                    Arc::new(val.0.unwrap().to_vec()),
+                                                    Arc::new(val.1.to_vec()),
+                                                ))));
+                                            }
+
+                                            Err(_) => {
+                                                cb(Ok(None));
+                                            }
+                                        }
                                     }
                                 } else {
-                                    match cursor.get(None, None, MDB_PREV) {
-                                        Ok(val) => cb(Ok(Some((
-                                            Arc::new(val.0.unwrap().to_vec()),
-                                            Arc::new(val.1.to_vec()),
-                                        )))),
+                                    if cur_iter_key.is_none() {
+                                        match cursor.get(None, None, MDB_PREV) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                cb(Ok(Some((
+                                                    Arc::new(val.0.unwrap().to_vec()),
+                                                    Arc::new(val.1.to_vec()),
+                                                ))));
+                                            }
 
-                                        Err(_) => cb(Ok(None)),
+                                            Err(_) => cb(Ok(None)),
+                                        }
+                                    } else {
+                                        match cursor.get(
+                                            // Some(cur_iter_key.clone().unwrap().as_ref()),
+                                            None, None, MDB_PREV,
+                                        ) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                cb(Ok(Some((
+                                                    Arc::new(val.0.unwrap().to_vec()),
+                                                    Arc::new(val.1.to_vec()),
+                                                ))));
+                                            }
+
+                                            Err(_) => {
+                                                cb(Ok(None));
+                                            }
+                                        }
                                     }
                                 }
                             } else {
-                                cb(Err("db cursor not initialized".to_string()))
+                                println!("iter from some key");
+                                if desc {
+                                    println!("before cur_iter_key: {:?}", cur_iter_key);
+                                    match cursor.get(
+                                        Some(cur_iter_key.clone().unwrap().as_ref()),
+                                        None,
+                                        MDB_NEXT,
+                                    ) {
+                                        Ok(val) => {
+                                            cur_iter_key = Some(Arc::new(val.0.unwrap().to_vec()));
+                                            println!("fetched value: {:?}", cur_iter_key);
+                                            cb(Ok(Some((
+                                                Arc::new(val.0.unwrap().to_vec()),
+                                                Arc::new(val.1.to_vec()),
+                                            ))));
+                                        }
+
+                                        Err(e) => {
+                                            println!("fetched value: {:?}", e);
+
+                                            cb(Ok(None));
+                                        }
+                                    }
+                                } else {
+                                    match cursor.get(
+                                        Some(cur_iter_key.clone().unwrap().as_ref()),
+                                        None,
+                                        MDB_PREV,
+                                    ) {
+                                        Ok(val) => {
+                                            cur_iter_key = Some(Arc::new(val.0.unwrap().to_vec()));
+                                            cb(Ok(Some((
+                                                Arc::new(val.0.unwrap().to_vec()),
+                                                Arc::new(val.1.to_vec()),
+                                            ))));
+                                        }
+
+                                        Err(_) => {
+                                            cb(Ok(None));
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -234,55 +332,116 @@ impl ThreadPool {
                             desc = descending;
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
-                                let txn = thread_local_txn.as_ref().unwrap();
-                                thread_local_cursor =
-                                    Some(txn.open_ro_cursor(db.clone().unwrap()).unwrap());
-                                match key {
-                                    Some(k) => {
-                                        thread_local_cursor
-                                            .as_ref()
-                                            .unwrap()
-                                            .get(Some(k.as_ref()), None, MDB_SET)
-                                            .unwrap();
-                                    }
-
-                                    None => {
-                                        if descending {
-                                            thread_local_cursor
-                                                .as_ref()
-                                                .unwrap()
-                                                .get(None, None, MDB_FIRST)
-                                                .unwrap();
-                                        } else {
-                                            thread_local_cursor
-                                                .as_ref()
-                                                .unwrap()
-                                                .get(None, None, MDB_LAST)
-                                                .unwrap();
-                                        }
-                                    }
-                                }
                             }
+
+                            iter_from_start_or_end = if key.is_none() {
+                                true
+                            } else {
+                                cur_iter_key = key;
+
+                                false
+                            };
+
                             let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::NextKey(cb)) => {
-                            if let Some(ref cursor) = thread_local_cursor {
-                                if desc {
-                                    match cursor.get(None, None, MDB_NEXT) {
-                                        Ok(val) => cb(Ok(Some(Arc::new(val.0.unwrap().to_vec())))),
+                            let cursor = thread_local_txn
+                                .as_ref()
+                                .unwrap()
+                                .open_ro_cursor(db.clone().unwrap())
+                                .unwrap();
 
-                                        Err(_) => cb(Ok(None)),
+                            if iter_from_start_or_end {
+                                if desc {
+                                    if cur_iter_key.is_none() {
+                                        match cursor.get(None, None, MDB_NEXT) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
+                                            }
+
+                                            Err(_) => cb(Ok(None)),
+                                        }
+                                    } else {
+                                        match cursor.get(
+                                            Some(cur_iter_key.clone().unwrap().as_ref()),
+                                            None,
+                                            MDB_NEXT,
+                                        ) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
+                                            }
+
+                                            Err(_) => {
+                                                cb(Ok(None));
+                                            }
+                                        }
                                     }
                                 } else {
-                                    match cursor.get(None, None, MDB_PREV) {
-                                        Ok(val) => cb(Ok(Some(Arc::new(val.0.unwrap().to_vec())))),
+                                    if cur_iter_key.is_none() {
+                                        match cursor.get(None, None, MDB_PREV) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
+                                            }
 
-                                        Err(_) => cb(Ok(None)),
+                                            Err(_) => cb(Ok(None)),
+                                        }
+                                    } else {
+                                        match cursor.get(
+                                            Some(cur_iter_key.clone().unwrap().as_ref()),
+                                            None,
+                                            MDB_PREV,
+                                        ) {
+                                            Ok(val) => {
+                                                cur_iter_key =
+                                                    Some(Arc::new(val.0.unwrap().to_vec()));
+                                                cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
+                                            }
+
+                                            Err(_) => {
+                                                cb(Ok(None));
+                                            }
+                                        }
                                     }
                                 }
                             } else {
-                                cb(Err("db cursor not initialized".to_string()))
+                                if desc {
+                                    match cursor.get(
+                                        Some(cur_iter_key.clone().unwrap().as_ref()),
+                                        None,
+                                        MDB_NEXT,
+                                    ) {
+                                        Ok(val) => {
+                                            cur_iter_key = Some(Arc::new(val.0.unwrap().to_vec()));
+                                            cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
+                                        }
+
+                                        Err(_) => {
+                                            cb(Ok(None));
+                                        }
+                                    }
+                                } else {
+                                    match cursor.get(
+                                        Some(cur_iter_key.clone().unwrap().as_ref()),
+                                        None,
+                                        MDB_PREV,
+                                    ) {
+                                        Ok(val) => {
+                                            cur_iter_key = Some(Arc::new(val.0.unwrap().to_vec()));
+                                            cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
+                                        }
+
+                                        Err(_) => {
+                                            cb(Ok(None));
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -291,15 +450,13 @@ impl ThreadPool {
                                 thread_local_txn = env.begin_rw_txn().ok();
                             }
 
-                            let rw_txn = thread_local_txn.as_mut().unwrap();
-
                             for kv in keys.iter() {
                                 if kv.ware == Atom::from("") && kv.tab == Atom::from("") {
                                     continue;
                                 }
 
                                 if let Some(_) = kv.value {
-                                    match rw_txn.put(
+                                    match thread_local_txn.as_mut().unwrap().put(
                                         db.clone().unwrap(),
                                         kv.key.as_ref(),
                                         kv.clone().value.unwrap().as_ref(),
@@ -312,7 +469,11 @@ impl ThreadPool {
                                         ))),
                                     };
                                 } else {
-                                    match rw_txn.del(db.clone().unwrap(), kv.key.as_ref(), None) {
+                                    match thread_local_txn.as_mut().unwrap().del(
+                                        db.clone().unwrap(),
+                                        kv.key.as_ref(),
+                                        None,
+                                    ) {
                                         Ok(_) => {}
                                         Err(Error::NotFound) => {}
                                         Err(e) => cb(Err(format!(

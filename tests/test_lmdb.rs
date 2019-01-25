@@ -1245,7 +1245,7 @@ fn test_iterdb() {
         .unwrap()
         .unwrap();
 
-    for i in 0..1000 {
+    for i in 0..10 {
         let k = build_db_key(&format!("test_key{:?}", i));
         let v = build_db_val(&format!("test_value{:?}", i));
         let item = create_tabkv(
@@ -1269,23 +1269,24 @@ fn test_iterdb() {
 
     txn.commit(Arc::new(move |c| {}));
 
-    txn.iter(
-        Some(Arc::new(b"test_key500".to_vec())),
+    let mut iter = txn.iter(
+        Some(Arc::new(b"test_key0".to_vec())),
+        // None,
         true,
         None,
         Arc::new(move |_iter| {}),
-    );
-    let mut iter = txn
-        .iter(None, true, None, Arc::new(move |_| {}))
-        .unwrap()
-        .unwrap();
+    ).unwrap().unwrap();
+    // let mut iter = txn
+    //     .iter(None, true, None, Arc::new(move |_| {}))
+    //     .unwrap()
+    //     .unwrap();
 
-    for i in 0..100 {
+    for i in 0..10 {
         iter.next(Arc::new(move |item| {
             if let Ok(elem) = item {
                 println!("multi thread item {:?}: {:?}", i, elem);
             }
         }));
-        thread::sleep_ms(100);
+        thread::sleep_ms(10);
     }
 }
