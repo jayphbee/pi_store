@@ -26,12 +26,6 @@ use pool::{LmdbMessage, THREAD_POOL, NO_OP_POOL, NopMessage};
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
 
-pub const MDB_SET: u32 = 15;
-pub const MDB_PREV: u32 = 12;
-pub const MDB_NEXT: u32 = 8;
-pub const MDB_FIRST: u32 = 0;
-pub const MDB_LAST: u32 = 6;
-
 const TIMEOUT: usize = 100;
 
 lazy_static! {
@@ -117,7 +111,6 @@ impl Drop for LmdbTableTxn {
         match THREAD_POOL.clone().lock() {
             Ok(mut pool) => {
                 if let Some(sender) = self.sender.clone() {
-                    let _ = sender.send(LmdbMessage::CleanUp);
                     pool.push(sender);
                     self.sender = None;
                 } else {

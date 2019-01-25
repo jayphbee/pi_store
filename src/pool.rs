@@ -3,16 +3,23 @@ use std::slice::from_raw_parts;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::cell::RefCell;
 
 use lmdb::{
     mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error, Iter as LmdbIter,
-    MDB_cmp_func, MDB_val, RwTransaction, Transaction, WriteFlags,
+    MDB_cmp_func, MDB_val, RoCursor, RwTransaction, Transaction, WriteFlags,
 };
+
+const MDB_SET: u32 = 15;
+const MDB_PREV: u32 = 12;
+const MDB_NEXT: u32 = 8;
+const MDB_FIRST: u32 = 0;
+const MDB_LAST: u32 = 6;
 
 use pi_db::db::{Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback};
 
-use bon::ReadBuffer;
 use atom::Atom;
+use bon::ReadBuffer;
 
 pub enum LmdbMessage {
     CreateDb(String, Sender<()>),
@@ -26,7 +33,6 @@ pub enum LmdbMessage {
     Rollback(TxCallback),
     TableSize(Arc<Fn(SResult<usize>)>),
     NoOp(TxCallback),
-    CleanUp,
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -39,7 +45,7 @@ pub struct ThreadPool {
 }
 
 pub enum NopMessage {
-    Nop(TxCallback)
+    Nop(TxCallback),
 }
 
 #[derive(Debug)]
@@ -60,17 +66,11 @@ impl NopPool {
         for _ in 0..cap {
             let (tx, rx) = bounded(1);
 
-            thread::spawn(move || {
-                loop {
-                    match rx.recv() {
-                        Ok(NopMessage::Nop(cb)) => {
-                            cb(Ok(()))
-                        },
+            thread::spawn(move || loop {
+                match rx.recv() {
+                    Ok(NopMessage::Nop(cb)) => cb(Ok(())),
 
-                        Err(_) => {
-
-                        }
-                    }
+                    Err(_) => {}
                 }
             });
 
@@ -82,7 +82,7 @@ impl NopPool {
         self.senders.push(sender);
     }
 
-    pub fn pop (&mut self) -> Option<Sender<NopMessage>> {
+    pub fn pop(&mut self) -> Option<Sender<NopMessage>> {
         self.senders.pop()
     }
 }
@@ -102,21 +102,14 @@ impl ThreadPool {
 
             thread::spawn(move || {
                 let env = clone_env;
-                let mut thread_local_txn: Option<RwTransaction> = None;
-                let mut thread_local_iter: Option<LmdbIter> = None;
+                let mut thread_local_txn: RefCell<Option<RwTransaction>> = RefCell::new(None);
+                let mut thread_local_cursor: Option<RoCursor> = None;
                 let mut db: Option<Database> = None;
+                let mut desc = false;
 
                 loop {
                     match rx.recv() {
-                        Ok(LmdbMessage::CleanUp) => {
-                            thread_local_txn = None;
-                            thread_local_iter = None;
-                            db = None;
-                        }
-
-                        Ok(LmdbMessage::NoOp(cb)) => {
-                            cb(Ok(()))
-                        }
+                        Ok(LmdbMessage::NoOp(cb)) => cb(Ok(())),
 
                         Ok(LmdbMessage::CreateDb(db_name, tx)) => {
                             db = match env.open_db(Some(&db_name.to_string())) {
@@ -136,11 +129,13 @@ impl ThreadPool {
                         Ok(LmdbMessage::Query(keys, cb)) => {
                             let mut values = Vec::new();
 
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
+                            if thread_local_txn.borrow().is_none() {
+                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
                             }
 
-                            let txn = thread_local_txn.take().unwrap();
+                            let borrowed = thread_local_txn.borrow();
+
+                            let txn = borrowed.as_ref().unwrap();
 
                             for kv in keys.iter() {
                                 match txn.get(db.clone().unwrap(), kv.key.as_ref()) {
@@ -175,71 +170,135 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateItemIter(descending, key, tx)) => {
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
-                                let txn = thread_local_txn.as_mut().unwrap();
-                                let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
-                                if let Some(k) = key {
-                                    thread_local_iter = Some(
-                                        cursor.iter_from_with_direction(k.to_vec(), descending),
-                                    );
-                                    println!("create item iter success");
-                                } else {
-                                    thread_local_iter =
-                                        Some(cursor.iter_items_with_direction(descending));
+                            desc = descending;
+                            if thread_local_txn.borrow().is_none() {
+                                println!("create item iter ^^^^^^^^^^");
+                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
+                                let borrowed = thread_local_txn.borrow();
+                                let txn = borrowed.as_ref().unwrap();
+                                thread_local_cursor =
+                                    Some(txn.open_ro_cursor(db.clone().unwrap()).unwrap());
+                                match key {
+                                    Some(k) => {
+                                        thread_local_cursor
+                                            .as_ref()
+                                            .unwrap()
+                                            .get(Some(k.as_ref()), None, MDB_SET)
+                                            .unwrap();
+                                    }
+
+                                    None => {
+                                        if descending {
+                                            thread_local_cursor
+                                                .as_ref()
+                                                .unwrap()
+                                                .get(None, None, MDB_FIRST)
+                                                .unwrap();
+                                        } else {
+                                            thread_local_cursor
+                                                .as_ref()
+                                                .unwrap()
+                                                .get(None, None, MDB_LAST)
+                                                .unwrap();
+                                        }
+                                    }
                                 }
                             }
+                            println!("before tx send");
                             let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::NextItem(cb)) => {
-                            if let Some(ref mut iter) = thread_local_iter {
-                                match iter.next() {
-                                    Some(v) => cb(Ok(Some((
-                                        Arc::new(v.0.to_vec()),
-                                        Arc::new(v.1.to_vec()),
-                                    )))),
-                                    None => cb(Ok(None)),
+                            if let Some(ref cursor) = thread_local_cursor {
+                                if desc {
+                                    match cursor.get(None, None, MDB_NEXT) {
+                                        Ok(val) => cb(Ok(Some((
+                                            Arc::new(val.0.unwrap().to_vec()),
+                                            Arc::new(val.1.to_vec()),
+                                        )))),
+
+                                        Err(_) => cb(Ok(None)),
+                                    }
+                                } else {
+                                    match cursor.get(None, None, MDB_PREV) {
+                                        Ok(val) => cb(Ok(Some((
+                                            Arc::new(val.0.unwrap().to_vec()),
+                                            Arc::new(val.1.to_vec()),
+                                        )))),
+
+                                        Err(_) => cb(Ok(None)),
+                                    }
                                 }
                             } else {
-                                cb(Err("Iterator not initialized".to_string()))
+                                cb(Err("db cursor not initialized".to_string()))
                             }
                         }
 
                         Ok(LmdbMessage::CreateKeyIter(descending, key, tx)) => {
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
-                                let txn = thread_local_txn.as_mut().unwrap();
-                                let mut cursor = txn.open_ro_cursor(db.clone().unwrap()).unwrap();
-                                if let Some(k) = key {
-                                    thread_local_iter = Some(
-                                        cursor.iter_from_with_direction(k.to_vec(), descending),
-                                    );
-                                } else {
-                                    thread_local_iter =
-                                        Some(cursor.iter_items_with_direction(descending));
+                            desc = descending;
+                            if thread_local_txn.borrow().is_none() {
+                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
+                                let borrowed = thread_local_txn.borrow();
+                                let txn = borrowed.as_ref().unwrap();
+                                thread_local_cursor =
+                                    Some(txn.open_ro_cursor(db.clone().unwrap()).unwrap());
+                                match key {
+                                    Some(k) => {
+                                        thread_local_cursor
+                                            .as_ref()
+                                            .unwrap()
+                                            .get(Some(k.as_ref()), None, MDB_SET)
+                                            .unwrap();
+                                    }
+
+                                    None => {
+                                        if descending {
+                                            thread_local_cursor
+                                                .as_ref()
+                                                .unwrap()
+                                                .get(None, None, MDB_FIRST)
+                                                .unwrap();
+                                        } else {
+                                            thread_local_cursor
+                                                .as_ref()
+                                                .unwrap()
+                                                .get(None, None, MDB_LAST)
+                                                .unwrap();
+                                        }
+                                    }
                                 }
                             }
                             let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::NextKey(cb)) => {
-                            if let Some(ref mut iter) = thread_local_iter {
-                                match iter.next() {
-                                    Some(v) => cb(Ok(Some(Arc::new(v.0.to_vec())))),
-                                    None => cb(Ok(None)),
+                            if let Some(ref cursor) = thread_local_cursor {
+                                if desc {
+                                    match cursor.get(None, None, MDB_NEXT) {
+                                        Ok(val) => cb(Ok(Some(Arc::new(val.0.unwrap().to_vec())))),
+
+                                        Err(_) => cb(Ok(None)),
+                                    }
+                                } else {
+                                    match cursor.get(None, None, MDB_PREV) {
+                                        Ok(val) => cb(Ok(Some(Arc::new(val.0.unwrap().to_vec())))),
+
+                                        Err(_) => cb(Ok(None)),
+                                    }
                                 }
                             } else {
-                                cb(Err("Iterator not initialized".to_string()))
+                                cb(Err("db cursor not initialized".to_string()))
                             }
                         }
 
                         Ok(LmdbMessage::Modify(keys, cb)) => {
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
+                            if thread_local_txn.borrow().is_none() {
+                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
                             }
+                            
 
-                            let rw_txn = thread_local_txn.as_mut().unwrap();
+                            let mut borrowed = thread_local_txn.borrow_mut();
+                            let rw_txn = borrowed.as_mut().unwrap();
 
                             for kv in keys.iter() {
                                 if kv.ware == Atom::from("") && kv.tab == Atom::from("") {
@@ -274,7 +333,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Commit(cb)) => {
-                            if let Some(txn) = thread_local_txn.take() {
+                            if let Some(txn) = thread_local_txn.borrow_mut().take() {
                                 match txn.commit() {
                                     Ok(_) => {
                                         cb(Ok(()));
@@ -290,7 +349,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Rollback(cb)) => {
-                            if let Some(txn) = thread_local_txn.take() {
+                            if let Some(txn) = thread_local_txn.borrow_mut().take() {
                                 txn.abort();
                                 cb(Ok(()))
                             } else {
@@ -317,13 +376,19 @@ impl ThreadPool {
 
     pub fn pop(&mut self) -> Option<Sender<LmdbMessage>> {
         self.idle -= 1;
-        println!("-------------------- total idle pool thread after pop: {:?}", self.idle);
+        println!(
+            "-------------------- total idle pool thread after pop: {:?}",
+            self.idle
+        );
         self.senders.pop()
     }
 
     pub fn push(&mut self, sender: Sender<LmdbMessage>) {
         self.idle += 1;
-        println!("-------------------- total idle pool thread after push: {:?}", self.idle);
+        println!(
+            "-------------------- total idle pool thread after push: {:?}",
+            self.idle
+        );
         self.senders.push(sender);
     }
 
