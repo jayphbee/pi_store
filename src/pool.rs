@@ -3,7 +3,6 @@ use std::slice::from_raw_parts;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
-use std::cell::RefCell;
 
 use lmdb::{
     mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error, Iter as LmdbIter,
@@ -102,7 +101,7 @@ impl ThreadPool {
 
             thread::spawn(move || {
                 let env = clone_env;
-                let mut thread_local_txn: RefCell<Option<RwTransaction>> = RefCell::new(None);
+                let mut thread_local_txn: Option<RwTransaction> = None;
                 let mut thread_local_cursor: Option<RoCursor> = None;
                 let mut db: Option<Database> = None;
                 let mut desc = false;
@@ -129,13 +128,11 @@ impl ThreadPool {
                         Ok(LmdbMessage::Query(keys, cb)) => {
                             let mut values = Vec::new();
 
-                            if thread_local_txn.borrow().is_none() {
-                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
                             }
 
-                            let borrowed = thread_local_txn.borrow();
-
-                            let txn = borrowed.as_ref().unwrap();
+                            let txn = thread_local_txn.take().unwrap();
 
                             for kv in keys.iter() {
                                 match txn.get(db.clone().unwrap(), kv.key.as_ref()) {
@@ -171,11 +168,10 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::CreateItemIter(descending, key, tx)) => {
                             desc = descending;
-                            if thread_local_txn.borrow().is_none() {
+                            if thread_local_txn.is_none() {
                                 println!("create item iter ^^^^^^^^^^");
-                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
-                                let borrowed = thread_local_txn.borrow();
-                                let txn = borrowed.as_ref().unwrap();
+                                thread_local_txn = env.begin_rw_txn().ok();
+                                let txn = thread_local_txn.as_ref().unwrap();
                                 thread_local_cursor =
                                     Some(txn.open_ro_cursor(db.clone().unwrap()).unwrap());
                                 match key {
@@ -236,10 +232,9 @@ impl ThreadPool {
 
                         Ok(LmdbMessage::CreateKeyIter(descending, key, tx)) => {
                             desc = descending;
-                            if thread_local_txn.borrow().is_none() {
-                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
-                                let borrowed = thread_local_txn.borrow();
-                                let txn = borrowed.as_ref().unwrap();
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
+                                let txn = thread_local_txn.as_ref().unwrap();
                                 thread_local_cursor =
                                     Some(txn.open_ro_cursor(db.clone().unwrap()).unwrap());
                                 match key {
@@ -292,13 +287,11 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(keys, cb)) => {
-                            if thread_local_txn.borrow().is_none() {
-                                *thread_local_txn.borrow_mut() = env.begin_rw_txn().ok();
+                            if thread_local_txn.is_none() {
+                                thread_local_txn = env.begin_rw_txn().ok();
                             }
-                            
 
-                            let mut borrowed = thread_local_txn.borrow_mut();
-                            let rw_txn = borrowed.as_mut().unwrap();
+                            let rw_txn = thread_local_txn.as_mut().unwrap();
 
                             for kv in keys.iter() {
                                 if kv.ware == Atom::from("") && kv.tab == Atom::from("") {
@@ -333,7 +326,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Commit(cb)) => {
-                            if let Some(txn) = thread_local_txn.borrow_mut().take() {
+                            if let Some(txn) = thread_local_txn.take() {
                                 match txn.commit() {
                                     Ok(_) => {
                                         cb(Ok(()));
@@ -349,7 +342,7 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Rollback(cb)) => {
-                            if let Some(txn) = thread_local_txn.borrow_mut().take() {
+                            if let Some(txn) = thread_local_txn.take() {
                                 txn.abort();
                                 cb(Ok(()))
                             } else {
