@@ -141,6 +141,16 @@ impl ThreadPool {
                             }
 
                             for kv in keys.iter() {
+                                let db = match env.open_db(Some(&kv.tab.to_string())) {
+                                    Ok(db) => Some(db),
+                                    Err(_) => Some(
+                                        env.create_db(
+                                            Some(&kv.tab.to_string()),
+                                            DatabaseFlags::empty(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                                };
                                 match thread_local_txn
                                     .as_ref()
                                     .unwrap()
@@ -494,7 +504,20 @@ impl ThreadPool {
                                     continue;
                                 }
 
+                                let db = match env.open_db(Some(&kv.tab.to_string())) {
+                                    Ok(db) => Some(db),
+                                    Err(_) => Some(
+                                        env.create_db(
+                                            Some(&kv.tab.to_string()),
+                                            DatabaseFlags::empty(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                                };
+
                                 if let Some(_) = kv.value {
+                                    println!("db to be modified: {:?}", db);
+
                                     match thread_local_txn.as_mut().unwrap().put(
                                         db.clone().unwrap(),
                                         kv.key.as_ref(),
@@ -502,10 +525,13 @@ impl ThreadPool {
                                         WriteFlags::empty(),
                                     ) {
                                         Ok(_) => {}
-                                        Err(e) => cb(Err(format!(
-                                            "insert data error: {:?}",
-                                            e.to_string()
-                                        ))),
+                                        Err(e) => {
+                                            println!("modify error: {:?}", e);
+                                            cb(Err(format!(
+                                                "insert data error: {:?}",
+                                                e.to_string()
+                                            )));
+                                        }
                                     };
                                 } else {
                                     match thread_local_txn.as_mut().unwrap().del(
