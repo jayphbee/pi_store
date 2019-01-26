@@ -32,6 +32,7 @@ pub enum LmdbMessage {
     Rollback(TxCallback),
     TableSize(Arc<Fn(SResult<usize>)>),
     NoOp(TxCallback),
+    CleanUp,
 }
 
 unsafe impl Send for LmdbMessage {}
@@ -102,7 +103,6 @@ impl ThreadPool {
             thread::spawn(move || {
                 let env = clone_env;
                 let mut thread_local_txn: Option<RwTransaction> = None;
-                let mut thread_local_cursor: Option<RoCursor> = None;
                 let mut db: Option<Database> = None;
                 let mut desc = false;
                 let mut cur_iter_key: Option<Bin> = None;
@@ -110,6 +110,12 @@ impl ThreadPool {
 
                 loop {
                     match rx.recv() {
+                        Ok(LmdbMessage::CleanUp) => {
+                            thread_local_txn = None;
+                            db = None;
+                            cur_iter_key = None;
+                        }
+
                         Ok(LmdbMessage::NoOp(cb)) => cb(Ok(())),
 
                         Ok(LmdbMessage::CreateDb(db_name, tx)) => {
@@ -171,17 +177,14 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::CreateItemIter(descending, key, tx)) => {
-                            println!("key is: {:?} -------------- ", key);
                             desc = descending;
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
                             }
 
                             iter_from_start_or_end = if key.is_none() {
-                                println!("iter from start to end");
                                 true
                             } else {
-                                println!("iter from some Key ----- ");
                                 cur_iter_key = key;
                                 false
                             };
@@ -197,20 +200,19 @@ impl ThreadPool {
                                 .unwrap();
 
                             if cur_iter_key.is_some() {
-                                println!("set cursor ++++++++++ {:?}", cur_iter_key);
-                                let _ = cursor.get(
-                                    Some(cur_iter_key.clone().unwrap().as_ref()),
-                                    None,
-                                    MDB_SET,
-                                );
+                                cursor
+                                    .get(
+                                        Some(cur_iter_key.clone().unwrap().as_ref()),
+                                        None,
+                                        MDB_SET,
+                                    )
+                                    .unwrap();
                             }
 
                             if iter_from_start_or_end {
-                                println!("next item: from start to end");
                                 if desc {
-                                    println!("desc");
+                                    // for the first iteration, cur_iter_key is none
                                     if cur_iter_key.is_none() {
-                                        println!("cur iter key is none");
                                         match cursor.get(None, None, MDB_NEXT) {
                                             Ok(val) => {
                                                 cur_iter_key =
@@ -221,18 +223,15 @@ impl ThreadPool {
                                                 ))));
                                             }
 
-                                            Err(_) => cb(Ok(None)),
+                                            Err(Error::NotFound) => cb(Ok(None)),
+
+                                            Err(e) => cb(Err(format!(
+                                                "cursor get error: {:?}",
+                                                e.to_string()
+                                            ))),
                                         }
                                     } else {
-                                        println!(
-                                            "cur iter key not none: get next item: {:?}",
-                                            cur_iter_key
-                                        );
-
-                                        match cursor.get(
-                                            // Some(cur_iter_key.clone().unwrap().as_ref()),
-                                            None, None, MDB_NEXT,
-                                        ) {
+                                        match cursor.get(None, None, MDB_NEXT) {
                                             Ok(val) => {
                                                 cur_iter_key =
                                                     Some(Arc::new(val.0.unwrap().to_vec()));
@@ -243,9 +242,12 @@ impl ThreadPool {
                                                 ))));
                                             }
 
-                                            Err(_) => {
-                                                cb(Ok(None));
-                                            }
+                                            Err(Error::NotFound) => cb(Ok(None)),
+
+                                            Err(e) => cb(Err(format!(
+                                                "cursor get error: {:?}",
+                                                e.to_string()
+                                            ))),
                                         }
                                     }
                                 } else {
@@ -263,10 +265,7 @@ impl ThreadPool {
                                             Err(_) => cb(Ok(None)),
                                         }
                                     } else {
-                                        match cursor.get(
-                                            // Some(cur_iter_key.clone().unwrap().as_ref()),
-                                            None, None, MDB_PREV,
-                                        ) {
+                                        match cursor.get(None, None, MDB_PREV) {
                                             Ok(val) => {
                                                 cur_iter_key =
                                                     Some(Arc::new(val.0.unwrap().to_vec()));
@@ -276,35 +275,32 @@ impl ThreadPool {
                                                 ))));
                                             }
 
-                                            Err(_) => {
-                                                cb(Ok(None));
-                                            }
+                                            Err(Error::NotFound) => cb(Ok(None)),
+
+                                            Err(e) => cb(Err(format!(
+                                                "cursor get error: {:?}",
+                                                e.to_string()
+                                            ))),
                                         }
                                     }
                                 }
                             } else {
-                                println!("iter from some key");
                                 if desc {
-                                    println!("before cur_iter_key: {:?}", cur_iter_key);
-                                    match cursor.get(
-                                        Some(cur_iter_key.clone().unwrap().as_ref()),
-                                        None,
-                                        MDB_NEXT,
-                                    ) {
+                                    match cursor.get(None, None, MDB_NEXT) {
                                         Ok(val) => {
                                             cur_iter_key = Some(Arc::new(val.0.unwrap().to_vec()));
-                                            println!("fetched value: {:?}", cur_iter_key);
                                             cb(Ok(Some((
                                                 Arc::new(val.0.unwrap().to_vec()),
                                                 Arc::new(val.1.to_vec()),
                                             ))));
                                         }
 
-                                        Err(e) => {
-                                            println!("fetched value: {:?}", e);
+                                        Err(Error::NotFound) => cb(Ok(None)),
 
-                                            cb(Ok(None));
-                                        }
+                                        Err(e) => cb(Err(format!(
+                                            "cursor get error: {:?}",
+                                            e.to_string()
+                                        ))),
                                     }
                                 } else {
                                     match cursor.get(
@@ -320,9 +316,12 @@ impl ThreadPool {
                                             ))));
                                         }
 
-                                        Err(_) => {
-                                            cb(Ok(None));
-                                        }
+                                        Err(Error::NotFound) => cb(Ok(None)),
+
+                                        Err(e) => cb(Err(format!(
+                                            "cursor get error: {:?}",
+                                            e.to_string()
+                                        ))),
                                     }
                                 }
                             }
@@ -362,7 +361,12 @@ impl ThreadPool {
                                                 cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
                                             }
 
-                                            Err(_) => cb(Ok(None)),
+                                            Err(Error::NotFound) => cb(Ok(None)),
+
+                                            Err(e) => cb(Err(format!(
+                                                "cursor get error: {:?}",
+                                                e.to_string()
+                                            ))),
                                         }
                                     } else {
                                         match cursor.get(
@@ -376,9 +380,12 @@ impl ThreadPool {
                                                 cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
                                             }
 
-                                            Err(_) => {
-                                                cb(Ok(None));
-                                            }
+                                            Err(Error::NotFound) => cb(Ok(None)),
+
+                                            Err(e) => cb(Err(format!(
+                                                "cursor get error: {:?}",
+                                                e.to_string()
+                                            ))),
                                         }
                                     }
                                 } else {
@@ -390,7 +397,12 @@ impl ThreadPool {
                                                 cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
                                             }
 
-                                            Err(_) => cb(Ok(None)),
+                                            Err(Error::NotFound) => cb(Ok(None)),
+
+                                            Err(e) => cb(Err(format!(
+                                                "cursor get error: {:?}",
+                                                e.to_string()
+                                            ))),
                                         }
                                     } else {
                                         match cursor.get(
@@ -404,9 +416,12 @@ impl ThreadPool {
                                                 cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
                                             }
 
-                                            Err(_) => {
-                                                cb(Ok(None));
-                                            }
+                                            Err(Error::NotFound) => cb(Ok(None)),
+
+                                            Err(e) => cb(Err(format!(
+                                                "cursor get error: {:?}",
+                                                e.to_string()
+                                            ))),
                                         }
                                     }
                                 }
@@ -422,9 +437,12 @@ impl ThreadPool {
                                             cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
                                         }
 
-                                        Err(_) => {
-                                            cb(Ok(None));
-                                        }
+                                        Err(Error::NotFound) => cb(Ok(None)),
+
+                                        Err(e) => cb(Err(format!(
+                                            "cursor get error: {:?}",
+                                            e.to_string()
+                                        ))),
                                     }
                                 } else {
                                     match cursor.get(
@@ -437,9 +455,12 @@ impl ThreadPool {
                                             cb(Ok(Some(Arc::new(val.0.unwrap().to_vec()))));
                                         }
 
-                                        Err(_) => {
-                                            cb(Ok(None));
-                                        }
+                                        Err(Error::NotFound) => cb(Ok(None)),
+
+                                        Err(e) => cb(Err(format!(
+                                            "cursor get error: {:?}",
+                                            e.to_string()
+                                        ))),
                                     }
                                 }
                             }
