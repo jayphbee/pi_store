@@ -225,6 +225,7 @@ fn test_lmdb_multi_thread() {
         EnumType::Struct(Arc::new(StructInfo::new(Atom::from("test_table_2"), 8888))),
     ));
     snapshot.alter(&Atom::from("test_table_2"), Some(sinfo.clone()));
+    snapshot.commit(&Guid(0));
 
     let meta_txn = snapshot.meta_txn(&Guid(0));
 
@@ -1297,4 +1298,6 @@ fn test_iterdb() {
         }));
         thread::sleep_ms(10);
     }
+
+    txn.commit(Arc::new(move |c| {}));
 }
