@@ -200,13 +200,17 @@ impl ThreadPool {
                                 .unwrap();
 
                             if cur_iter_key.is_some() {
-                                cursor
-                                    .get(
-                                        Some(cur_iter_key.clone().unwrap().as_ref()),
-                                        None,
-                                        MDB_SET,
-                                    )
-                                    .unwrap();
+                                match cursor.get(
+                                    Some(cur_iter_key.clone().unwrap().as_ref()),
+                                    None,
+                                    MDB_SET,
+                                ) {
+                                    Ok(_) => {}
+                                    Err(Error::NotFound) => {}
+                                    Err(e) => {
+                                        cb(Err(format!("MDB_SET failed: {:?}", e.to_string())))
+                                    }
+                                }
                             }
 
                             if iter_from_start_or_end {
@@ -350,6 +354,20 @@ impl ThreadPool {
                                 .unwrap()
                                 .open_ro_cursor(db.clone().unwrap())
                                 .unwrap();
+
+                            if cur_iter_key.is_some() {
+                                match cursor.get(
+                                    Some(cur_iter_key.clone().unwrap().as_ref()),
+                                    None,
+                                    MDB_SET,
+                                ) {
+                                    Ok(_) => {}
+                                    Err(Error::NotFound) => {}
+                                    Err(e) => {
+                                        cb(Err(format!("MDB_SET failed: {:?}", e.to_string())))
+                                    }
+                                }
+                            }
 
                             if iter_from_start_or_end {
                                 if desc {
