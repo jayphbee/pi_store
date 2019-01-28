@@ -239,7 +239,6 @@ impl ThreadPool {
                                             Ok(val) => {
                                                 cur_iter_key =
                                                     Some(Arc::new(val.0.unwrap().to_vec()));
-                                                println!("after cursor get: {:?}", cur_iter_key);
                                                 cb(Ok(Some((
                                                     Arc::new(val.0.unwrap().to_vec()),
                                                     Arc::new(val.1.to_vec()),
@@ -569,19 +568,11 @@ impl ThreadPool {
 
     pub fn pop(&mut self) -> Option<Sender<LmdbMessage>> {
         self.idle -= 1;
-        println!(
-            "-------------------- total idle pool thread after pop: {:?}",
-            self.idle
-        );
         self.senders.pop()
     }
 
     pub fn push(&mut self, sender: Sender<LmdbMessage>) {
         self.idle += 1;
-        println!(
-            "-------------------- total idle pool thread after push: {:?}",
-            self.idle
-        );
         self.senders.push(sender);
     }
 

@@ -56,8 +56,6 @@ impl Tab for LmdbTable {
             return txn.clone();
         }
 
-        println!("create new lmdb txn: {:?}", id);
-
         let sender = match THREAD_POOL.clone().lock() {
             Ok(mut pool) => pool.pop(),
             Err(e) => panic!(
@@ -148,23 +146,16 @@ impl Txn for LmdbTableTxn {
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
-        println!(
-            "call lmdb commit, {:?} txns left ---------- !!!!!!!!!!!! --------------",
-            self.txns.lock().unwrap().len()
-        );
-
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
 
         if self.is_meta_txn.load(SeqCst) || self.txns.lock().unwrap().len() <= 1 {
-            println!("commit to lmdb: {:?}", self.id);
             match self.sender.clone() {
                 Some(tx) => {
                     let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
                         Ok(_) => {
                             *state.lock().unwrap() = TxState::Commited;
                             cb(Ok(()));
-                            println!("after commit cb");
                         }
                         Err(e) => {
                             *state.lock().unwrap() = TxState::CommitFail;
@@ -177,7 +168,6 @@ impl Txn for LmdbTableTxn {
                 }
             }
             TXN_INDEX.lock().unwrap().remove(&self.id);
-            println!("remove committed txn: {:?}", self.id.clone());
         } else {
             let _ = self.txns.lock().unwrap().pop();
             match NO_OP_POOL.lock().unwrap().pop() {
@@ -194,14 +184,10 @@ impl Txn for LmdbTableTxn {
     }
 
     fn rollback(&self, cb: TxCallback) -> DBResult {
-        println!("call lmdb rollback ---------- !!!!!!!!!!!! --------------");
-
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state = self.state.clone();
 
-        if self.txns.lock().unwrap().len() <= 1 {
-            println!("rollback to lmdb: {:?}", self.id);
-
+        if self.is_meta_txn.load(SeqCst) || self.txns.lock().unwrap().len() <= 1 {
             match self.sender.clone() {
                 Some(tx) => {
                     let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
@@ -222,12 +208,15 @@ impl Txn for LmdbTableTxn {
             TXN_INDEX.lock().unwrap().remove(&self.id);
         } else {
             let _ = self.txns.lock().unwrap().pop();
-            match self.sender.clone() {
-                Some(tx) => {
-                    let _ = tx.send(LmdbMessage::NoOp(cb));
-                }
-                None => return Some(Err("Can't get sender".to_string())),
+            match NO_OP_POOL.lock().unwrap().pop() {
+                Some(sender) => {
+                    let _ = sender.send(NopMessage::Nop(cb));
+                    self.no_op_senders.lock().unwrap().push(sender);
+                },
+
+                None => return Some(Err("Can't get no op sender".to_string())),
             }
+            
         }
 
         None
@@ -252,8 +241,6 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
-        println!("call lmdb query ---------- !!!!!!!!!!!! --------------");
-
         for v in arr.clone().iter() {
             if !self
                 .txns
@@ -267,8 +254,6 @@ impl TabTxn for LmdbTableTxn {
                     .push((v.ware.clone(), v.tab.clone()));
             }
         }
-
-        println!("accumulated txns: {:?}", self.txns.lock().unwrap().len());
 
         match self.sender.clone() {
             Some(tx) => {
@@ -297,11 +282,9 @@ impl TabTxn for LmdbTableTxn {
     ) -> DBResult {
         // this is an meta txn
         if arr[0].ware == Atom::from("") && arr[0].tab == Atom::from("") {
-            println!("------------ this is a meta txn !!!!! --------- ");
             self.is_meta_txn.store(true, SeqCst);
         }
 
-        println!("call lmdb modify ---------- !!!!!!!!!!!! --------------");
         for v in arr.clone().iter() {
             if !self
                 .txns
@@ -316,7 +299,6 @@ impl TabTxn for LmdbTableTxn {
                     .push((v.ware.clone(), v.tab.clone()));
             }
         }
-        println!("accumulated txns: {:?}", self.txns.lock().unwrap().len());
 
         match self.sender.clone() {
             Some(tx) => {
@@ -344,8 +326,6 @@ impl TabTxn for LmdbTableTxn {
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
         if self.txns.lock().unwrap().len() < 1 {
-            println!("call lmdb iter ---------- !!!!!!!!!!!! --------------");
-
             self.txns
                 .lock()
                 .unwrap()
@@ -379,8 +359,6 @@ impl TabTxn for LmdbTableTxn {
         _cb: Arc<Fn(KeyIterResult)>,
     ) -> Option<KeyIterResult> {
         if self.txns.lock().unwrap().len() < 1 {
-            println!("call lmdb key iter ---------- !!!!!!!!!!!! --------------");
-
             self.txns
                 .lock()
                 .unwrap()
@@ -456,7 +434,6 @@ impl Iter for LmdbItemsIter {
     type Item = (Bin, Bin);
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
-        println!("call lmdb next item ---------- !!!!!!!!!!!! --------------");
         let _ = self
             .sender
             .send(LmdbMessage::NextItem(Arc::new(move |item| match item {
