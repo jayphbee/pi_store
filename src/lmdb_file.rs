@@ -1,7 +1,9 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc, Mutex, RwLock};
+use std::thread;
 
 use crossbeam_channel::{bounded, Sender};
 
@@ -11,7 +13,7 @@ use guid::Guid;
 use pi_db::db::{
     Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,
     OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,
-    WareSnapshot
+    WareSnapshot,
 };
 use sinfo::EnumType;
 
@@ -19,18 +21,17 @@ use pi_db::tabs::{TabLog, Tabs};
 
 use lmdb::{Cursor, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
-use pool::{LmdbMessage, THREAD_POOL};
+use pool::{LmdbMessage, THREAD_POOL, NO_OP_POOL, NopMessage};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
 
-pub const MDB_SET: u32 = 15;
-pub const MDB_PREV: u32 = 12;
-pub const MDB_NEXT: u32 = 8;
-pub const MDB_FIRST: u32 = 0;
-pub const MDB_LAST: u32 = 6;
-
 const TIMEOUT: usize = 100;
+
+lazy_static! {
+    pub static ref TXN_INDEX: Arc<Mutex<HashMap<Guid, Arc<LmdbTableTxn>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+}
 
 #[derive(Debug, Clone)]
 pub struct LmdbTable {
@@ -51,6 +52,10 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
+        if let Some(txn) = TXN_INDEX.lock().unwrap().get(&id) {
+            return txn.clone();
+        }
+
         let sender = match THREAD_POOL.clone().lock() {
             Ok(mut pool) => pool.pop(),
             Err(e) => panic!(
@@ -73,20 +78,30 @@ impl Tab for LmdbTable {
             panic!("Open db error: {:?}", e.to_string());
         }
 
-        Arc::new(LmdbTableTxn {
-            _id: id.clone(),
+        let t = Arc::new(LmdbTableTxn {
+            id: id.clone(),
             _writable: writable,
+            is_meta_txn: AtomicBool::new(false),
+            txns: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(Mutex::new(TxState::Ok)),
             sender,
-        })
+            no_op_senders: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        TXN_INDEX.lock().unwrap().insert(id.clone(), t.clone());
+
+        t
     }
 }
 
 pub struct LmdbTableTxn {
-    _id: Guid,
+    id: Guid,
     _writable: bool,
+    is_meta_txn: AtomicBool,
+    txns: Arc<Mutex<Vec<(Atom, Atom)>>>,
     state: Arc<Mutex<TxState>>,
     sender: Option<Sender<LmdbMessage>>,
+    no_op_senders: Arc<Mutex<Vec<Sender<NopMessage>>>>,
 }
 
 impl Drop for LmdbTableTxn {
@@ -94,6 +109,7 @@ impl Drop for LmdbTableTxn {
         match THREAD_POOL.clone().lock() {
             Ok(mut pool) => {
                 if let Some(sender) = self.sender.clone() {
+                    let _ = sender.send(LmdbMessage::CleanUp);
                     pool.push(sender);
                     self.sender = None;
                 } else {
@@ -102,6 +118,16 @@ impl Drop for LmdbTableTxn {
             }
             Err(e) => panic!("Give back sender failed: {:?}", e.to_string()),
         };
+
+        match NO_OP_POOL.clone().lock() {
+            Ok(mut pool) => {
+                for sender in self.no_op_senders.lock().unwrap().iter() {
+                    pool.push(sender.clone());
+                }
+            }
+
+            Err(e) => panic!("Give back no op sender failed: {:?}", e.to_string()),
+        }
     }
 }
 
@@ -123,21 +149,37 @@ impl Txn for LmdbTableTxn {
         *self.state.lock().unwrap() = TxState::Committing;
         let state = self.state.clone();
 
-        match self.sender.clone() {
-            Some(tx) => {
-                let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
-                    Ok(_) => {
-                        *state.lock().unwrap() = TxState::Commited;
-                        cb(Ok(()));
-                    }
-                    Err(e) => {
-                        *state.lock().unwrap() = TxState::CommitFail;
-                        cb(Err(e.to_string()));
-                    }
-                })));
+        if self.is_meta_txn.load(SeqCst) || self.txns.lock().unwrap().len() <= 1 {
+            match self.sender.clone() {
+                Some(tx) => {
+                    let _ = tx.send(LmdbMessage::Commit(Arc::new(move |c| match c {
+                        Ok(_) => {
+                            *state.lock().unwrap() = TxState::Commited;
+                            cb(Ok(()));
+                        }
+                        Err(e) => {
+                            *state.lock().unwrap() = TxState::CommitFail;
+                            cb(Err(e.to_string()));
+                        }
+                    })));
+                }
+                None => {
+                    return Some(Err("Can't get sender".to_string()));
+                }
             }
-            None => cb(Err("Can't get sender".to_string())),
+            TXN_INDEX.lock().unwrap().remove(&self.id);
+        } else {
+            let _ = self.txns.lock().unwrap().pop();
+            match NO_OP_POOL.lock().unwrap().pop() {
+                Some(sender) => {
+                    let _ = sender.send(NopMessage::Nop(cb));
+                    self.no_op_senders.lock().unwrap().push(sender);
+                },
+
+                None => return Some(Err("Can't get no op sender".to_string())),
+            }
         }
+
         None
     }
 
@@ -145,22 +187,36 @@ impl Txn for LmdbTableTxn {
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state = self.state.clone();
 
-        match self.sender.clone() {
-            Some(tx) => {
-                let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
-                    Ok(_) => {
-                        *state.lock().unwrap() = TxState::Rollbacked;
-                        cb(Ok(()));
-                    }
-                    Err(e) => {
-                        *state.lock().unwrap() = TxState::RollbackFail;
-                        cb(Err(e.to_string()));
-                    }
-                })));
+        if self.is_meta_txn.load(SeqCst) || self.txns.lock().unwrap().len() <= 1 {
+            match self.sender.clone() {
+                Some(tx) => {
+                    let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
+                        Ok(_) => {
+                            *state.lock().unwrap() = TxState::Rollbacked;
+                            cb(Ok(()));
+                        }
+                        Err(e) => {
+                            *state.lock().unwrap() = TxState::RollbackFail;
+                            cb(Err(e.to_string()));
+                        }
+                    })));
+                }
+                None => {
+                    return Some(Err("Can't get sender".to_string()));
+                }
             }
-            None => {
-                cb(Err("Can't get sender".to_string()));
+            TXN_INDEX.lock().unwrap().remove(&self.id);
+        } else {
+            let _ = self.txns.lock().unwrap().pop();
+            match NO_OP_POOL.lock().unwrap().pop() {
+                Some(sender) => {
+                    let _ = sender.send(NopMessage::Nop(cb));
+                    self.no_op_senders.lock().unwrap().push(sender);
+                },
+
+                None => return Some(Err("Can't get no op sender".to_string())),
             }
+            
         }
 
         None
@@ -185,6 +241,20 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
+        for v in arr.clone().iter() {
+            if !self
+                .txns
+                .lock()
+                .unwrap()
+                .contains(&(v.ware.clone(), v.tab.clone()))
+            {
+                self.txns
+                    .lock()
+                    .unwrap()
+                    .push((v.ware.clone(), v.tab.clone()));
+            }
+        }
+
         match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Query(
@@ -196,7 +266,7 @@ impl TabTxn for LmdbTableTxn {
                 ));
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
 
@@ -210,6 +280,26 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
+        // this is an meta txn
+        if arr[0].ware == Atom::from("") && arr[0].tab == Atom::from("") {
+            self.is_meta_txn.store(true, SeqCst);
+        }
+
+        for v in arr.clone().iter() {
+            if !self
+                .txns
+                .lock()
+                .unwrap()
+                .contains(&(v.ware.clone(), v.tab.clone()))
+                && (arr[0].ware != Atom::from("") && arr[0].tab != Atom::from(""))
+            {
+                self.txns
+                    .lock()
+                    .unwrap()
+                    .push((v.ware.clone(), v.tab.clone()));
+            }
+        }
+
         match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::Modify(
@@ -221,7 +311,7 @@ impl TabTxn for LmdbTableTxn {
                 ));
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
 
@@ -235,6 +325,13 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
+        if self.txns.lock().unwrap().len() < 1 {
+            self.txns
+                .lock()
+                .unwrap()
+                .push((Atom::from(""), Atom::from("")));
+        }
+
         match self.sender.clone() {
             Some(tx) => {
                 let (inner_tx, inner_rx) = bounded(1);
@@ -261,6 +358,13 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(KeyIterResult)>,
     ) -> Option<KeyIterResult> {
+        if self.txns.lock().unwrap().len() < 1 {
+            self.txns
+                .lock()
+                .unwrap()
+                .push((Atom::from(""), Atom::from("")));
+        }
+
         match self.sender.clone() {
             Some(tx) => {
                 let (inner_tx, inner_rx) = bounded(1);
@@ -293,6 +397,12 @@ impl TabTxn for LmdbTableTxn {
     }
 
     fn tab_size(&self, cb: Arc<Fn(SResult<usize>)>) -> Option<SResult<usize>> {
+        // todo: duplicate call tab_size
+        self.txns
+            .lock()
+            .unwrap()
+            .push((Atom::from(""), Atom::from("")));
+
         match self.sender.clone() {
             Some(tx) => {
                 let _ = tx.send(LmdbMessage::TableSize(Arc::new(move |t| match t {
@@ -301,7 +411,7 @@ impl TabTxn for LmdbTableTxn {
                 })));
             }
             None => {
-                cb(Err("Can't get sender".to_string()));
+                return Some(Err("Can't get sender".to_string()));
             }
         }
         None
@@ -403,13 +513,29 @@ impl MetaTxn for LmdbMetaTxn {
         };
 
         let tabkv = TabKV {
-            ware: Atom::from(""),
-            tab: Atom::from(""),
+            ware: Atom::from("file"), // hard code
+            tab: tab.clone(),
             key: key,
             index: 0,
             value: value,
         };
-        self.0.modify(Arc::new(vec![tabkv]), None, false, cb)
+
+        self.0.modify(
+            Arc::new(vec![
+                // placeholder for meta txn
+                TabKV {
+                    ware: Atom::from(""),
+                    tab: Atom::from(""),
+                    key: Arc::new(Vec::new()),
+                    index: 0,
+                    value: None,
+                },
+                tabkv,
+            ]),
+            None,
+            false,
+            cb,
+        )
     }
 
     // 快照拷贝表
@@ -467,15 +593,18 @@ impl DB {
         );
 
         // retrive meta table info of a DB
-        let db = env
-            .create_db(Some(SINFO), DatabaseFlags::empty())
-            .map_err(|e| e.to_string())?;
+        let db = match env.open_db(Some(SINFO)) {
+            Ok(db) => db,
+            Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).unwrap(),
+        };
+
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
         THREAD_POOL.lock().unwrap().start_pool(32, env.clone());
+        NO_OP_POOL.lock().unwrap().start_nop_pool(32);
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
@@ -488,6 +617,9 @@ impl DB {
             Atom::from(SINFO),
             Arc::new(TabMeta::new(EnumType::Str, EnumType::Bool)),
         );
+
+        std::mem::drop(cursor);
+        let _ = txn.commit().unwrap();
 
         Ok(DB {
             name: name,
