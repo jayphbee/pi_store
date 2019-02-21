@@ -119,34 +119,52 @@ impl ThreadPool {
                         Ok(LmdbMessage::NoOp(cb)) => cb(Ok(())),
 
                         Ok(LmdbMessage::CreateDb(db_name, tx)) => {
-                            db = match env.open_db(Some(&db_name.to_string())) {
-                                Ok(db) => Some(db),
-                                Err(_) => Some(
-                                    env.create_db(
-                                        Some(&db_name.to_string()),
-                                        DatabaseFlags::empty(),
-                                    )
+                            // db = match env.open_db(Some(&db_name.to_string())) {
+                            //     Ok(db) => Some(db),
+                            //     Err(_) => Some(
+                            //         env.create_db(
+                            //             Some(&db_name.to_string()),
+                            //             DatabaseFlags::empty(),
+                            //         )
+                            //         .unwrap(),
+                            //     ),
+                            // };
+                            db = Some(
+                                env.create_db(Some(&db_name.to_string()), DatabaseFlags::empty())
                                     .unwrap(),
-                                ),
-                            };
+                            );
 
                             let _ = tx.send(());
                         }
 
                         Ok(LmdbMessage::Query(keys, cb)) => {
+                            println!(
+                                "enter thread pool query: keys = {:?}, len = {:?}",
+                                keys,
+                                keys.len()
+                            );
                             let mut values = Vec::new();
 
                             if thread_local_txn.is_none() {
+                                println!("before create rw txn..............");
                                 thread_local_txn = env.begin_rw_txn().ok();
+                                println!("after create rw txn");
                             }
 
                             for kv in keys.iter() {
+                                let db_name = kv.tab.clone();
+
+                                let db = env.open_db(Some(&db_name.to_string())).ok();
+                                
+                                println!("query get db name: dbi = {:?}, kv: {:?}", db, kv.key.as_ref());
+
                                 match thread_local_txn
                                     .as_ref()
                                     .unwrap()
                                     .get(db.clone().unwrap(), kv.key.as_ref())
                                 {
                                     Ok(v) => {
+                                        println!("query get value {:?}", v);
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
                                             tab: kv.tab.clone(),
@@ -154,8 +172,11 @@ impl ThreadPool {
                                             index: kv.index,
                                             value: Some(Arc::new(Vec::from(v))),
                                         });
+                                        cb(Ok(values.clone()));
+
                                     }
                                     Err(Error::NotFound) => {
+                                        println!("query error not found");
                                         values.push(TabKV {
                                             ware: kv.ware.clone(),
                                             tab: kv.tab.clone(),
@@ -163,8 +184,10 @@ impl ThreadPool {
                                             index: kv.index,
                                             value: None,
                                         });
+                                        cb(Ok(values.clone()));                                        
                                     }
                                     Err(e) => {
+                                        println!("query interal error: {:?}", e);
                                         cb(Err(format!(
                                             "lmdb internal error: {:?}",
                                             e.to_string()
@@ -173,7 +196,7 @@ impl ThreadPool {
                                     }
                                 }
                             }
-                            cb(Ok(values));
+                            // cb(Ok(values));
                         }
 
                         Ok(LmdbMessage::CreateItemIter(descending, key, tx)) => {
@@ -484,20 +507,24 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(keys, cb)) => {
+                            println!(
+                                "enter thread pool modify: keys = {:?}, len = {:?}, db = {:?}",
+                                keys,
+                                keys.len(),
+                                db
+                            );
+
                             if thread_local_txn.is_none() {
                                 thread_local_txn = env.begin_rw_txn().ok();
                             }
 
-                            for kv in keys.iter() {
-                                if kv.ware == Atom::from("") && kv.tab == Atom::from("") {
-                                    continue;
-                                }
-
-                                if let Some(_) = kv.value {
+                            if keys[0].ware == Atom::from("") && keys[0].tab == Atom::from("") {
+                                // meta
+                                if let Some(_) = keys[1].value {
                                     match thread_local_txn.as_mut().unwrap().put(
                                         db.clone().unwrap(),
-                                        kv.key.as_ref(),
-                                        kv.clone().value.unwrap().as_ref(),
+                                        keys[1].key.as_ref(),
+                                        keys[1].clone().value.unwrap().as_ref(),
                                         WriteFlags::empty(),
                                     ) {
                                         Ok(_) => {}
@@ -509,7 +536,7 @@ impl ThreadPool {
                                 } else {
                                     match thread_local_txn.as_mut().unwrap().del(
                                         db.clone().unwrap(),
-                                        kv.key.as_ref(),
+                                        keys[1].key.as_ref(),
                                         None,
                                     ) {
                                         Ok(_) => {}
@@ -520,7 +547,43 @@ impl ThreadPool {
                                         ))),
                                     };
                                 }
+                            } else {
+                                for kv in keys.iter() {
+                                    let db_name = kv.tab.clone();
+                                    let db = env.open_db(Some(&db_name.to_string())).ok();
+
+                                    println!("modify get db name: dbi = {:?}, kv: {:?}", db, kv);
+
+                                    if let Some(_) = kv.value {
+                                        match thread_local_txn.as_mut().unwrap().put(
+                                            db.clone().unwrap(),
+                                            kv.key.as_ref(),
+                                            kv.clone().value.unwrap().as_ref(),
+                                            WriteFlags::empty(),
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(e) => cb(Err(format!(
+                                                "insert data error: {:?}",
+                                                e.to_string()
+                                            ))),
+                                        };
+                                    } else {
+                                        match thread_local_txn.as_mut().unwrap().del(
+                                            db.clone().unwrap(),
+                                            kv.key.as_ref(),
+                                            None,
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(Error::NotFound) => {}
+                                            Err(e) => cb(Err(format!(
+                                                "delete data error: {:?}",
+                                                e.to_string()
+                                            ))),
+                                        };
+                                    }
+                                }
                             }
+
                             cb(Ok(()))
                         }
 
