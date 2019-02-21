@@ -1017,11 +1017,13 @@ fn test_file_db_mgr() {
             match tr1.prepare(Arc::new(move |p| {
                 assert!(p.is_ok());
             })) {
-                Some(p) => println!("prepare: {:?}", p),
+                Some(p) => println!("prepare111: {:?}", p),
                 None => println!("None arm"),
             }
         }),
     );
+
+    thread::sleep_ms(2000);
 
     tr.alter(
         &Atom::from("testdb"),
@@ -1031,11 +1033,13 @@ fn test_file_db_mgr() {
             v: EnumType::Str,
         })),
         Arc::new(move |a| {
+            println!("what's wrong here ++++++++++++");
             assert!(a.is_ok());
             match tr2.prepare(Arc::new(move |p| {
                 assert!(p.is_ok());
+                println!("prepare callback !!!!!!!! ");
             })) {
-                Some(p) => println!("prepare: {:?}", p),
+                Some(p) => println!("prepare222: {:?}", p),
                 None => println!("None arm"),
             }
         }),
@@ -1045,6 +1049,7 @@ fn test_file_db_mgr() {
 
     tr.commit(Arc::new(|c| {
         assert!(c.is_ok());
+        println!("commit ok -----------------");
     }));
 
     let t1 = mgr.transaction(true);
@@ -1065,7 +1070,16 @@ fn test_file_db_mgr() {
             Some(v.clone()),
         );
 
+        let item2 = create_tabkv(
+            Atom::from("testdb"),
+            Atom::from("test_table_mgr_2"),
+            k.clone(),
+            0,
+            Some(v.clone()),
+        );
+
         arr.push(item);
+        arr.push(item2);
     }
 
     for i in 0..10 {
@@ -1208,7 +1222,7 @@ fn test_write_to_many_dbs() {
 
     let mut items = Vec::<(Vec<u8>, Vec<u8>)>::new();
 
-    for i in 0..10000 {
+    for i in 0..100 {
         let mut wb = WriteBuffer::new();
         wb.write_utf8(&format!("key{}", i));
         let key = wb.get_byte().to_vec();
@@ -1227,6 +1241,11 @@ fn test_write_to_many_dbs() {
     items.iter().enumerate().for_each(|(i, item)| {
         txn.put(dbs[i % 5 as usize], &item.0, &item.1, WriteFlags::empty())
             .unwrap();
+    });
+
+    items.iter().enumerate().for_each(|(i, item)| {
+        let v = txn.get(dbs[i % 5 as usize], &item.0);
+        println!("get value: {:?}", v);
     });
 
     txn.commit().unwrap();
