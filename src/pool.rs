@@ -155,8 +155,12 @@ impl ThreadPool {
                                 let db_name = kv.tab.clone();
 
                                 let db = env.open_db(Some(&db_name.to_string())).ok();
-                                
-                                println!("query get db name: dbi = {:?}, kv: {:?}", db, kv.key.as_ref());
+
+                                println!(
+                                    "query get db name: dbi = {:?}, kv: {:?}",
+                                    db,
+                                    kv.key.as_ref()
+                                );
 
                                 match thread_local_txn
                                     .as_ref()
@@ -173,7 +177,6 @@ impl ThreadPool {
                                             value: Some(Arc::new(Vec::from(v))),
                                         });
                                         cb(Ok(values.clone()));
-
                                     }
                                     Err(Error::NotFound) => {
                                         println!("query error not found");
@@ -184,7 +187,7 @@ impl ThreadPool {
                                             index: kv.index,
                                             value: None,
                                         });
-                                        cb(Ok(values.clone()));                                        
+                                        cb(Ok(values.clone()));
                                     }
                                     Err(e) => {
                                         println!("query interal error: {:?}", e);
@@ -514,11 +517,10 @@ impl ThreadPool {
                                 db
                             );
 
-                            if thread_local_txn.is_none() {
-                                thread_local_txn = env.begin_rw_txn().ok();
-                            }
-
                             if keys[0].ware == Atom::from("") && keys[0].tab == Atom::from("") {
+                                if thread_local_txn.is_none() {
+                                    thread_local_txn = env.begin_rw_txn().ok();
+                                }
                                 // meta
                                 if let Some(_) = keys[1].value {
                                     match thread_local_txn.as_mut().unwrap().put(
@@ -551,6 +553,10 @@ impl ThreadPool {
                                 for kv in keys.iter() {
                                     let db_name = kv.tab.clone();
                                     let db = env.open_db(Some(&db_name.to_string())).ok();
+
+                                    if thread_local_txn.is_none() {
+                                        thread_local_txn = env.begin_rw_txn().ok();
+                                    }
 
                                     println!("modify get db name: dbi = {:?}, kv: {:?}", db, kv);
 
