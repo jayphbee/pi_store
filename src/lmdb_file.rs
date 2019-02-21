@@ -241,6 +241,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
+        println!("============= query ============== {:?}", arr);
         for v in arr.clone().iter() {
             if !self
                 .txns
@@ -280,6 +281,8 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
+        println!("============= modify ============== {:?}", arr);
+
         // this is an meta txn
         if arr[0].ware == Atom::from("") && arr[0].tab == Atom::from("") {
             self.is_meta_txn.store(true, SeqCst);
