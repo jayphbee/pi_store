@@ -552,7 +552,17 @@ impl ThreadPool {
                             } else {
                                 for kv in keys.iter() {
                                     let db_name = kv.tab.clone();
-                                    let db = env.open_db(Some(&db_name.to_string())).ok();
+                                    // let db = env.open_db(Some(&db_name.to_string())).ok();
+                                    let db = match env.open_db(Some(&db_name.to_string())) {
+                                        Ok(db) => Some(db),
+                                        Err(_) => Some(
+                                            env.create_db(
+                                                Some(&db_name.to_string()),
+                                                DatabaseFlags::empty(),
+                                            )
+                                            .unwrap(),
+                                        ),
+                                    };
 
                                     if thread_local_txn.is_none() {
                                         thread_local_txn = env.begin_rw_txn().ok();
@@ -568,10 +578,13 @@ impl ThreadPool {
                                             WriteFlags::empty(),
                                         ) {
                                             Ok(_) => {}
-                                            Err(e) => cb(Err(format!(
+                                            Err(e) => {
+                                                println!("modify error: {:?}", e);
+                                                cb(Err(format!(
                                                 "insert data error: {:?}",
                                                 e.to_string()
-                                            ))),
+                                                )));
+                                            }
                                         };
                                     } else {
                                         match thread_local_txn.as_mut().unwrap().del(
