@@ -48,14 +48,14 @@ impl KGLog {
 		self.log.read(guid, cb)
 	}
 	// 写入指定Guid对应的数据
-	pub fn write(&self, guid: Guid, data: Bin, st_key: u32, cb: Callback) -> SResult<()> {
-		self.log.write(guid, data, st_key, cb)
+	pub fn write(&self, guid: Guid, data: Bin, st_id: u32, cb: Callback) -> SResult<()> {
+		self.log.write(guid, data, st_id, cb)
 	}
 	// 列出所有可以读写的日志文件名
 	pub fn list_writes(&self) -> Vec<u64> {
 		self.log.list_writes()
 	}
-	// 列出所有可以读写的日志文件内的(guid: Guid, key: Bin, st_key: u32)
+	// 列出所有可以读写的日志文件内的(guid: Guid, key: Bin, st_id: u32)
 	pub fn list_writes_datas(&self) -> Vec<(u64, Vec<(Guid, Bin, u32)>)> {
 		vec![] // TODO
 	}
