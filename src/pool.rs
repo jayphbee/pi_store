@@ -1,5 +1,8 @@
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{bounded, unbounded, Sender};
+use std::collections::HashMap;
 use std::slice::from_raw_parts;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -36,6 +39,306 @@ pub enum LmdbMessage {
 }
 
 unsafe impl Send for LmdbMessage {}
+
+pub enum DbTabRWMessage {
+    Modify(u64, Arc<Vec<TabKV>>, TxCallback),
+    Commit(u64, TxCallback),
+    Rollback(u64, TxCallback),
+}
+
+unsafe impl Send for DbTabRWMessage {}
+
+pub enum DbTabMessage {
+    Query(Arc<Vec<TabKV>>, TxQueryCallback),
+    // commit message used to tell when to remove iterator
+    Commit(u64),
+    CreateItemIter(u64, bool, Option<Bin>, Sender<()>),
+    NextItem(u64, Arc<Fn(NextResult<(Bin, Bin)>)>),
+}
+
+unsafe impl Send for DbTabMessage {}
+
+#[derive(Debug)]
+pub struct DbWrite {
+    env: Arc<Environment>,
+    sender: Option<Sender<DbTabRWMessage>>,
+    modifications: Arc<Mutex<HashMap<u64, (Vec<Arc<Vec<TabKV>>>, u32)>>>,
+    should_abort: Arc<Mutex<HashMap<u64, bool>>>,
+}
+
+impl DbWrite {
+    pub fn new(env: Arc<Environment>) -> Self {
+        Self {
+            env,
+            sender: None,
+            modifications: Arc::new(Mutex::new(HashMap::new())),
+            should_abort: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn handle_write(&mut self) {
+        let env = self.env.clone();
+        let modifications = self.modifications.clone();
+        let should_abort = self.should_abort.clone();
+        let (tx, rx) = unbounded::<DbTabRWMessage>();
+
+        let _ = thread::Builder::new()
+            .name("lmdb_write_thread".to_owned())
+            .spawn(move || loop {
+                match rx.recv() {
+                    Ok(DbTabRWMessage::Modify(txid, mods, cb)) => {
+                        // batch write for one txn
+                        modifications
+                            .lock()
+                            .unwrap()
+                            .entry(txid)
+                            .and_modify(|(m, c)| {
+                                m.push(mods);
+                                *c += 1;
+                            });
+                        cb(Ok(()));
+                    }
+
+                    Ok(DbTabRWMessage::Commit(txid, cb)) => {
+                        let (modifies, count) =
+                            modifications.lock().unwrap().get(&txid).unwrap().clone();
+
+                        if count > 1 {
+                            modifications
+                                .lock()
+                                .unwrap()
+                                .entry(txid)
+                                .and_modify(|(_, c)| {
+                                    *c -= 1;
+                                });
+                            // TODO: commit maybe deadlock here
+                            cb(Ok(()));
+                        } else {
+                            let mut txn = env.begin_rw_txn().unwrap();
+
+                            for mods in modifies.iter() {
+                                for m in mods.iter() {
+                                    // this db should be opened previously, or this is a bug
+                                    let db = OPENED_TABLES
+                                        .lock()
+                                        .unwrap()
+                                        .get(&m.tab.get_hash())
+                                        .unwrap()
+                                        .clone();
+
+                                    // value is some, insert data
+                                    if m.value.is_some() {
+                                        match txn.put(
+                                            db,
+                                            m.key.as_ref(),
+                                            m.value.clone().unwrap().as_ref(),
+                                            WriteFlags::empty(),
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(e) => cb(Err(format!(
+                                                "lmdb internal insert data error: {:?}",
+                                                e.to_string()
+                                            ))),
+                                        }
+                                    // value is None, delete data
+                                    } else {
+                                        match txn.del(db, m.key.as_ref(), None) {
+                                            Ok(_) => {}
+                                            Err(Error::NotFound) => {
+                                                // TODO: when not found?
+                                            }
+                                            Err(e) => cb(Err(format!(
+                                                "delete data error: {:?}",
+                                                e.to_string()
+                                            ))),
+                                        }
+                                    }
+                                }
+                            }
+
+                            if should_abort.lock().unwrap().get(&txid).is_some() {
+                                txn.abort();
+                                cb(Ok(()))
+                            } else {
+                                match txn.commit() {
+                                    Ok(_) => {
+                                        cb(Ok(()));
+                                    }
+                                    Err(e) => cb(Err(format!(
+                                        "commit failed with error: {:?}",
+                                        e.to_string()
+                                    ))),
+                                }
+                            }
+
+                            // remove txid from cache
+                            modifications.lock().unwrap().remove(&txid);
+                        }
+                    }
+
+                    Ok(DbTabRWMessage::Rollback(txid, cb)) => {
+                        if modifications.lock().unwrap().contains_key(&txid) {
+                            should_abort.lock().unwrap().entry(txid).and_modify(|v| {
+                                *v = true;
+                            });
+                            cb(Ok(()));
+                        }
+                    }
+
+                    Err(e) => {}
+                }
+            });
+
+        self.sender = Some(tx);
+    }
+
+    pub fn get_sender(&self) -> Option<Sender<DbTabRWMessage>> {
+        self.sender.clone()
+    }
+}
+
+#[derive(Debug)]
+pub struct DbTabPool {
+    env: Arc<Environment>,
+    tab_sender_map: HashMap<u64, Sender<DbTabMessage>>,
+    iterators: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
+}
+
+impl DbTabPool {
+    pub fn new(env: Arc<Environment>) -> Self {
+        Self {
+            env,
+            tab_sender_map: HashMap::new(),
+            iterators: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn create_tab(&mut self, tab: Atom) {
+        let env = self.env.clone();
+        let iters = self.iterators.clone();
+
+        OPENED_TABLES
+            .lock()
+            .unwrap()
+            .entry(tab.get_hash())
+            .or_insert_with(|| {
+                env.create_db(Some(&tab.to_string()), DatabaseFlags::empty())
+                    .unwrap()
+            });
+
+        self.tab_sender_map
+            .entry(tab.get_hash())
+            .or_insert_with(|| {
+                let (tx, rx) = unbounded();
+
+                let _ = thread::Builder::new()
+                    .name(format!("lmdb_read_{}", tab.get_hash()))
+                    .spawn(move || {
+                        let db = env
+                            .create_db(Some(&tab.to_string()), DatabaseFlags::empty())
+                            .unwrap();
+                        loop {
+                            // handle channel message
+                            match rx.recv() {
+                                Ok(DbTabMessage::Query(queries, cb)) => {
+                                    let mut qr = vec![];
+                                    let mut query_error = false;
+                                    let txn = env.begin_ro_txn().unwrap();
+                                    for q in queries.iter() {
+                                        match txn.get(db, q.key.as_ref()) {
+                                            Ok(v) => {
+                                                qr.push(TabKV {
+                                                    ware: q.ware.clone(),
+                                                    tab: q.tab.clone(),
+                                                    key: q.key.clone(),
+                                                    index: q.index,
+                                                    value: Some(Arc::new(Vec::from(v))),
+                                                });
+                                            }
+
+                                            Err(Error::NotFound) => {
+                                                qr.push(TabKV {
+                                                    ware: q.ware.clone(),
+                                                    tab: q.tab.clone(),
+                                                    key: q.key.clone(),
+                                                    index: q.index,
+                                                    value: None,
+                                                });
+                                            }
+
+                                            Err(_) => {
+                                                query_error = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let _ = txn.commit().unwrap();
+
+                                    if query_error {
+                                        cb(Err(format!("lmdb query internal error")));
+                                    } else {
+                                        cb(Ok(qr));
+                                    }
+                                }
+
+                                Ok(DbTabMessage::CreateItemIter(txid, desc, key, sender)) => {
+                                    // create iter
+                                    iters.lock().unwrap().entry(txid).or_insert((key, desc));
+                                    let _ = sender.send(()).unwrap();
+                                }
+
+                                Ok(DbTabMessage::NextItem(txid, cb)) => {
+                                    // check if txid exist, if not return None
+                                    let iter = iters.lock().unwrap().get(&txid).unwrap().clone();
+                                    let txn = env.begin_ro_txn().unwrap();
+                                    let cursor = txn.open_ro_cursor(db).unwrap();
+
+                                    // let start_key = iter.0.clone().unwrap().as_ref();
+
+                                    match cursor.get(Some(b"foo"), None, MDB_NEXT) {
+                                        Ok(val) => {
+                                            // refresh stark key
+                                            iters.lock().unwrap().insert(
+                                                txid,
+                                                (Some(Arc::new(val.0.unwrap().to_vec())), iter.1),
+                                            );
+                                            cb(Ok(Some((
+                                                Arc::new(val.0.unwrap().to_vec()),
+                                                Arc::new(val.1.to_vec()),
+                                            ))));
+                                        }
+
+                                        Err(Error::NotFound) => cb(Ok(None)),
+
+                                        Err(e) => cb(Err(format!(
+                                            "cursor get error: {:?}",
+                                            e.to_string()
+                                        ))),
+                                    }
+
+                                    std::mem::drop(cursor);
+                                    let _ = txn.commit().unwrap();
+                                }
+
+                                Ok(DbTabMessage::Commit(txid)) => {
+                                    // remove iterator for this txid
+                                    iters.lock().unwrap().remove(&txid);
+                                }
+
+                                Err(_) => {}
+                            }
+                        }
+                    });
+                tx
+            });
+    }
+
+    pub fn get_sender(&self, tab: Atom) -> Option<Sender<DbTabMessage>> {
+        self.tab_sender_map
+            .get(&tab.get_hash())
+            .map(|sender| sender.clone())
+    }
+}
 
 #[derive(Debug)]
 pub struct ThreadPool {
@@ -145,12 +448,6 @@ impl ThreadPool {
                             );
                             let mut values = Vec::new();
 
-                            if thread_local_txn.is_none() {
-                                println!("before create rw txn..............");
-                                thread_local_txn = env.begin_rw_txn().ok();
-                                println!("after create rw txn");
-                            }
-
                             for kv in keys.iter() {
                                 let db_name = kv.tab.clone();
 
@@ -161,6 +458,12 @@ impl ThreadPool {
                                     db,
                                     kv.key.as_ref()
                                 );
+
+                                if thread_local_txn.is_none() {
+                                    println!("before create rw txn..............");
+                                    thread_local_txn = env.begin_rw_txn().ok();
+                                    println!("after create rw txn");
+                                }
 
                                 match thread_local_txn
                                     .as_ref()
@@ -510,18 +813,18 @@ impl ThreadPool {
                         }
 
                         Ok(LmdbMessage::Modify(keys, cb)) => {
-                            println!(
-                                "enter thread pool modify: keys = {:?}, len = {:?}, db = {:?}",
-                                keys,
-                                keys.len(),
-                                db
-                            );
-
                             if keys[0].ware == Atom::from("") && keys[0].tab == Atom::from("") {
                                 if thread_local_txn.is_none() {
                                     thread_local_txn = env.begin_rw_txn().ok();
                                 }
-                                // meta
+
+                                println!(
+                                    "enter thread pool modify: keys = {:?}, len = {:?}, db = {:?}",
+                                    keys,
+                                    keys.len(),
+                                    db
+                                );
+                                // meta ?   write to $_sinfo
                                 if let Some(_) = keys[1].value {
                                     match thread_local_txn.as_mut().unwrap().put(
                                         db.clone().unwrap(),
@@ -552,23 +855,28 @@ impl ThreadPool {
                             } else {
                                 for kv in keys.iter() {
                                     let db_name = kv.tab.clone();
-                                    // let db = env.open_db(Some(&db_name.to_string())).ok();
-                                    let db = match env.open_db(Some(&db_name.to_string())) {
-                                        Ok(db) => Some(db),
-                                        Err(_) => Some(
-                                            env.create_db(
-                                                Some(&db_name.to_string()),
-                                                DatabaseFlags::empty(),
-                                            )
-                                            .unwrap(),
-                                        ),
-                                    };
+                                    let db = env.open_db(Some(&db_name.to_string())).ok();
+                                    // let db = match env.open_db(Some(&db_name.to_string())) {
+                                    //     Ok(db) => Some(db),
+                                    //     Err(_) => Some(
+                                    //         env.create_db(
+                                    //             Some(&db_name.to_string()),
+                                    //             DatabaseFlags::empty(),
+                                    //         )
+                                    //         .unwrap(),
+                                    //     ),
+                                    // };
 
                                     if thread_local_txn.is_none() {
                                         thread_local_txn = env.begin_rw_txn().ok();
                                     }
 
-                                    println!("modify get db name: dbi = {:?}, kv: {:?}", db, kv);
+                                    println!(
+                                        "modify get db name: dbi = {:?}, kv: {:?}, len={:?}",
+                                        db,
+                                        kv,
+                                        keys.len()
+                                    );
 
                                     if let Some(_) = kv.value {
                                         match thread_local_txn.as_mut().unwrap().put(
@@ -581,8 +889,8 @@ impl ThreadPool {
                                             Err(e) => {
                                                 println!("modify error: {:?}", e);
                                                 cb(Err(format!(
-                                                "insert data error: {:?}",
-                                                e.to_string()
+                                                    "insert data error: {:?}",
+                                                    e.to_string()
                                                 )));
                                             }
                                         };
@@ -670,4 +978,7 @@ impl ThreadPool {
 lazy_static! {
     pub static ref THREAD_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new()));
     pub static ref NO_OP_POOL: Arc<Mutex<NopPool>> = Arc::new(Mutex::new(NopPool::new()));
+
+    // all opened dbs in this env
+    static ref OPENED_TABLES: Arc<Mutex<HashMap<u64, Database>>> = Arc::new(Mutex::new(HashMap::new()));
 }
