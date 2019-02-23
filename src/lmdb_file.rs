@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering::{SeqCst};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{bounded, unbounded, Sender};
 
 use atom::Atom;
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
@@ -17,9 +17,11 @@ use sinfo::EnumType;
 
 use pi_db::tabs::{TabLog, Tabs};
 
-use lmdb::{Cursor, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
+use lmdb::{
+    Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags,
+};
 
-use pool::{LmdbMessage, THREAD_POOL, NO_OP_POOL, NopMessage};
+use pool::{LmdbMessage, NopMessage, NO_OP_POOL, THREAD_POOL};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
@@ -172,7 +174,7 @@ impl Txn for LmdbTableTxn {
                 Some(sender) => {
                     let _ = sender.send(NopMessage::Nop(cb));
                     self.no_op_senders.lock().unwrap().push(sender);
-                },
+                }
 
                 None => return Some(Err("Can't get no op sender".to_string())),
             }
@@ -210,11 +212,10 @@ impl Txn for LmdbTableTxn {
                 Some(sender) => {
                     let _ = sender.send(NopMessage::Nop(cb));
                     self.no_op_senders.lock().unwrap().push(sender);
-                },
+                }
 
                 None => return Some(Err("Can't get no op sender".to_string())),
             }
-            
         }
 
         None
@@ -279,7 +280,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        println!("============= modify ============== {:?}", arr);
+        println!("============= query ============== {:?}", arr);
 
         // this is an meta txn
         if arr[0].ware == Atom::from("") && arr[0].tab == Atom::from("") {
