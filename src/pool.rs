@@ -1133,4 +1133,7 @@ lazy_static! {
 
     // all opened dbs in this env
     static ref OPENED_TABLES: Arc<Mutex<HashMap<u64, Database>>> = Arc::new(Mutex::new(HashMap::new()));
+    
+    pub static ref DB_TAB_READ_POOL: Arc<Mutex<DbTabReadPool>> = Arc::new(Mutex::new(DbTabReadPool::new()));
+    pub static ref DB_TAB_WRITE: Arc<Mutex<DbTabWrite>> = Arc::new(Mutex::new(DbTabWrite::new()));
 }
