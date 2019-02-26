@@ -48,7 +48,7 @@ pub enum DbTabRWMessage {
 
 unsafe impl Send for DbTabRWMessage {}
 
-pub enum DbTabMessage {
+pub enum DbTabROMessage {
     Query(Arc<Vec<TabKV>>, TxQueryCallback),
     // commit message used to tell when to remove iterator
     Commit(u64),
@@ -56,17 +56,17 @@ pub enum DbTabMessage {
     NextItem(u64, Arc<Fn(NextResult<(Bin, Bin)>)>),
 }
 
-unsafe impl Send for DbTabMessage {}
+unsafe impl Send for DbTabROMessage {}
 
 #[derive(Debug)]
-pub struct DbWrite {
+pub struct DbTabWrite {
     env: Arc<Environment>,
     sender: Option<Sender<DbTabRWMessage>>,
     modifications: Arc<Mutex<HashMap<u64, (Vec<Arc<Vec<TabKV>>>, u32)>>>,
     must_abort: Arc<Mutex<HashMap<u64, bool>>>,
 }
 
-impl DbWrite {
+impl DbTabWrite {
     pub fn new(env: Arc<Environment>) -> Self {
         Self {
             env,
@@ -198,13 +198,13 @@ impl DbWrite {
 }
 
 #[derive(Debug)]
-pub struct DbTabPool {
+pub struct DbTabReadPool {
     env: Arc<Environment>,
-    tab_sender_map: Arc<Mutex<HashMap<u64, Sender<DbTabMessage>>>>,
+    tab_sender_map: Arc<Mutex<HashMap<u64, Sender<DbTabROMessage>>>>,
     tab_iters: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
 }
 
-impl DbTabPool {
+impl DbTabReadPool {
     pub fn new(env: Arc<Environment>) -> Self {
         Self {
             env,
@@ -242,7 +242,7 @@ impl DbTabPool {
                         loop {
                             // handle channel message
                             match rx.recv() {
-                                Ok(DbTabMessage::Query(queries, cb)) => {
+                                Ok(DbTabROMessage::Query(queries, cb)) => {
                                     let mut qr = vec![];
                                     let mut query_error = false;
                                     let txn = env.begin_ro_txn().unwrap();
@@ -283,7 +283,7 @@ impl DbTabPool {
                                     }
                                 }
 
-                                Ok(DbTabMessage::CreateItemIter(txid, desc, key, sender)) => {
+                                Ok(DbTabROMessage::CreateItemIter(txid, desc, key, sender)) => {
                                     let txn = env.begin_ro_txn().unwrap();
                                     let cursor = txn.open_ro_cursor(db).unwrap();
                                     // full iterataion
@@ -358,7 +358,7 @@ impl DbTabPool {
                                     let _ = sender.send(()).unwrap();
                                 }
 
-                                Ok(DbTabMessage::NextItem(txid, cb)) => {
+                                Ok(DbTabROMessage::NextItem(txid, cb)) => {
                                     let (cur_key, desc) =
                                         tab_iters.lock().unwrap().get(&txid).unwrap().clone();
                                     let txn = env.begin_ro_txn().unwrap();
@@ -462,7 +462,7 @@ impl DbTabPool {
                                     let _ = txn.commit().unwrap();
                                 }
 
-                                Ok(DbTabMessage::Commit(txid)) => {
+                                Ok(DbTabROMessage::Commit(txid)) => {
                                     // remove iterator for this txid
                                     tab_iters.lock().unwrap().remove(&txid);
                                 }
@@ -475,7 +475,7 @@ impl DbTabPool {
             });
     }
 
-    pub fn get_sender(&self, tab: Atom) -> Option<Sender<DbTabMessage>> {
+    pub fn get_sender(&self, tab: Atom) -> Option<Sender<DbTabROMessage>> {
         self.tab_sender_map
             .lock()
             .unwrap()
