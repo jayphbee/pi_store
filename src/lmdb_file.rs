@@ -107,20 +107,20 @@ impl Txn for LmdbTableTxn {
             }),
         ));
 
-        // commit ro txn
-        DB_TAB_READ_POOL.lock().unwrap().commit_ro_txn(
-            self.id,
-            Arc::new(move |c| match c {
-                Ok(_) => {
-                    *state2.lock().unwrap() = TxState::Commited;
-                    cb2(Ok(()));
-                }
-                Err(e) => {
-                    *state2.lock().unwrap() = TxState::CommitFail;
-                    cb2(Err(e.to_string()));
-                }
-            }),
-        );
+        // // commit ro txn
+        // DB_TAB_READ_POOL.lock().unwrap().commit_ro_txn(
+        //     self.id,
+        //     Arc::new(move |c| match c {
+        //         Ok(_) => {
+        //             *state2.lock().unwrap() = TxState::Commited;
+        //             cb2(Ok(()));
+        //         }
+        //         Err(e) => {
+        //             *state2.lock().unwrap() = TxState::CommitFail;
+        //             cb2(Err(e.to_string()));
+        //         }
+        //     }),
+        // );
 
         None
     }
@@ -185,14 +185,20 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
-        for q in arr.clone().iter() {
-            let sender = DB_TAB_READ_POOL
-                .lock()
-                .unwrap()
-                .get_sender(q.clone().tab)
-                .unwrap();
-            sender.send(DbTabROMessage::Query(arr.clone(), cb.clone()));
-        }
+        let sender = DB_TAB_READ_POOL
+            .lock()
+            .unwrap()
+            .get_sender(arr[0].tab.clone())
+            .unwrap();
+            
+        sender.send(DbTabROMessage::Query(
+            arr,
+            Arc::new(move |q| match q {
+                Ok(v) => cb(Ok(v)),
+                Err(e) => cb(Err(e.to_string())),
+            }),
+        ));
+
         None
     }
 
@@ -204,9 +210,15 @@ impl TabTxn for LmdbTableTxn {
         cb: TxCallback,
     ) -> DBResult {
         let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
-        for m in arr.clone().iter() {
-            sender.send(DbTabRWMessage::Modify(self.id, arr.clone(), cb.clone()));
-        }
+        sender.send(DbTabRWMessage::Modify(
+            self.id,
+            arr,
+            Arc::new(move |m| match m {
+                Ok(_) => cb(Ok(())),
+                Err(e) => cb(Err(e.to_string())),
+            }),
+        ));
+
         None
     }
 
