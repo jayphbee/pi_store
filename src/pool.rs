@@ -60,24 +60,28 @@ unsafe impl Send for DbTabROMessage {}
 
 #[derive(Debug)]
 pub struct DbTabWrite {
-    env: Arc<Environment>,
+    env: Option<Arc<Environment>>,
     sender: Option<Sender<DbTabRWMessage>>,
     modifications: Arc<Mutex<HashMap<u64, (Vec<Arc<Vec<TabKV>>>, u32)>>>,
     must_abort: Arc<Mutex<HashMap<u64, bool>>>,
 }
 
 impl DbTabWrite {
-    pub fn new(env: Arc<Environment>) -> Self {
+    pub fn new() -> Self {
         Self {
-            env,
+            env: None,
             sender: None,
             modifications: Arc::new(Mutex::new(HashMap::new())),
             must_abort: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    pub fn set_env(&mut self, env: Arc<Environment>) {
+        self.env = Some(env);
+    }
+
     pub fn handle_write(&mut self) {
-        let env = self.env.clone();
+        let env = self.env.clone().unwrap();
         let modifications = self.modifications.clone();
         let must_abort = self.must_abort.clone();
         let (tx, rx) = unbounded::<DbTabRWMessage>();
@@ -199,22 +203,26 @@ impl DbTabWrite {
 
 #[derive(Debug)]
 pub struct DbTabReadPool {
-    env: Arc<Environment>,
+    env: Option<Arc<Environment>>,
     tab_sender_map: Arc<Mutex<HashMap<u64, Sender<DbTabROMessage>>>>,
     tab_iters: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
 }
 
 impl DbTabReadPool {
-    pub fn new(env: Arc<Environment>) -> Self {
+    pub fn new() -> Self {
         Self {
-            env,
+            env: None,
             tab_sender_map: Arc::new(Mutex::new(HashMap::new())),
             tab_iters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    pub fn set_env(&mut self, env: Arc<Environment>) {
+        self.env = Some(env);
+    }
+
     pub fn create_tab(&mut self, tab: Atom) {
-        let env = self.env.clone();
+        let env = self.env.clone().unwrap();
         let tab_iters = self.tab_iters.clone();
 
         OPENED_TABLES
