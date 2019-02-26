@@ -25,7 +25,6 @@ use lmdb::{
 
 use pool::{
     DbTabROMessage, DbTabRWMessage, LmdbMessage, NopMessage, DB_TAB_READ_POOL, DB_TAB_WRITE,
-    NO_OP_POOL, THREAD_POOL,
 };
 
 const SINFO: &str = "_$sinfo";
@@ -57,7 +56,7 @@ impl Tab for LmdbTable {
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
         let t = Arc::new(LmdbTableTxn {
             id: id.time(),
-            _writable: writable,
+            writable: writable,
             state: Arc::new(Mutex::new(TxState::Ok)),
         });
 
@@ -67,7 +66,7 @@ impl Tab for LmdbTable {
 
 pub struct LmdbTableTxn {
     id: u64,
-    _writable: bool,
+    writable: bool,
     state: Arc<Mutex<TxState>>,
 }
 
@@ -87,51 +86,82 @@ impl Txn for LmdbTableTxn {
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
         *self.state.lock().unwrap() = TxState::Committing;
-        let state = self.state.clone();
+        let state1 = self.state.clone();
+        let state2 = self.state.clone();
+        let cb1 = cb.clone();
+        let cb2 = cb.clone();
 
+        // commit rw txn
         let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
         sender.send(DbTabRWMessage::Commit(
             self.id,
             Arc::new(move |c| match c {
                 Ok(_) => {
-                    *state.lock().unwrap() = TxState::Commited;
-                    cb(Ok(()));
+                    *state1.lock().unwrap() = TxState::Commited;
+                    cb1(Ok(()));
                 }
                 Err(e) => {
-                    *state.lock().unwrap() = TxState::CommitFail;
-                    cb(Err(e.to_string()));
+                    *state1.lock().unwrap() = TxState::CommitFail;
+                    cb1(Err(e.to_string()));
                 }
             }),
         ));
+
+        // commit ro txn
+        DB_TAB_READ_POOL.lock().unwrap().commit_ro_txn(
+            self.id,
+            Arc::new(move |c| match c {
+                Ok(_) => {
+                    *state2.lock().unwrap() = TxState::Commited;
+                    cb2(Ok(()));
+                }
+                Err(e) => {
+                    *state2.lock().unwrap() = TxState::CommitFail;
+                    cb2(Err(e.to_string()));
+                }
+            }),
+        );
 
         None
     }
 
     fn rollback(&self, cb: TxCallback) -> DBResult {
         *self.state.lock().unwrap() = TxState::Rollbacking;
-        let state = self.state.clone();
+        let state1 = self.state.clone();
+        let state2 = self.state.clone();
+        let cb1 = cb.clone();
+        let cb2 = cb.clone();
 
-        if self.txns.lock().unwrap().len() <= 1 {
-            match self.sender.clone() {
-                Some(tx) => {
-                    let _ = tx.send(LmdbMessage::Rollback(Arc::new(move |r| match r {
-                        Ok(_) => {
-                            *state.lock().unwrap() = TxState::Rollbacked;
-                            cb(Ok(()));
-                        }
-                        Err(e) => {
-                            *state.lock().unwrap() = TxState::RollbackFail;
-                            cb(Err(e.to_string()));
-                        }
-                    })));
+        // commit rw txn
+        let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
+        sender.send(DbTabRWMessage::Commit(
+            self.id,
+            Arc::new(move |c| match c {
+                Ok(_) => {
+                    *state1.lock().unwrap() = TxState::Rollbacked;
+                    cb1(Ok(()));
                 }
-                None => {
-                    return Some(Err("Can't get sender".to_string()));
+                Err(e) => {
+                    *state1.lock().unwrap() = TxState::RollbackFail;
+                    cb1(Err(e.to_string()));
                 }
-            }
-        } else {
-            let _ = self.txns.lock().unwrap().pop();
-        }
+            }),
+        ));
+
+        // commit ro txn
+        DB_TAB_READ_POOL.lock().unwrap().rollback_ro_txn(
+            self.id,
+            Arc::new(move |c| match c {
+                Ok(_) => {
+                    *state2.lock().unwrap() = TxState::Rollbacked;
+                    cb2(Ok(()));
+                }
+                Err(e) => {
+                    *state2.lock().unwrap() = TxState::RollbackFail;
+                    cb2(Err(e.to_string()));
+                }
+            }),
+        );
 
         None
     }
@@ -156,8 +186,12 @@ impl TabTxn for LmdbTableTxn {
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
         for q in arr.clone().iter() {
-            let sender = DB_TAB_READ_POOL.lock().unwrap().get_sender(q.tab).unwrap();
-            sender.send(DbTabROMessage::Query(arr, cb));
+            let sender = DB_TAB_READ_POOL
+                .lock()
+                .unwrap()
+                .get_sender(q.clone().tab)
+                .unwrap();
+            sender.send(DbTabROMessage::Query(arr.clone(), cb.clone()));
         }
         None
     }
@@ -171,7 +205,7 @@ impl TabTxn for LmdbTableTxn {
     ) -> DBResult {
         let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
         for m in arr.clone().iter() {
-            sender.send(DbTabRWMessage::Modify(self.id, arr, cb));
+            sender.send(DbTabRWMessage::Modify(self.id, arr.clone(), cb.clone()));
         }
         None
     }
@@ -305,22 +339,7 @@ impl MetaTxn for LmdbMetaTxn {
             value: value,
         };
 
-        self.0.modify(
-            Arc::new(vec![
-                // placeholder for meta txn
-                TabKV {
-                    ware: Atom::from(""),
-                    tab: Atom::from(""),
-                    key: Arc::new(Vec::new()),
-                    index: 0,
-                    value: None,
-                },
-                tabkv,
-            ]),
-            None,
-            false,
-            cb,
-        )
+        self.0.modify(Arc::new(vec![tabkv]), None, false, cb)
     }
 
     // 快照拷贝表
@@ -388,11 +407,9 @@ impl DB {
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
-        THREAD_POOL.lock().unwrap().start_pool(32, env.clone());
-        NO_OP_POOL.lock().unwrap().start_nop_pool(32);
-
         DB_TAB_READ_POOL.lock().unwrap().set_env(env.clone());
         DB_TAB_WRITE.lock().unwrap().set_env(env.clone());
+        DB_TAB_WRITE.lock().unwrap().handle_write();
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
