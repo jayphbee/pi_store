@@ -200,7 +200,7 @@ impl DbWrite {
 #[derive(Debug)]
 pub struct DbTabPool {
     env: Arc<Environment>,
-    tab_sender_map: HashMap<u64, Sender<DbTabMessage>>,
+    tab_sender_map: Arc<Mutex<HashMap<u64, Sender<DbTabMessage>>>>,
     tab_iters: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
 }
 
@@ -208,7 +208,7 @@ impl DbTabPool {
     pub fn new(env: Arc<Environment>) -> Self {
         Self {
             env,
-            tab_sender_map: HashMap::new(),
+            tab_sender_map: Arc::new(Mutex::new(HashMap::new())),
             tab_iters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -227,6 +227,8 @@ impl DbTabPool {
             });
 
         self.tab_sender_map
+            .lock()
+            .unwrap()
             .entry(tab.get_hash())
             .or_insert_with(|| {
                 let (tx, rx) = unbounded();
@@ -407,7 +409,7 @@ impl DbTabPool {
 
                                                 Err(_) => {}
                                             }
-                                        } 
+                                        }
                                     // from bottom to top
                                     } else {
                                         if cur_key.is_none() {
@@ -475,6 +477,8 @@ impl DbTabPool {
 
     pub fn get_sender(&self, tab: Atom) -> Option<Sender<DbTabMessage>> {
         self.tab_sender_map
+            .lock()
+            .unwrap()
             .get(&tab.get_hash())
             .map(|sender| sender.clone())
     }
