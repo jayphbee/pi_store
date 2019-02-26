@@ -50,8 +50,6 @@ unsafe impl Send for DbTabRWMessage {}
 
 pub enum DbTabROMessage {
     Query(Arc<Vec<TabKV>>, TxQueryCallback),
-    // commit message used to tell when to remove iterator
-    Commit(u64),
     CreateItemIter(u64, bool, Option<Bin>, Sender<()>),
     NextItem(u64, Arc<Fn(NextResult<(Bin, Bin)>)>),
 }
@@ -91,19 +89,34 @@ impl DbTabWrite {
             .spawn(move || loop {
                 match rx.recv() {
                     Ok(DbTabRWMessage::Modify(txid, mods, cb)) => {
+                        dbg!(txid);
                         // batch write for one txn
                         modifications
                             .lock()
                             .unwrap()
                             .entry(txid)
                             .and_modify(|(m, c)| {
-                                m.push(mods);
+                                m.push(mods.clone());
                                 *c += 1;
+                            })
+                            .or_insert((vec![mods.clone()], 1));
+
+                        OPENED_TABLES
+                            .lock()
+                            .unwrap()
+                            .entry(mods[0].tab.get_hash())
+                            .or_insert_with(|| {
+                                env.create_db(
+                                    Some(&mods[0].tab.to_string()),
+                                    DatabaseFlags::empty(),
+                                )
+                                .unwrap()
                             });
                         cb(Ok(()));
                     }
 
                     Ok(DbTabRWMessage::Commit(txid, cb)) => {
+                        println!("commit txid: {:?}", txid);
                         let (modifies, count) =
                             modifications.lock().unwrap().get(&txid).unwrap().clone();
 
@@ -132,6 +145,7 @@ impl DbTabWrite {
 
                                     // value is some, insert data
                                     if m.value.is_some() {
+                                        println!("insert data ....");
                                         match txn.put(
                                             db,
                                             m.key.as_ref(),
@@ -146,6 +160,8 @@ impl DbTabWrite {
                                         }
                                     // value is None, delete data
                                     } else {
+                                        println!("delete data ....");
+
                                         match txn.del(db, m.key.as_ref(), None) {
                                             Ok(_) => {}
                                             Err(Error::NotFound) => {
@@ -160,13 +176,18 @@ impl DbTabWrite {
                                 }
                             }
 
+                            println!("before commit .....");
                             if must_abort.lock().unwrap().get(&txid).is_some() {
+                                println!("aborting ....");
                                 txn.abort();
                                 cb(Ok(()))
                             } else {
                                 match txn.commit() {
                                     Ok(_) => {
+                                        println!("before commit cb");
                                         cb(Ok(()));
+                                        println!("after commit cb");
+
                                     }
                                     Err(e) => cb(Err(format!(
                                         "commit failed with error: {:?}",
@@ -174,6 +195,7 @@ impl DbTabWrite {
                                     ))),
                                 }
                             }
+                            println!("after commit ....");
 
                             // remove txid from cache
                             modifications.lock().unwrap().remove(&txid);
@@ -470,11 +492,6 @@ impl DbTabReadPool {
                                     let _ = txn.commit().unwrap();
                                 }
 
-                                Ok(DbTabROMessage::Commit(txid)) => {
-                                    // remove iterator for this txid
-                                    tab_iters.lock().unwrap().remove(&txid);
-                                }
-
                                 Err(_) => {}
                             }
                         }
@@ -489,6 +506,20 @@ impl DbTabReadPool {
             .unwrap()
             .get(&tab.get_hash())
             .map(|sender| sender.clone())
+    }
+
+    pub fn commit_ro_txn(&self, txid: u64, cb: TxCallback) {
+        let tab_iters = self.tab_iters.clone();
+        // remove iterator for this txid
+        tab_iters.lock().unwrap().remove(&txid);
+        cb(Ok(()))
+    }
+
+    pub fn rollback_ro_txn(&self, txid: u64, cb: TxCallback) {
+        let tab_iters = self.tab_iters.clone();
+        // remove iterator for this txid
+        tab_iters.lock().unwrap().remove(&txid);
+        cb(Ok(()))
     }
 }
 
@@ -1133,7 +1164,7 @@ lazy_static! {
 
     // all opened dbs in this env
     static ref OPENED_TABLES: Arc<Mutex<HashMap<u64, Database>>> = Arc::new(Mutex::new(HashMap::new()));
-    
+
     pub static ref DB_TAB_READ_POOL: Arc<Mutex<DbTabReadPool>> = Arc::new(Mutex::new(DbTabReadPool::new()));
     pub static ref DB_TAB_WRITE: Arc<Mutex<DbTabWrite>> = Arc::new(Mutex::new(DbTabWrite::new()));
 }
