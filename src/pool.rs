@@ -282,38 +282,178 @@ impl DbTabPool {
                                 }
 
                                 Ok(DbTabMessage::CreateItemIter(txid, desc, key, sender)) => {
-                                    // create iter
-                                    tab_iters.lock().unwrap().entry(txid).or_insert((key, desc));
+                                    let txn = env.begin_ro_txn().unwrap();
+                                    let cursor = txn.open_ro_cursor(db).unwrap();
+                                    // full iterataion
+                                    if key.is_none() {
+                                        if desc {
+                                            match cursor.get(None, None, MDB_FIRST) {
+                                                Ok(val) => {
+                                                    // save the first record key
+                                                    tab_iters
+                                                        .lock()
+                                                        .unwrap()
+                                                        .entry(txid)
+                                                        .or_insert((
+                                                            Some(Arc::new(val.0.unwrap().to_vec())),
+                                                            desc,
+                                                        ));
+                                                }
+                                                Err(Error::NotFound) => {
+                                                    tab_iters
+                                                        .lock()
+                                                        .unwrap()
+                                                        .entry(txid)
+                                                        .or_insert((None, desc));
+                                                }
+                                                Err(_) => {}
+                                            }
+                                        } else {
+                                            match cursor.get(None, None, MDB_LAST) {
+                                                Ok(val) => {
+                                                    // save the last record key
+                                                    tab_iters
+                                                        .lock()
+                                                        .unwrap()
+                                                        .entry(txid)
+                                                        .or_insert((
+                                                            Some(Arc::new(val.0.unwrap().to_vec())),
+                                                            desc,
+                                                        ));
+                                                }
+                                                Err(Error::NotFound) => {
+                                                    tab_iters
+                                                        .lock()
+                                                        .unwrap()
+                                                        .entry(txid)
+                                                        .or_insert((None, desc));
+                                                }
+                                                Err(_) => {}
+                                            }
+                                        }
+                                    // partial iteration
+                                    } else {
+                                        match cursor.get(Some(key.unwrap().as_ref()), None, MDB_SET)
+                                        {
+                                            // save the current key
+                                            Ok(val) => {
+                                                tab_iters.lock().unwrap().entry(txid).or_insert((
+                                                    Some(Arc::new(val.0.unwrap().to_vec())),
+                                                    desc,
+                                                ));
+                                            }
+                                            Err(Error::NotFound) => {
+                                                tab_iters
+                                                    .lock()
+                                                    .unwrap()
+                                                    .entry(txid)
+                                                    .or_insert((None, desc));
+                                            }
+                                            Err(_) => {}
+                                        }
+                                    }
+
                                     let _ = sender.send(()).unwrap();
                                 }
 
                                 Ok(DbTabMessage::NextItem(txid, cb)) => {
-                                    // check if txid exist, if not return None
-                                    let iter = tab_iters.lock().unwrap().get(&txid).unwrap().clone();
+                                    let (cur_key, desc) =
+                                        tab_iters.lock().unwrap().get(&txid).unwrap().clone();
                                     let txn = env.begin_ro_txn().unwrap();
                                     let cursor = txn.open_ro_cursor(db).unwrap();
 
-                                    // let start_key = iter.0.clone().unwrap().as_ref();
+                                    // from top to bottom
+                                    if desc {
+                                        if cur_key.is_none() {
+                                            cb(Ok(None));
+                                        } else {
+                                            match cursor.get(
+                                                Some(cur_key.clone().unwrap().as_ref()),
+                                                None,
+                                                MDB_SET,
+                                            ) {
+                                                Ok(val) => cb(Ok(Some((
+                                                    cur_key.clone().unwrap(),
+                                                    Arc::new(val.1.to_vec()),
+                                                )))),
 
-                                    match cursor.get(Some(b"foo"), None, MDB_NEXT) {
-                                        Ok(val) => {
-                                            // refresh stark key
-                                            tab_iters.lock().unwrap().insert(
-                                                txid,
-                                                (Some(Arc::new(val.0.unwrap().to_vec())), iter.1),
-                                            );
-                                            cb(Ok(Some((
-                                                Arc::new(val.0.unwrap().to_vec()),
-                                                Arc::new(val.1.to_vec()),
-                                            ))));
+                                                Err(Error::NotFound) => {}
+
+                                                Err(_) => {}
+                                            }
+
+                                            // get next key
+                                            match cursor.get(
+                                                Some(cur_key.clone().unwrap().as_ref()),
+                                                None,
+                                                MDB_NEXT,
+                                            ) {
+                                                Ok(val) => {
+                                                    tab_iters.lock().unwrap().insert(
+                                                        txid,
+                                                        (
+                                                            Some(Arc::new(val.0.unwrap().to_vec())),
+                                                            desc,
+                                                        ),
+                                                    );
+                                                }
+
+                                                Err(Error::NotFound) => {
+                                                    tab_iters
+                                                        .lock()
+                                                        .unwrap()
+                                                        .insert(txid, (None, desc));
+                                                }
+
+                                                Err(_) => {}
+                                            }
+                                        } 
+                                    // from bottom to top
+                                    } else {
+                                        if cur_key.is_none() {
+                                            cb(Ok(None));
+                                        } else {
+                                            match cursor.get(
+                                                Some(cur_key.clone().unwrap().as_ref()),
+                                                None,
+                                                MDB_SET,
+                                            ) {
+                                                Ok(val) => cb(Ok(Some((
+                                                    cur_key.clone().unwrap(),
+                                                    Arc::new(val.1.to_vec()),
+                                                )))),
+
+                                                Err(Error::NotFound) => {}
+
+                                                Err(_) => {}
+                                            }
+
+                                            // get next key
+                                            match cursor.get(
+                                                Some(cur_key.clone().unwrap().as_ref()),
+                                                None,
+                                                MDB_PREV,
+                                            ) {
+                                                Ok(val) => {
+                                                    tab_iters.lock().unwrap().insert(
+                                                        txid,
+                                                        (
+                                                            Some(Arc::new(val.0.unwrap().to_vec())),
+                                                            desc,
+                                                        ),
+                                                    );
+                                                }
+
+                                                Err(Error::NotFound) => {
+                                                    tab_iters
+                                                        .lock()
+                                                        .unwrap()
+                                                        .insert(txid, (None, desc));
+                                                }
+
+                                                Err(_) => {}
+                                            }
                                         }
-
-                                        Err(Error::NotFound) => cb(Ok(None)),
-
-                                        Err(e) => cb(Err(format!(
-                                            "cursor get error: {:?}",
-                                            e.to_string()
-                                        ))),
                                     }
 
                                     std::mem::drop(cursor);
