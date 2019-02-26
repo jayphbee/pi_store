@@ -63,7 +63,7 @@ pub struct DbWrite {
     env: Arc<Environment>,
     sender: Option<Sender<DbTabRWMessage>>,
     modifications: Arc<Mutex<HashMap<u64, (Vec<Arc<Vec<TabKV>>>, u32)>>>,
-    should_abort: Arc<Mutex<HashMap<u64, bool>>>,
+    must_abort: Arc<Mutex<HashMap<u64, bool>>>,
 }
 
 impl DbWrite {
@@ -72,14 +72,14 @@ impl DbWrite {
             env,
             sender: None,
             modifications: Arc::new(Mutex::new(HashMap::new())),
-            should_abort: Arc::new(Mutex::new(HashMap::new())),
+            must_abort: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn handle_write(&mut self) {
         let env = self.env.clone();
         let modifications = self.modifications.clone();
-        let should_abort = self.should_abort.clone();
+        let must_abort = self.must_abort.clone();
         let (tx, rx) = unbounded::<DbTabRWMessage>();
 
         let _ = thread::Builder::new()
@@ -156,7 +156,7 @@ impl DbWrite {
                                 }
                             }
 
-                            if should_abort.lock().unwrap().get(&txid).is_some() {
+                            if must_abort.lock().unwrap().get(&txid).is_some() {
                                 txn.abort();
                                 cb(Ok(()))
                             } else {
@@ -178,14 +178,14 @@ impl DbWrite {
 
                     Ok(DbTabRWMessage::Rollback(txid, cb)) => {
                         if modifications.lock().unwrap().contains_key(&txid) {
-                            should_abort.lock().unwrap().entry(txid).and_modify(|v| {
+                            must_abort.lock().unwrap().entry(txid).and_modify(|v| {
                                 *v = true;
                             });
-                            cb(Ok(()));
                         }
+                        cb(Ok(()));
                     }
 
-                    Err(e) => {}
+                    Err(_e) => {}
                 }
             });
 
@@ -201,7 +201,7 @@ impl DbWrite {
 pub struct DbTabPool {
     env: Arc<Environment>,
     tab_sender_map: HashMap<u64, Sender<DbTabMessage>>,
-    iterators: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
+    tab_iters: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
 }
 
 impl DbTabPool {
@@ -209,13 +209,13 @@ impl DbTabPool {
         Self {
             env,
             tab_sender_map: HashMap::new(),
-            iterators: Arc::new(Mutex::new(HashMap::new())),
+            tab_iters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn create_tab(&mut self, tab: Atom) {
         let env = self.env.clone();
-        let iters = self.iterators.clone();
+        let tab_iters = self.tab_iters.clone();
 
         OPENED_TABLES
             .lock()
@@ -283,13 +283,13 @@ impl DbTabPool {
 
                                 Ok(DbTabMessage::CreateItemIter(txid, desc, key, sender)) => {
                                     // create iter
-                                    iters.lock().unwrap().entry(txid).or_insert((key, desc));
+                                    tab_iters.lock().unwrap().entry(txid).or_insert((key, desc));
                                     let _ = sender.send(()).unwrap();
                                 }
 
                                 Ok(DbTabMessage::NextItem(txid, cb)) => {
                                     // check if txid exist, if not return None
-                                    let iter = iters.lock().unwrap().get(&txid).unwrap().clone();
+                                    let iter = tab_iters.lock().unwrap().get(&txid).unwrap().clone();
                                     let txn = env.begin_ro_txn().unwrap();
                                     let cursor = txn.open_ro_cursor(db).unwrap();
 
@@ -298,7 +298,7 @@ impl DbTabPool {
                                     match cursor.get(Some(b"foo"), None, MDB_NEXT) {
                                         Ok(val) => {
                                             // refresh stark key
-                                            iters.lock().unwrap().insert(
+                                            tab_iters.lock().unwrap().insert(
                                                 txid,
                                                 (Some(Arc::new(val.0.unwrap().to_vec())), iter.1),
                                             );
@@ -322,7 +322,7 @@ impl DbTabPool {
 
                                 Ok(DbTabMessage::Commit(txid)) => {
                                     // remove iterator for this txid
-                                    iters.lock().unwrap().remove(&txid);
+                                    tab_iters.lock().unwrap().remove(&txid);
                                 }
 
                                 Err(_) => {}
