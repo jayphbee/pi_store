@@ -22,7 +22,7 @@ use lmdb::{
 };
 
 use pool::{
-    DbTabROMessage, DbTabRWMessage, LmdbMessage, NopMessage, DB_TAB_READ_POOL, DB_TAB_WRITE,
+    DbTabROMessage, DbTabRWMessage, NopMessage, DB_TAB_READ_POOL, DB_TAB_WRITE,
     NO_OP_POOL,
 };
 
@@ -136,9 +136,9 @@ impl Txn for LmdbTableTxn {
         let cb2 = cb.clone();
 
         if self.writable {
-            // commit rw txn
+            // rollback rw txn
             let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
-            let _ = sender.send(DbTabRWMessage::Commit(
+            let _ = sender.send(DbTabRWMessage::Rollback(
                 self.id,
                 Arc::new(move |c| match c {
                     Ok(_) => {
@@ -152,7 +152,7 @@ impl Txn for LmdbTableTxn {
                 }),
             ));
         } else {
-            // commit ro txn
+            // rollback ro txn
             DB_TAB_READ_POOL.lock().unwrap().rollback_ro_txn(
                 self.id,
                 Arc::new(move |c| match c {
