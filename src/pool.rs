@@ -72,7 +72,6 @@ impl DbTabWrite {
             .spawn(move || loop {
                 match rx.recv() {
                     Ok(DbTabRWMessage::Modify(txid, mods, cb)) => {
-                        dbg!(txid);
                         // batch write for one txn
                         modifications
                             .lock()
@@ -99,15 +98,8 @@ impl DbTabWrite {
                     }
 
                     Ok(DbTabRWMessage::Commit(txid, cb)) => {
-                        println!("commit txid: {:?}", txid);
-                        if let None = modifications.lock().unwrap().get(&txid) {
-                            println!("=============== get modifies and count none value ============ txid: {:?}", txid);
-                        }
-
                         let (modifies, count) =
                             modifications.lock().unwrap().get(&txid).unwrap().clone();
-
-                        println!("=============== get modifies and count: ============ count: {:?}, txid: {:?}", count, txid);
 
                         if count > 1 {
                             modifications
@@ -163,15 +155,12 @@ impl DbTabWrite {
                             }
 
                             if must_abort.lock().unwrap().get(&txid).is_some() {
-                                println!("aborting ....");
                                 txn.abort();
                                 cb(Ok(()))
                             } else {
                                 match txn.commit() {
                                     Ok(_) => {
                                         cb(Ok(()));
-                                        println!("after commit cb");
-
                                     }
                                     Err(e) => cb(Err(format!(
                                         "commit failed with error: {:?}",
@@ -179,7 +168,7 @@ impl DbTabWrite {
                                     ))),
                                 }
                             }
-                            println!("======= remove txid: {:?} ==========", txid);
+                            println!("======= txid: {:?} finally committed ==========", txid);
                             // remove txid from cache
                             modifications.lock().unwrap().remove(&txid);
                         }
@@ -628,8 +617,6 @@ impl NopPool {
         self.senders.pop()
     }
 }
-
-
 
 lazy_static! {
     pub static ref NO_OP_POOL: Arc<Mutex<NopPool>> = Arc::new(Mutex::new(NopPool::new()));
