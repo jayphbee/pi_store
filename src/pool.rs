@@ -61,7 +61,7 @@ impl DbTabWrite {
         self.env = Some(env);
     }
 
-    pub fn handle_write(&mut self) {
+    pub fn spawn_write_service(&mut self) {
         let env = self.env.clone().unwrap();
         let modifications = self.modifications.clone();
         let must_abort = self.must_abort.clone();
@@ -109,7 +109,6 @@ impl DbTabWrite {
                                 .and_modify(|(_, c)| {
                                     *c -= 1;
                                 });
-                            // TODO: commit maybe deadlock here
                             cb(Ok(()));
                         } else {
                             let mut txn = env.begin_rw_txn().unwrap();
@@ -219,8 +218,8 @@ impl DbTabReadPool {
         self.env = Some(env);
     }
 
-    pub fn create_tab(&mut self, tab: Atom) {
-        println!("create tab: {:?}", tab);
+    pub fn spawn_read_service(&mut self, tab: Atom) {
+        println!("======= spawn read service for tab: {:?} =======", tab);
         let env = self.env.clone().unwrap();
         let tab_iters = self.tab_iters.clone();
         let txn_count = self.txn_count.clone();
@@ -513,7 +512,7 @@ impl DbTabReadPool {
             });
     }
 
-    pub fn get_sender(&self, tab: Atom) -> Option<Sender<DbTabROMessage>> {
+    pub fn get_ro_sender(&self, tab: &Atom) -> Option<Sender<DbTabROMessage>> {
         self.tab_sender_map
             .lock()
             .unwrap()

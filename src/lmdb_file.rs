@@ -44,7 +44,7 @@ pub struct LmdbTable {
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
         // create dedicated tab thread
-        DB_TAB_READ_POOL.lock().unwrap().create_tab(db_name.clone());
+        DB_TAB_READ_POOL.lock().unwrap().spawn_read_service(db_name.clone());
 
         LmdbTable {
             name: db_name.clone(),
@@ -87,7 +87,6 @@ impl Txn for LmdbTableTxn {
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
-        println!("===== commit ===== txid: {:?}", self.id);
         *self.state.lock().unwrap() = TxState::Committing;
         let state1 = self.state.clone();
         let state2 = self.state.clone();
@@ -195,7 +194,7 @@ impl TabTxn for LmdbTableTxn {
         let sender = DB_TAB_READ_POOL
             .lock()
             .unwrap()
-            .get_sender(arr[0].tab.clone())
+            .get_ro_sender(&arr[0].tab)
             .unwrap();
 
         let _ = sender.send(DbTabROMessage::Query(
@@ -243,7 +242,7 @@ impl TabTxn for LmdbTableTxn {
         let sender = DB_TAB_READ_POOL
             .lock()
             .unwrap()
-            .get_sender(tab.clone())
+            .get_ro_sender(&tab)
             .unwrap();
 
         let _ = sender.send(DbTabROMessage::CreateItemIter(self.id, descending, key, tx));
@@ -430,7 +429,7 @@ impl DB {
         NO_OP_POOL.lock().unwrap().start_nop_pool(64);
         DB_TAB_READ_POOL.lock().unwrap().set_env(env.clone());
         DB_TAB_WRITE.lock().unwrap().set_env(env.clone());
-        DB_TAB_WRITE.lock().unwrap().handle_write();
+        DB_TAB_WRITE.lock().unwrap().spawn_write_service();
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
