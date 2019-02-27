@@ -1,15 +1,11 @@
 use crossbeam_channel::{bounded, unbounded, Sender};
 use std::collections::HashMap;
-use std::slice::from_raw_parts;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
 use lmdb::{
-    mdb_set_compare, Cursor, Database, DatabaseFlags, Environment, Error, Iter as LmdbIter,
-    MDB_cmp_func, MDB_val, RoCursor, RwTransaction, Transaction, WriteFlags,
+    Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags,
 };
 
 const MDB_SET: u32 = 15;
@@ -18,10 +14,9 @@ const MDB_NEXT: u32 = 8;
 const MDB_FIRST: u32 = 0;
 const MDB_LAST: u32 = 6;
 
-use pi_db::db::{Bin, NextResult, SResult, TabKV, TxCallback, TxQueryCallback};
+use pi_db::db::{Bin, NextResult, TabKV, TxCallback, TxQueryCallback};
 
 use atom::Atom;
-use bon::ReadBuffer;
 
 pub enum DbTabRWMessage {
     Modify(u64, Arc<Vec<TabKV>>, TxCallback),
