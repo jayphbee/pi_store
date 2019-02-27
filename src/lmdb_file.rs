@@ -23,6 +23,7 @@ use lmdb::{
 
 use pool::{
     DbTabROMessage, DbTabRWMessage, LmdbMessage, NopMessage, DB_TAB_READ_POOL, DB_TAB_WRITE,
+    NO_OP_POOL,
 };
 
 const SINFO: &str = "_$sinfo";
@@ -52,6 +53,7 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
+        println!("======= create new txid: {:?} ==========", id.time());
         let t = Arc::new(LmdbTableTxn {
             id: id.time(),
             writable: writable,
@@ -83,42 +85,45 @@ impl Txn for LmdbTableTxn {
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
+        println!("===== commit ===== txid: {:?}", self.id);
         *self.state.lock().unwrap() = TxState::Committing;
         let state1 = self.state.clone();
         let state2 = self.state.clone();
         let cb1 = cb.clone();
         let cb2 = cb.clone();
 
-        // commit rw txn
-        let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
-        sender.send(DbTabRWMessage::Commit(
-            self.id,
-            Arc::new(move |c| match c {
-                Ok(_) => {
-                    *state1.lock().unwrap() = TxState::Commited;
-                    cb1(Ok(()));
-                }
-                Err(e) => {
-                    *state1.lock().unwrap() = TxState::CommitFail;
-                    cb1(Err(e.to_string()));
-                }
-            }),
-        ));
-
-        // // commit ro txn
-        // DB_TAB_READ_POOL.lock().unwrap().commit_ro_txn(
-        //     self.id,
-        //     Arc::new(move |c| match c {
-        //         Ok(_) => {
-        //             *state2.lock().unwrap() = TxState::Commited;
-        //             cb2(Ok(()));
-        //         }
-        //         Err(e) => {
-        //             *state2.lock().unwrap() = TxState::CommitFail;
-        //             cb2(Err(e.to_string()));
-        //         }
-        //     }),
-        // );
+        if self.writable {
+            // commit rw txn
+            let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
+            let _ = sender.send(DbTabRWMessage::Commit(
+                self.id,
+                Arc::new(move |c| match c {
+                    Ok(_) => {
+                        *state1.lock().unwrap() = TxState::Commited;
+                        cb1(Ok(()));
+                    }
+                    Err(e) => {
+                        *state1.lock().unwrap() = TxState::CommitFail;
+                        cb1(Err(e.to_string()));
+                    }
+                }),
+            ));
+        } else {
+            // commit ro txn
+            DB_TAB_READ_POOL.lock().unwrap().commit_ro_txn(
+                self.id,
+                Arc::new(move |c| match c {
+                    Ok(_) => {
+                        *state2.lock().unwrap() = TxState::Commited;
+                        cb2(Ok(()));
+                    }
+                    Err(e) => {
+                        *state2.lock().unwrap() = TxState::CommitFail;
+                        cb2(Err(e.to_string()));
+                    }
+                }),
+            );
+        }
 
         None
     }
@@ -130,36 +135,38 @@ impl Txn for LmdbTableTxn {
         let cb1 = cb.clone();
         let cb2 = cb.clone();
 
-        // commit rw txn
-        let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
-        sender.send(DbTabRWMessage::Commit(
-            self.id,
-            Arc::new(move |c| match c {
-                Ok(_) => {
-                    *state1.lock().unwrap() = TxState::Rollbacked;
-                    cb1(Ok(()));
-                }
-                Err(e) => {
-                    *state1.lock().unwrap() = TxState::RollbackFail;
-                    cb1(Err(e.to_string()));
-                }
-            }),
-        ));
-
-        // commit ro txn
-        DB_TAB_READ_POOL.lock().unwrap().rollback_ro_txn(
-            self.id,
-            Arc::new(move |c| match c {
-                Ok(_) => {
-                    *state2.lock().unwrap() = TxState::Rollbacked;
-                    cb2(Ok(()));
-                }
-                Err(e) => {
-                    *state2.lock().unwrap() = TxState::RollbackFail;
-                    cb2(Err(e.to_string()));
-                }
-            }),
-        );
+        if self.writable {
+            // commit rw txn
+            let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
+            let _ = sender.send(DbTabRWMessage::Commit(
+                self.id,
+                Arc::new(move |c| match c {
+                    Ok(_) => {
+                        *state1.lock().unwrap() = TxState::Rollbacked;
+                        cb1(Ok(()));
+                    }
+                    Err(e) => {
+                        *state1.lock().unwrap() = TxState::RollbackFail;
+                        cb1(Err(e.to_string()));
+                    }
+                }),
+            ));
+        } else {
+            // commit ro txn
+            DB_TAB_READ_POOL.lock().unwrap().rollback_ro_txn(
+                self.id,
+                Arc::new(move |c| match c {
+                    Ok(_) => {
+                        *state2.lock().unwrap() = TxState::Rollbacked;
+                        cb2(Ok(()));
+                    }
+                    Err(e) => {
+                        *state2.lock().unwrap() = TxState::RollbackFail;
+                        cb2(Err(e.to_string()));
+                    }
+                }),
+            );
+        }
 
         None
     }
@@ -188,8 +195,9 @@ impl TabTxn for LmdbTableTxn {
             .unwrap()
             .get_sender(arr[0].tab.clone())
             .unwrap();
-            
-        sender.send(DbTabROMessage::Query(
+
+        let _ = sender.send(DbTabROMessage::Query(
+            self.id,
             arr,
             Arc::new(move |q| match q {
                 Ok(v) => cb(Ok(v)),
@@ -208,7 +216,7 @@ impl TabTxn for LmdbTableTxn {
         cb: TxCallback,
     ) -> DBResult {
         let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
-        sender.send(DbTabRWMessage::Modify(
+        let _ = sender.send(DbTabRWMessage::Modify(
             self.id,
             arr,
             Arc::new(move |m| match m {
@@ -236,7 +244,7 @@ impl TabTxn for LmdbTableTxn {
             .get_sender(tab.clone())
             .unwrap();
 
-        sender.send(DbTabROMessage::CreateItemIter(self.id, descending, key, tx));
+        let _ = sender.send(DbTabROMessage::CreateItemIter(self.id, descending, key, tx));
 
         match rx.recv() {
             Ok(_) => {
@@ -417,6 +425,7 @@ impl DB {
 
         let mut tabs: Tabs<LmdbTable> = Tabs::new();
 
+        NO_OP_POOL.lock().unwrap().start_nop_pool(64);
         DB_TAB_READ_POOL.lock().unwrap().set_env(env.clone());
         DB_TAB_WRITE.lock().unwrap().set_env(env.clone());
         DB_TAB_WRITE.lock().unwrap().handle_write();

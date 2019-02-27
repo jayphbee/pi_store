@@ -49,7 +49,7 @@ pub enum DbTabRWMessage {
 unsafe impl Send for DbTabRWMessage {}
 
 pub enum DbTabROMessage {
-    Query(Arc<Vec<TabKV>>, TxQueryCallback),
+    Query(u64, Arc<Vec<TabKV>>, TxQueryCallback),
     CreateItemIter(u64, bool, Option<Bin>, Sender<()>),
     NextItem(u64, Arc<Fn(NextResult<(Bin, Bin)>)>),
 }
@@ -117,8 +117,14 @@ impl DbTabWrite {
 
                     Ok(DbTabRWMessage::Commit(txid, cb)) => {
                         println!("commit txid: {:?}", txid);
+                        if let None = modifications.lock().unwrap().get(&txid) {
+                            println!("=============== get modifies and count none value ============ txid: {:?}", txid);
+                        }
+
                         let (modifies, count) =
                             modifications.lock().unwrap().get(&txid).unwrap().clone();
+
+                        println!("=============== get modifies and count: ============ count: {:?}, txid: {:?}", count, txid);
 
                         if count > 1 {
                             modifications
@@ -145,7 +151,6 @@ impl DbTabWrite {
 
                                     // value is some, insert data
                                     if m.value.is_some() {
-                                        println!("insert data ....");
                                         match txn.put(
                                             db,
                                             m.key.as_ref(),
@@ -160,8 +165,6 @@ impl DbTabWrite {
                                         }
                                     // value is None, delete data
                                     } else {
-                                        println!("delete data ....");
-
                                         match txn.del(db, m.key.as_ref(), None) {
                                             Ok(_) => {}
                                             Err(Error::NotFound) => {
@@ -176,7 +179,6 @@ impl DbTabWrite {
                                 }
                             }
 
-                            println!("before commit .....");
                             if must_abort.lock().unwrap().get(&txid).is_some() {
                                 println!("aborting ....");
                                 txn.abort();
@@ -184,7 +186,6 @@ impl DbTabWrite {
                             } else {
                                 match txn.commit() {
                                     Ok(_) => {
-                                        println!("before commit cb");
                                         cb(Ok(()));
                                         println!("after commit cb");
 
@@ -195,8 +196,7 @@ impl DbTabWrite {
                                     ))),
                                 }
                             }
-                            println!("after commit ....");
-
+                            println!("======= remove txid: {:?} ==========", txid);
                             // remove txid from cache
                             modifications.lock().unwrap().remove(&txid);
                         }
@@ -228,6 +228,8 @@ pub struct DbTabReadPool {
     env: Option<Arc<Environment>>,
     tab_sender_map: Arc<Mutex<HashMap<u64, Sender<DbTabROMessage>>>>,
     tab_iters: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
+    no_op_senders: Arc<Mutex<HashMap<u64, Vec<Sender<NopMessage>>>>>,
+    txn_count: Arc<Mutex<HashMap<u64, u32>>>,
 }
 
 impl DbTabReadPool {
@@ -236,6 +238,8 @@ impl DbTabReadPool {
             env: None,
             tab_sender_map: Arc::new(Mutex::new(HashMap::new())),
             tab_iters: Arc::new(Mutex::new(HashMap::new())),
+            no_op_senders: Arc::new(Mutex::new(HashMap::new())),
+            txn_count: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -244,8 +248,10 @@ impl DbTabReadPool {
     }
 
     pub fn create_tab(&mut self, tab: Atom) {
+        println!("create tab: {:?}", tab);
         let env = self.env.clone().unwrap();
         let tab_iters = self.tab_iters.clone();
+        let txn_count = self.txn_count.clone();
 
         OPENED_TABLES
             .lock()
@@ -272,10 +278,18 @@ impl DbTabReadPool {
                         loop {
                             // handle channel message
                             match rx.recv() {
-                                Ok(DbTabROMessage::Query(queries, cb)) => {
+                                Ok(DbTabROMessage::Query(txid, queries, cb)) => {
                                     let mut qr = vec![];
                                     let mut query_error = false;
                                     let txn = env.begin_ro_txn().unwrap();
+
+                                    txn_count
+                                        .lock()
+                                        .unwrap()
+                                        .entry(txid)
+                                        .and_modify(|count| *count += 1)
+                                        .or_insert(1);
+
                                     for q in queries.iter() {
                                         match txn.get(db, q.key.as_ref()) {
                                             Ok(v) => {
@@ -316,6 +330,14 @@ impl DbTabReadPool {
                                 Ok(DbTabROMessage::CreateItemIter(txid, desc, key, sender)) => {
                                     let txn = env.begin_ro_txn().unwrap();
                                     let cursor = txn.open_ro_cursor(db).unwrap();
+
+                                    txn_count
+                                        .lock()
+                                        .unwrap()
+                                        .entry(txid)
+                                        .and_modify(|count| *count += 1)
+                                        .or_insert(1);
+
                                     // full iterataion
                                     if key.is_none() {
                                         if desc {
@@ -509,17 +531,55 @@ impl DbTabReadPool {
     }
 
     pub fn commit_ro_txn(&self, txid: u64, cb: TxCallback) {
+        if *self.txn_count.lock().unwrap().get(&txid).unwrap() == 1 {
+            // give back no op sender
+            self.no_op_senders.lock().unwrap().get(&txid).unwrap().iter().for_each(|s| {
+                NO_OP_POOL.lock().unwrap().push(s.clone());
+            });
+            self.no_op_senders.lock().unwrap().remove(&txid);
+        } else {
+            let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
+            let _ = nop_sender.send(NopMessage::Nop(cb));
+            self.no_op_senders
+                .lock()
+                .unwrap()
+                .entry(txid)
+                .and_modify(|senders| {
+                    senders.push(nop_sender.clone());
+                })
+                .or_insert(vec![nop_sender]);
+        }
+
         let tab_iters = self.tab_iters.clone();
         // remove iterator for this txid
         tab_iters.lock().unwrap().remove(&txid);
-        cb(Ok(()))
+
+        println!("after commit ro txn cb....");
     }
 
     pub fn rollback_ro_txn(&self, txid: u64, cb: TxCallback) {
+        if *self.txn_count.lock().unwrap().get(&txid).unwrap() == 1 {
+            // give back no op sender
+            self.no_op_senders.lock().unwrap().get(&txid).unwrap().iter().for_each(|s| {
+                NO_OP_POOL.lock().unwrap().push(s.clone());
+            });
+            self.no_op_senders.lock().unwrap().remove(&txid);
+        } else {
+            let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
+            let _ = nop_sender.send(NopMessage::Nop(cb));
+            self.no_op_senders
+                .lock()
+                .unwrap()
+                .entry(txid)
+                .and_modify(|senders| {
+                    senders.push(nop_sender.clone());
+                })
+                .or_insert(vec![nop_sender]);
+        }
+
         let tab_iters = self.tab_iters.clone();
         // remove iterator for this txid
         tab_iters.lock().unwrap().remove(&txid);
-        cb(Ok(()))
     }
 }
 
