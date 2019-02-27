@@ -348,10 +348,13 @@ impl DbTabReadPool {
                                                         .lock()
                                                         .unwrap()
                                                         .entry(txid)
-                                                        .or_insert((
-                                                            Some(Arc::new(val.0.unwrap().to_vec())),
-                                                            desc,
-                                                        ));
+                                                        .or_insert_with(|| {
+                                                            if let Some(v) = val.0 {
+                                                                (Some(Arc::new(v.to_vec())), desc)
+                                                            } else {
+                                                                (None, desc)
+                                                            }
+                                                        });
                                                 }
                                                 Err(Error::NotFound) => {
                                                     tab_iters
@@ -370,10 +373,13 @@ impl DbTabReadPool {
                                                         .lock()
                                                         .unwrap()
                                                         .entry(txid)
-                                                        .or_insert((
-                                                            Some(Arc::new(val.0.unwrap().to_vec())),
-                                                            desc,
-                                                        ));
+                                                        .or_insert_with(|| {
+                                                            if let Some(v) = val.0 {
+                                                                (Some(Arc::new(v.to_vec())), desc)
+                                                            } else {
+                                                                (None, desc)
+                                                            }
+                                                        });
                                                 }
                                                 Err(Error::NotFound) => {
                                                     tab_iters
@@ -387,14 +393,24 @@ impl DbTabReadPool {
                                         }
                                     // partial iteration
                                     } else {
-                                        match cursor.get(Some(key.unwrap().as_ref()), None, MDB_SET)
-                                        {
+                                        match cursor.get(
+                                            Some(key.clone().unwrap().as_ref()),
+                                            None,
+                                            MDB_SET,
+                                        ) {
                                             // save the current key
                                             Ok(val) => {
-                                                tab_iters.lock().unwrap().entry(txid).or_insert((
-                                                    Some(Arc::new(val.0.unwrap().to_vec())),
-                                                    desc,
-                                                ));
+                                                tab_iters
+                                                    .lock()
+                                                    .unwrap()
+                                                    .entry(txid)
+                                                    .or_insert_with(|| {
+                                                        if let Some(v) = val.0 {
+                                                            (Some(Arc::new(v.to_vec())), desc)
+                                                        } else {
+                                                            (None, desc)
+                                                        }
+                                                    });
                                             }
                                             Err(Error::NotFound) => {
                                                 tab_iters
@@ -407,6 +423,7 @@ impl DbTabReadPool {
                                         }
                                     }
 
+                                    // notify create iter success
                                     let _ = sender.send(()).unwrap();
                                 }
 
@@ -443,6 +460,7 @@ impl DbTabReadPool {
                                                 MDB_NEXT,
                                             ) {
                                                 Ok(val) => {
+                                                    // update current key for txid
                                                     tab_iters.lock().unwrap().insert(
                                                         txid,
                                                         (
@@ -489,6 +507,7 @@ impl DbTabReadPool {
                                                 MDB_PREV,
                                             ) {
                                                 Ok(val) => {
+                                                    // update current key for txid
                                                     tab_iters.lock().unwrap().insert(
                                                         txid,
                                                         (
@@ -533,10 +552,13 @@ impl DbTabReadPool {
     pub fn commit_ro_txn(&self, txid: u64, cb: TxCallback) {
         if *self.txn_count.lock().unwrap().get(&txid).unwrap() == 1 {
             // give back no op sender
-            self.no_op_senders.lock().unwrap().get(&txid).unwrap().iter().for_each(|s| {
-                NO_OP_POOL.lock().unwrap().push(s.clone());
-            });
+            if let Some(senders) = self.no_op_senders.lock().unwrap().get(&txid) {
+                senders
+                    .iter()
+                    .for_each(|s| NO_OP_POOL.lock().unwrap().push(s.clone()));
+            }
             self.no_op_senders.lock().unwrap().remove(&txid);
+            self.tab_iters.lock().unwrap().remove(&txid);
         } else {
             let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
             let _ = nop_sender.send(NopMessage::Nop(cb));
@@ -549,21 +571,23 @@ impl DbTabReadPool {
                 })
                 .or_insert(vec![nop_sender]);
         }
-
-        let tab_iters = self.tab_iters.clone();
-        // remove iterator for this txid
-        tab_iters.lock().unwrap().remove(&txid);
-
         println!("after commit ro txn cb....");
     }
 
     pub fn rollback_ro_txn(&self, txid: u64, cb: TxCallback) {
         if *self.txn_count.lock().unwrap().get(&txid).unwrap() == 1 {
             // give back no op sender
-            self.no_op_senders.lock().unwrap().get(&txid).unwrap().iter().for_each(|s| {
-                NO_OP_POOL.lock().unwrap().push(s.clone());
-            });
+            self.no_op_senders
+                .lock()
+                .unwrap()
+                .get(&txid)
+                .unwrap()
+                .iter()
+                .for_each(|s| {
+                    NO_OP_POOL.lock().unwrap().push(s.clone());
+                });
             self.no_op_senders.lock().unwrap().remove(&txid);
+            self.tab_iters.lock().unwrap().remove(&txid);
         } else {
             let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
             let _ = nop_sender.send(NopMessage::Nop(cb));
@@ -576,10 +600,6 @@ impl DbTabReadPool {
                 })
                 .or_insert(vec![nop_sender]);
         }
-
-        let tab_iters = self.tab_iters.clone();
-        // remove iterator for this txid
-        tab_iters.lock().unwrap().remove(&txid);
     }
 }
 
