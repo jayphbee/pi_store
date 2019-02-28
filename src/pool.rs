@@ -537,7 +537,6 @@ impl DbTabReadPool {
                 })
                 .or_insert(vec![nop_sender]);
         }
-        println!("after commit ro txn cb....");
     }
 
     pub fn rollback_ro_txn(&self, txid: u64, cb: TxCallback) {
