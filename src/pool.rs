@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
-use lmdb::{
-    Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags,
-};
+use lmdb::{Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags};
 
 const MDB_SET: u32 = 15;
 const MDB_PREV: u32 = 12;
@@ -37,7 +35,7 @@ unsafe impl Send for DbTabROMessage {}
 #[derive(Debug)]
 pub struct DbTabWrite {
     env: Option<Arc<Environment>>,
-    sender: Option<Sender<DbTabRWMessage>>,
+    sender: Option<Arc<Sender<DbTabRWMessage>>>,
     modifications: Arc<Mutex<HashMap<u64, (Vec<Arc<Vec<TabKV>>>, u32)>>>,
     must_abort: Arc<Mutex<HashMap<u64, bool>>>,
 }
@@ -65,8 +63,10 @@ impl DbTabWrite {
         let _ = thread::Builder::new()
             .name("lmdb_write_thread".to_owned())
             .spawn(move || loop {
+                println!("write thread loop");
                 match rx.recv() {
                     Ok(DbTabRWMessage::Modify(txid, mods, cb)) => {
+                        println!("pool modify txid: {:?}, mods: {:?}, len: {:?}", txid, mods, modifications.lock().unwrap().len());
                         // batch write for one txn
                         modifications
                             .lock()
@@ -78,93 +78,192 @@ impl DbTabWrite {
                             })
                             .or_insert((vec![mods.clone()], 1));
 
-                        OPENED_TABLES
-                            .lock()
-                            .unwrap()
-                            .entry(mods[0].tab.get_hash())
-                            .or_insert_with(|| {
-                                env.create_db(
-                                    Some(&mods[0].tab.to_string()),
-                                    DatabaseFlags::empty(),
-                                )
+                        // ensure it's not a meta txn
+                        if mods[0].ware != Atom::from("") {
+                            println!("This is not a meta txn");
+                            OPENED_TABLES
+                                .lock()
                                 .unwrap()
-                            });
+                                .entry(mods[0].tab.get_hash())
+                                .or_insert_with(|| {
+                                    env.create_db(
+                                        Some(&mods[0].tab.to_string()),
+                                        DatabaseFlags::empty(),
+                                    )
+                                    .unwrap()
+                                });
+                        }
+
                         cb(Ok(()));
                     }
 
                     Ok(DbTabRWMessage::Commit(txid, cb)) => {
                         let (modifies, count) =
                             modifications.lock().unwrap().get(&txid).unwrap().clone();
+                        println!("txid and count: {:?} {:?}", txid, count);
 
-                        if count > 1 {
-                            modifications
-                                .lock()
-                                .unwrap()
-                                .entry(txid)
-                                .and_modify(|(_, c)| {
-                                    *c -= 1;
-                                });
-                            cb(Ok(()));
-                        } else {
-                            let mut txn = env.begin_rw_txn().unwrap();
+                        match modifications.lock().unwrap().get(&txid) {
+                            Some(meta_mods) => {
+                                let meta_mods = meta_mods.0.clone();
+                                // if ware is an empty Atom, we consider it as an meta txn, commit it directly
+                                if meta_mods[0][0].ware == Atom::from("") {
+                                    let mut txn = env.begin_rw_txn().unwrap();
+                                    println!(
+                                        "=========== create lmdb meta txn txid: {:?} =============",
+                                        txid
+                                    );
 
-                            for mods in modifies.iter() {
-                                for m in mods.iter() {
-                                    // this db should be opened previously, or this is a bug
-                                    let db = OPENED_TABLES
-                                        .lock()
-                                        .unwrap()
-                                        .get(&m.tab.get_hash())
-                                        .unwrap()
-                                        .clone();
+                                    for mods in modifies.iter() {
+                                        for m in mods.iter().skip(1) {
+                                            // this db should be opened previously, or this is a bug
+                                            let db = OPENED_TABLES
+                                                .lock()
+                                                .unwrap()
+                                                .get(&Atom::from("_$sinfo").get_hash())
+                                                .unwrap()
+                                                .clone();
 
-                                    // value is some, insert data
-                                    if m.value.is_some() {
-                                        match txn.put(
-                                            db,
-                                            m.key.as_ref(),
-                                            m.value.clone().unwrap().as_ref(),
-                                            WriteFlags::empty(),
-                                        ) {
-                                            Ok(_) => {}
-                                            Err(e) => cb(Err(format!(
-                                                "lmdb internal insert data error: {:?}",
-                                                e.to_string()
-                                            ))),
+                                            // value is some, insert data
+                                            if m.value.is_some() {
+                                                match txn.put(
+                                                    db,
+                                                    m.key.as_ref(),
+                                                    m.value.clone().unwrap().as_ref(),
+                                                    WriteFlags::empty(),
+                                                ) {
+                                                    Ok(_) => {}
+                                                    Err(e) => cb(Err(format!(
+                                                        "lmdb internal insert data error: {:?}",
+                                                        e.to_string()
+                                                    ))),
+                                                }
+                                            // value is None, delete data
+                                            } else {
+                                                match txn.del(db, m.key.as_ref(), None) {
+                                                    Ok(_) => {}
+                                                    Err(Error::NotFound) => {
+                                                        // TODO: when not found?
+                                                    }
+                                                    Err(e) => cb(Err(format!(
+                                                        "delete data error: {:?}",
+                                                        e.to_string()
+                                                    ))),
+                                                }
+                                            }
                                         }
-                                    // value is None, delete data
+                                    }
+
+                                    if must_abort.lock().unwrap().get(&txid).is_some() {
+                                        txn.abort();
+                                        cb(Ok(()))
                                     } else {
-                                        match txn.del(db, m.key.as_ref(), None) {
-                                            Ok(_) => {}
-                                            Err(Error::NotFound) => {
-                                                // TODO: when not found?
+                                        match txn.commit() {
+                                            Ok(_) => {
+                                                cb(Ok(()));
                                             }
                                             Err(e) => cb(Err(format!(
-                                                "delete data error: {:?}",
+                                                "commit failed with error: {:?}",
                                                 e.to_string()
                                             ))),
                                         }
                                     }
+                                    println!(
+                                        "======= meta txn txid: {:?} finally committed ==========",
+                                        txid
+                                    );
+                                    // remove txid from cache
+                                    modifications.lock().unwrap().remove(&txid);
+                                // otherwise...
+                                } else {
+                                    if count > 1 {
+                                        modifications.lock().unwrap().entry(txid).and_modify(
+                                            |(_, c)| {
+                                                *c -= 1;
+                                            },
+                                        );
+                                        cb(Ok(()));
+                                        let (_, count) = modifications
+                                            .lock()
+                                            .unwrap()
+                                            .get(&txid)
+                                            .unwrap()
+                                            .clone();
+                                        println!(
+                                            "after decrement count: {:?} txid: {:?}",
+                                            count, txid
+                                        );
+                                    } else {
+                                        let mut txn = env.begin_rw_txn().unwrap();
+                                        println!(
+                                            "=========== create lmdb txn txid: {:?} =============",
+                                            txid
+                                        );
+
+                                        for mods in modifies.iter() {
+                                            for m in mods.iter() {
+                                                // this db should be opened previously, or this is a bug
+                                                let db = OPENED_TABLES
+                                                    .lock()
+                                                    .unwrap()
+                                                    .get(&m.tab.get_hash())
+                                                    .unwrap()
+                                                    .clone();
+
+                                                // value is some, insert data
+                                                if m.value.is_some() {
+                                                    match txn.put(
+                                                        db,
+                                                        m.key.as_ref(),
+                                                        m.value.clone().unwrap().as_ref(),
+                                                        WriteFlags::empty(),
+                                                    ) {
+                                                        Ok(_) => {}
+                                                        Err(e) => cb(Err(format!(
+                                                            "lmdb internal insert data error: {:?}",
+                                                            e.to_string()
+                                                        ))),
+                                                    }
+                                                // value is None, delete data
+                                                } else {
+                                                    match txn.del(db, m.key.as_ref(), None) {
+                                                        Ok(_) => {}
+                                                        Err(Error::NotFound) => {
+                                                            // TODO: when not found?
+                                                        }
+                                                        Err(e) => cb(Err(format!(
+                                                            "delete data error: {:?}",
+                                                            e.to_string()
+                                                        ))),
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if must_abort.lock().unwrap().get(&txid).is_some() {
+                                            txn.abort();
+                                            cb(Ok(()))
+                                        } else {
+                                            match txn.commit() {
+                                                Ok(_) => {
+                                                    cb(Ok(()));
+                                                }
+                                                Err(e) => cb(Err(format!(
+                                                    "commit failed with error: {:?}",
+                                                    e.to_string()
+                                                ))),
+                                            }
+                                        }
+                                        println!(
+                                            "======= rw txid: {:?} finally committed ==========",
+                                            txid
+                                        );
+                                        // remove txid from cache
+                                        modifications.lock().unwrap().remove(&txid);
+                                    }
                                 }
                             }
 
-                            if must_abort.lock().unwrap().get(&txid).is_some() {
-                                txn.abort();
-                                cb(Ok(()))
-                            } else {
-                                match txn.commit() {
-                                    Ok(_) => {
-                                        cb(Ok(()));
-                                    }
-                                    Err(e) => cb(Err(format!(
-                                        "commit failed with error: {:?}",
-                                        e.to_string()
-                                    ))),
-                                }
-                            }
-                            println!("======= txid: {:?} finally committed ==========", txid);
-                            // remove txid from cache
-                            modifications.lock().unwrap().remove(&txid);
+                            None => (),
                         }
                     }
 
@@ -181,10 +280,18 @@ impl DbTabWrite {
                 }
             });
 
-        self.sender = Some(tx);
+        self.sender = Some(Arc::new(tx));
     }
 
-    pub fn get_sender(&self) -> Option<Sender<DbTabRWMessage>> {
+    pub fn get_sender(&self) -> Option<Arc<Sender<DbTabRWMessage>>> {
+        let x = self.sender.clone();
+        let y = self.sender.clone();
+
+        if Arc::ptr_eq(&x.unwrap(), &y.unwrap()) {
+            println!("sender eq");
+        } else {
+            println!("sender neq");
+        }
         self.sender.clone()
     }
 }
@@ -516,7 +623,8 @@ impl DbTabReadPool {
     }
 
     pub fn commit_ro_txn(&self, txid: u64, cb: TxCallback) {
-        if *self.txn_count.lock().unwrap().get(&txid).unwrap() == 1 {
+        println!("ro txn commit txid: {:?}", txid);
+        if *self.txn_count.lock().unwrap().get(&txid).unwrap() <= 1 {
             // give back no op sender
             if let Some(senders) = self.no_op_senders.lock().unwrap().get(&txid) {
                 senders
@@ -525,6 +633,11 @@ impl DbTabReadPool {
             }
             self.no_op_senders.lock().unwrap().remove(&txid);
             self.tab_iters.lock().unwrap().remove(&txid);
+
+            // BUG: how to give back no op sender?
+            let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
+            let _ = nop_sender.send(NopMessage::Nop(cb));
+            println!("======= ro txid: {:?} finally committed ==========", txid);
         } else {
             let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
             let _ = nop_sender.send(NopMessage::Nop(cb));
@@ -536,6 +649,14 @@ impl DbTabReadPool {
                     senders.push(nop_sender.clone());
                 })
                 .or_insert(vec![nop_sender]);
+
+            self.txn_count
+                .lock()
+                .unwrap()
+                .entry(txid)
+                .and_modify(|count| {
+                    *count -= 1;
+                });
         }
     }
 
