@@ -92,8 +92,9 @@ impl Txn for LmdbTableTxn {
         let cb2 = cb.clone();
 
         if self.writable {
+            println!(" ========= commit rw txn txid: {:?} ============= ", self.id);
             // commit rw txn
-            let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
+            let sender = DB_TAB_WRITE.lock().unwrap().get_rw_sender().unwrap();
             let _ = sender.send(DbTabRWMessage::Commit(
                 self.id,
                 Arc::new(move |c| match c {
@@ -108,6 +109,7 @@ impl Txn for LmdbTableTxn {
                 }),
             ));
         } else {
+            println!(" ========= commit ro txn txid: {:?} ============= ", self.id);
             // commit ro txn
             DB_TAB_READ_POOL.lock().unwrap().commit_ro_txn(
                 self.id,
@@ -136,7 +138,7 @@ impl Txn for LmdbTableTxn {
 
         if self.writable {
             // rollback rw txn
-            let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
+            let sender = DB_TAB_WRITE.lock().unwrap().get_rw_sender().unwrap();
             let _ = sender.send(DbTabRWMessage::Rollback(
                 self.id,
                 Arc::new(move |c| match c {
@@ -189,6 +191,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
+        // println!("====== query txid: {:?} data: {:?}", self.id, arr.clone());
         let sender = DB_TAB_READ_POOL
             .lock()
             .unwrap()
@@ -214,7 +217,8 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        let sender = DB_TAB_WRITE.lock().unwrap().get_sender().unwrap();
+        // println!("====== modify txid: {:?} ========", self.id);
+        let sender = DB_TAB_WRITE.lock().unwrap().get_rw_sender().unwrap();
         let _ = sender.send(DbTabRWMessage::Modify(
             self.id,
             arr,
@@ -335,6 +339,7 @@ impl LmdbMetaTxn {
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
+        println!("==== call MetaTxn::alter {:?}======", tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -356,7 +361,13 @@ impl MetaTxn for LmdbMetaTxn {
             value: value,
         };
 
-        self.0.modify(Arc::new(vec![tabkv]), None, false, cb)
+        self.0.modify(Arc::new(vec![TabKV {
+            ware: Atom::from(""),
+            tab: Atom::from(""),
+            key: Arc::new(vec![]),
+            index: 0,
+            value: None,
+        }, tabkv]), None, false, cb)
     }
 
     // 快照拷贝表
@@ -380,6 +391,7 @@ impl Txn for LmdbMetaTxn {
     }
     // 提交一个事务
     fn commit(&self, cb: TxCallback) -> CommitResult {
+        println!("========== commit meta txn ============");
         self.0.commit(cb)
     }
     // 回滚一个事务
