@@ -249,7 +249,7 @@ impl TabTxn for LmdbTableTxn {
             .get_ro_sender(&tab)
             .unwrap();
 
-        let _ = sender.send(DbTabROMessage::CreateItemIter(self.id, descending, key, tx));
+        let _ = sender.send(DbTabROMessage::CreateItemIter(self.id, descending, key.clone(), tx));
 
         match rx.recv() {
             Ok(_) => {
@@ -316,7 +316,7 @@ impl Iter for LmdbItemsIter {
         let _ = self.sender.send(DbTabROMessage::NextItem(
             self.txid,
             self.desc,
-            self.start_key,
+            self.start_key.clone(),
             Arc::new(move |item| match item {
                 Ok(Some(v)) => {
                     cb(Ok(Some(v)));
