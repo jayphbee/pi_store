@@ -27,7 +27,7 @@ unsafe impl Send for DbTabRWMessage {}
 pub enum DbTabROMessage {
     Query(u64, Arc<Vec<TabKV>>, TxQueryCallback),
     CreateItemIter(u64, bool, Option<Bin>, Sender<()>),
-    NextItem(u64, Arc<Fn(NextResult<(Bin, Bin)>)>),
+    NextItem(u64, bool, Option<Bin>, Arc<Fn(NextResult<(Bin, Bin)>)>),
 }
 
 unsafe impl Send for DbTabROMessage {}
@@ -266,6 +266,7 @@ pub struct DbTabReadPool {
     env: Option<Arc<Environment>>,
     tab_sender_map: Arc<Mutex<HashMap<u64, Sender<DbTabROMessage>>>>,
     tab_iters: Arc<Mutex<HashMap<u64, (Option<Bin>, bool)>>>,
+    tab_iterators: Arc<Mutex<HashMap<u64, (bool, Option<Bin>, Option<(Bin, Bin)>)>>>,
     no_op_senders: Arc<Mutex<HashMap<u64, Vec<Sender<NopMessage>>>>>,
     txn_count: Arc<Mutex<HashMap<u64, u32>>>,
 }
@@ -276,6 +277,7 @@ impl DbTabReadPool {
             env: None,
             tab_sender_map: Arc::new(Mutex::new(HashMap::new())),
             tab_iters: Arc::new(Mutex::new(HashMap::new())),
+            tab_iterators: Arc::new(Mutex::new(HashMap::new())),
             no_op_senders: Arc::new(Mutex::new(HashMap::new())),
             txn_count: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -289,6 +291,7 @@ impl DbTabReadPool {
         println!("======= spawn read service for tab: {:?} =======", tab);
         let env = self.env.clone().unwrap();
         let tab_iters = self.tab_iters.clone();
+        let tab_iterators = self.tab_iterators.clone();
         let txn_count = self.txn_count.clone();
 
         OPENED_TABLES
@@ -369,6 +372,10 @@ impl DbTabReadPool {
                                     let txn = env.begin_ro_txn().unwrap();
                                     let cursor = txn.open_ro_cursor(db).unwrap();
 
+                                    println!("pool create item iter txid: {:?}, key: {:?}, tab: {:?}", txid, key, db);
+
+                                    tab_iterators.lock().unwrap().entry(txid).or_insert((desc, key.clone(), None));
+
                                     txn_count
                                         .lock()
                                         .unwrap()
@@ -379,8 +386,10 @@ impl DbTabReadPool {
                                     // full iterataion
                                     if key.is_none() {
                                         if desc {
+                                            println!("descending {:?}", db);
                                             match cursor.get(None, None, MDB_FIRST) {
                                                 Ok(val) => {
+                                                    println!("match Ok arm {:?}", db);
                                                     // save the first record key
                                                     tab_iters
                                                         .lock()
@@ -395,6 +404,8 @@ impl DbTabReadPool {
                                                         });
                                                 }
                                                 Err(Error::NotFound) => {
+                                                    println!("match Err arm {:?}", db);
+
                                                     tab_iters
                                                         .lock()
                                                         .unwrap()
@@ -404,8 +415,12 @@ impl DbTabReadPool {
                                                 Err(_) => {}
                                             }
                                         } else {
+                                            println!("ascending {:?}", db);
+
                                             match cursor.get(None, None, MDB_LAST) {
                                                 Ok(val) => {
+                                                    println!("match Ok arm {:?}", db);
+
                                                     // save the last record key
                                                     tab_iters
                                                         .lock()
@@ -420,6 +435,8 @@ impl DbTabReadPool {
                                                         });
                                                 }
                                                 Err(Error::NotFound) => {
+                                                    println!("match Err arm {:?}", db);
+
                                                     tab_iters
                                                         .lock()
                                                         .unwrap()
@@ -465,28 +482,55 @@ impl DbTabReadPool {
                                     let _ = sender.send(()).unwrap();
                                 }
 
-                                Ok(DbTabROMessage::NextItem(txid, cb)) => {
+                                Ok(DbTabROMessage::NextItem(txid, desc, start_key, cb)) => {
+                                    println!("Next item  txid: {:?}", txid);
                                     let (cur_key, desc) =
                                         tab_iters.lock().unwrap().get(&txid).unwrap().clone();
                                     let txn = env.begin_ro_txn().unwrap();
                                     let cursor = txn.open_ro_cursor(db).unwrap();
 
+                                    let (desc, start_key, cur_kv) = tab_iterators.lock().unwrap().get(&txid).unwrap().clone();
+
+                                    // match 
+                                    match (desc, start_key) {
+                                        (true, None) => {
+                                            cb(Ok(cur_kv));
+                                            
+                                        }
+
+                                        (false, None) => {}
+
+                                        (true, Some(key)) => {}
+
+                                        (false, Some(key)) => {}
+                                    }
+
                                     // from top to bottom
                                     if desc {
                                         if cur_key.is_none() {
+                                            println!("current key is None, before cb");
                                             cb(Ok(None));
+                                            println!("current key is None, after cb");
+
                                         } else {
+                                            println!("current key Not None key: {:?}", cur_key);
                                             match cursor.get(
                                                 Some(cur_key.clone().unwrap().as_ref()),
                                                 None,
                                                 MDB_SET,
                                             ) {
-                                                Ok(val) => cb(Ok(Some((
+                                                Ok(val) => {
+                                                    println!("got value");
+                                                    cb(Ok(Some((
                                                     cur_key.clone().unwrap(),
                                                     Arc::new(val.1.to_vec()),
-                                                )))),
+                                                ))));
+                                                }
 
-                                                Err(Error::NotFound) => {}
+                                                Err(Error::NotFound) => {
+                                                    println!("next value NotFound");
+                                                    cb(Ok(None))
+                                                }
 
                                                 Err(_) => {}
                                             }
@@ -498,6 +542,7 @@ impl DbTabReadPool {
                                                 MDB_NEXT,
                                             ) {
                                                 Ok(val) => {
+                                                    println!("get next value +++++++");
                                                     // update current key for txid
                                                     tab_iters.lock().unwrap().insert(
                                                         txid,
@@ -509,6 +554,7 @@ impl DbTabReadPool {
                                                 }
 
                                                 Err(Error::NotFound) => {
+                                                    println!("NotFound +++++++");
                                                     tab_iters
                                                         .lock()
                                                         .unwrap()
@@ -602,7 +648,7 @@ impl DbTabReadPool {
             // BUG: how to give back no op sender?
             let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
             let _ = nop_sender.send(NopMessage::Nop(cb));
-            // println!("======= ro txid: {:?} finally committed ==========", txid);
+            println!("======= ro txid: {:?} finally committed ==========", txid);
         } else {
             let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
             let _ = nop_sender.send(NopMessage::Nop(cb));

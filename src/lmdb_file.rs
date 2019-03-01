@@ -241,6 +241,8 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
+        // println!("====== create iter txid: {:?} tab: {:?}, key: {:?} ========", self.id, tab, key);
+
         let (tx, rx) = bounded(1);
 
         let sender = DB_TAB_READ_POOL
@@ -253,7 +255,7 @@ impl TabTxn for LmdbTableTxn {
 
         match rx.recv() {
             Ok(_) => {
-                return Some(Ok(Box::new(LmdbItemsIter::new(self.id, sender, filter))));
+                return Some(Ok(Box::new(LmdbItemsIter::new(self.id, descending, key, sender, filter))));
             }
             Err(e) => {
                 panic!("Create db item iter in pool failed: {:?}", e.to_string());
@@ -291,14 +293,18 @@ impl TabTxn for LmdbTableTxn {
 /// lmdb iterator that navigate key and value
 pub struct LmdbItemsIter {
     txid: u64,
+    desc: bool,
+    start_key: Option<Bin>,
     sender: Sender<DbTabROMessage>,
     _filter: Filter,
 }
 
 impl LmdbItemsIter {
-    pub fn new(txid: u64, sender: Sender<DbTabROMessage>, _filter: Filter) -> Self {
+    pub fn new(txid: u64, desc: bool, start_key: Option<Bin>, sender: Sender<DbTabROMessage>, _filter: Filter) -> Self {
         LmdbItemsIter {
             txid,
+            desc,
+            start_key,
             sender,
             _filter,
         }
@@ -311,6 +317,8 @@ impl Iter for LmdbItemsIter {
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
         let _ = self.sender.send(DbTabROMessage::NextItem(
             self.txid,
+            self.desc,
+            self.start_key,
             Arc::new(move |item| match item {
                 Ok(Some(v)) => {
                     cb(Ok(Some(v)));
