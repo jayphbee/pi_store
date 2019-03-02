@@ -1,7 +1,26 @@
+/*
+1. 只读事务
+    a. 记录本次guid对哪些表进行了读操作，提交时通过该表对应的 dbi 映射到一个线程上提交，这样就不会造成死锁
+    b. 一个表上有多个迭代器如何处理？ 如何保存迭代器状态？(LmdbItemsIter里面加字段保存状态)
+
+2. 读写事务
+    在一个事务里面先读后写，读事务每次都自动提交，所以可以只关心写事务的提交。写事务单独一个线程处理，用 unbounded channel
+    保持每个事务的顺序
+
+
+3. 工作线程池
+    每个工作线程有一个unbounded channel 接收任务
+
+4. 元信息事务
+    需要做特殊处理，标识是否是一个元信息修改
+
+5. 关于回滚
+*/
 use crossbeam_channel::{bounded, unbounded, Sender};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::thread;
 
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags};
@@ -16,37 +35,45 @@ use pi_db::db::{Bin, NextResult, TabKV, TxCallback, TxQueryCallback};
 
 use atom::Atom;
 
-pub enum DbTabRWMessage {
-    Modify(u64, Arc<Vec<TabKV>>, TxCallback),
-    Commit(u64, TxCallback),
-    Rollback(u64, TxCallback),
+pub enum ReaderMsg {
+    Query(Arc<Vec<TabKV>>, TxQueryCallback),
+    CreateItemIter(bool, Atom, Option<Bin>, Sender<Option<Bin>>),
+    NextItem(
+        bool,
+        Atom,
+        Option<Bin>,
+        Arc<Fn(NextResult<(Bin, Bin)>)>,
+        Sender<Option<Bin>>,
+    ),
+    Commit(TxCallback),
+    Rollback(TxCallback),
 }
 
-unsafe impl Send for DbTabRWMessage {}
+unsafe impl Send for ReaderMsg {}
 
-pub enum DbTabROMessage {
-    Query(u64, Arc<Vec<TabKV>>, TxQueryCallback),
-    CreateItemIter(u64, bool, Option<Bin>, Sender<()>),
-    NextItem(u64, bool, Option<Bin>, Arc<Fn(NextResult<(Bin, Bin)>)>),
+pub enum WriterMsg {
+    Modify(TxCallback),
+    Commit(Arc<Vec<TabKV>>, bool, TxCallback),
+    Rollback(TxCallback),
 }
 
-unsafe impl Send for DbTabROMessage {}
+unsafe impl Send for WriterMsg {}
 
-#[derive(Debug)]
-pub struct DbTabWrite {
+pub struct LmdbService {
     env: Option<Arc<Environment>>,
-    sender: Option<Arc<Sender<DbTabRWMessage>>>,
-    modifications: Arc<Mutex<HashMap<u64, (Vec<Arc<Vec<TabKV>>>, u32)>>>,
-    must_abort: Arc<Mutex<HashMap<u64, bool>>>,
+    // how many threads to serve db read, only 1 writer thread
+    readers_count: usize,
+    readers: Vec<Sender<ReaderMsg>>,
+    writer: Option<Sender<WriterMsg>>,
 }
 
-impl DbTabWrite {
-    pub fn new() -> Self {
+impl LmdbService {
+    pub fn new(readers_count: usize) -> LmdbService {
         Self {
             env: None,
-            sender: None,
-            modifications: Arc::new(Mutex::new(HashMap::new())),
-            must_abort: Arc::new(Mutex::new(HashMap::new())),
+            readers_count,
+            readers: vec![],
+            writer: None,
         }
     }
 
@@ -54,719 +81,309 @@ impl DbTabWrite {
         self.env = Some(env);
     }
 
-    pub fn spawn_write_service(&mut self) {
-        let env = self.env.clone().unwrap();
-        let modifications = self.modifications.clone();
-        let must_abort = self.must_abort.clone();
-        let (tx, rx) = unbounded::<DbTabRWMessage>();
-
-        let _ =
-            thread::Builder::new()
-                .name("lmdb_write_thread".to_owned())
-                .spawn(move || loop {
-                    match rx.recv() {
-                        Ok(DbTabRWMessage::Modify(txid, mods, cb)) => {
-                            // println!(
-                            //     "pool modify txid: {:?}, mods: {:?}, len: {:?}",
-                            //     txid,
-                            //     mods,
-                            //     modifications.lock().unwrap().len()
-                            // );
-                            // batch write for one txn
-                            modifications
-                                .lock()
-                                .unwrap()
-                                .entry(txid)
-                                .and_modify(|(m, c)| {
-                                    m.push(mods.clone());
-                                    *c += 1;
-                                })
-                                .or_insert((vec![mods.clone()], 1));
-
-                            // ensure it's not a meta txn
-                            if mods[0].ware != Atom::from("") {
-                                println!("This is not a meta txn");
-                                OPENED_TABLES
-                                    .lock()
-                                    .unwrap()
-                                    .entry(mods[0].tab.get_hash())
-                                    .or_insert_with(|| {
-                                        env.create_db(
-                                            Some(&mods[0].tab.to_string()),
-                                            DatabaseFlags::empty(),
-                                        )
-                                        .unwrap()
-                                    });
-                            }
-
-                            cb(Ok(()));
-                        }
-
-                        Ok(DbTabRWMessage::Commit(txid, cb)) => {
-                            let (modifies, count) =
-                                modifications.lock().unwrap().get(&txid).unwrap().clone();
-
-                            if modifies[0][0].ware == Atom::from("") {
-                                let mut txn = env.begin_rw_txn().unwrap();
-                                println!(
-                                    "=========== create lmdb meta txn txid: {:?} =============",
-                                    txid
-                                );
-
-                                for mods in modifies.iter() {
-                                    for m in mods.iter().skip(1) {
-                                        // this db should be opened previously, or this is a bug
-                                        let db = OPENED_TABLES
-                                            .lock()
-                                            .unwrap()
-                                            .get(&Atom::from("_$sinfo").get_hash())
-                                            .unwrap()
-                                            .clone();
-
-                                        // value is some, insert data
-                                        if m.value.is_some() {
-                                            match txn.put(
-                                                db,
-                                                m.key.as_ref(),
-                                                m.value.clone().unwrap().as_ref(),
-                                                WriteFlags::empty(),
-                                            ) {
-                                                Ok(_) => {}
-                                                Err(e) => cb(Err(format!(
-                                                    "lmdb internal insert data error: {:?}",
-                                                    e.to_string()
-                                                ))),
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if must_abort.lock().unwrap().get(&txid).is_some() {
-                                    txn.abort();
-                                    cb(Ok(()))
-                                } else {
-                                    match txn.commit() {
-                                        Ok(_) => {
-                                            cb(Ok(()));
-                                        }
-                                        Err(e) => cb(Err(format!(
-                                            "commit failed with error: {:?}",
-                                            e.to_string()
-                                        ))),
-                                    }
-                                }
-                                println!(
-                                    "======= meta txn txid: {:?} finally committed ==========",
-                                    txid
-                                );
-                                // remove txid from cache
-                                modifications.lock().unwrap().remove(&txid);
-                            } else {
-                                if count > 1 {
-                                    modifications.lock().unwrap().entry(txid).and_modify(
-                                        |(_, c)| {
-                                            *c -= 1;
-                                        },
-                                    );
-                                    cb(Ok(()));
-                                } else {
-                                    let mut txn = env.begin_rw_txn().unwrap();
-                                    println!(
-                                        "=========== create lmdb txn txid: {:?} =============",
-                                        txid
-                                    );
-
-                                    for mods in modifies.iter() {
-                                        for m in mods.iter() {
-                                            // this db should be opened previously, or this is a bug
-                                            let db = OPENED_TABLES
-                                                .lock()
-                                                .unwrap()
-                                                .get(&m.tab.get_hash())
-                                                .unwrap()
-                                                .clone();
-
-                                            // value is some, insert data
-                                            if m.value.is_some() {
-                                                match txn.put(
-                                                    db,
-                                                    m.key.as_ref(),
-                                                    m.value.clone().unwrap().as_ref(),
-                                                    WriteFlags::empty(),
-                                                ) {
-                                                    Ok(_) => {}
-                                                    Err(e) => cb(Err(format!(
-                                                        "lmdb internal insert data error: {:?}",
-                                                        e.to_string()
-                                                    ))),
-                                                }
-                                            // value is None, delete data
-                                            } else {
-                                                match txn.del(db, m.key.as_ref(), None) {
-                                                    Ok(_) => {}
-                                                    Err(Error::NotFound) => {
-                                                        // TODO: when not found?
-                                                    }
-                                                    Err(e) => cb(Err(format!(
-                                                        "delete data error: {:?}",
-                                                        e.to_string()
-                                                    ))),
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if must_abort.lock().unwrap().get(&txid).is_some() {
-                                        txn.abort();
-                                        cb(Ok(()))
-                                    } else {
-                                        match txn.commit() {
-                                            Ok(_) => {
-                                                cb(Ok(()));
-                                            }
-                                            Err(e) => cb(Err(format!(
-                                                "commit failed with error: {:?}",
-                                                e.to_string()
-                                            ))),
-                                        }
-                                    }
-                                    println!(
-                                        "======= rw txid: {:?} finally committed ==========",
-                                        txid
-                                    );
-                                    // remove txid from cache
-                                    modifications.lock().unwrap().remove(&txid);
-                                }
-                            }
-                        }
-
-                        Ok(DbTabRWMessage::Rollback(txid, cb)) => {
-                            if modifications.lock().unwrap().contains_key(&txid) {
-                                must_abort.lock().unwrap().entry(txid).and_modify(|v| {
-                                    *v = true;
-                                });
-                            }
-                            cb(Ok(()));
-                        }
-
-                        Err(_e) => {}
-                    }
-                });
-
-        self.sender = Some(Arc::new(tx));
-    }
-
-    pub fn get_rw_sender(&self) -> Option<Arc<Sender<DbTabRWMessage>>> {
-        self.sender.clone()
-    }
-}
-
-#[derive(Debug)]
-pub struct DbTabReadPool {
-    env: Option<Arc<Environment>>,
-    tab_sender_map: Arc<Mutex<HashMap<u64, Sender<DbTabROMessage>>>>,
-    tab_iterators: Arc<Mutex<HashMap<(u64, bool, Option<Bin>), Option<Bin>>>>,
-    no_op_senders: Arc<Mutex<HashMap<u64, Vec<Sender<NopMessage>>>>>,
-    txn_count: Arc<Mutex<HashMap<u64, u32>>>,
-}
-
-impl DbTabReadPool {
-    pub fn new() -> Self {
-        Self {
-            env: None,
-            tab_sender_map: Arc::new(Mutex::new(HashMap::new())),
-            tab_iterators: Arc::new(Mutex::new(HashMap::new())),
-            no_op_senders: Arc::new(Mutex::new(HashMap::new())),
-            txn_count: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub fn set_env(&mut self, env: Arc<Environment>) {
-        self.env = Some(env);
-    }
-
-    pub fn spawn_read_service(&mut self, tab: Atom) {
-        println!("======= spawn read service for tab: {:?} =======", tab);
-        let env = self.env.clone().unwrap();
-        let tab_iterators = self.tab_iterators.clone();
-        let txn_count = self.txn_count.clone();
-
-        OPENED_TABLES
-            .lock()
+    pub fn create_tab(&mut self, tab: &Atom) {
+        println!("create tab: {:?}", tab);
+        let db = self
+            .env
+            .as_ref()
             .unwrap()
-            .entry(tab.get_hash())
-            .or_insert_with(|| {
-                env.create_db(Some(&tab.to_string()), DatabaseFlags::empty())
-                    .unwrap()
-            });
-
-        self.tab_sender_map
-            .lock()
-            .unwrap()
-            .entry(tab.get_hash())
-            .or_insert_with(|| {
-                let (tx, rx) = unbounded();
-
-                let _ = thread::Builder::new()
-                    .name(format!("lmdb_read_{}", tab.get_hash()))
-                    .spawn(move || {
-                        let db = env
-                            .create_db(Some(&tab.to_string()), DatabaseFlags::empty())
-                            .unwrap();
-                        loop {
-                            // handle channel message
-                            match rx.recv() {
-                                Ok(DbTabROMessage::Query(txid, queries, cb)) => {
-                                    let mut qr = vec![];
-                                    let mut query_error = false;
-                                    let txn = env.begin_ro_txn().unwrap();
-
-                                    txn_count
-                                        .lock()
-                                        .unwrap()
-                                        .entry(txid)
-                                        .and_modify(|count| *count += 1)
-                                        .or_insert(1);
-
-                                    for q in queries.iter() {
-                                        match txn.get(db, q.key.as_ref()) {
-                                            Ok(v) => {
-                                                qr.push(TabKV {
-                                                    ware: q.ware.clone(),
-                                                    tab: q.tab.clone(),
-                                                    key: q.key.clone(),
-                                                    index: q.index,
-                                                    value: Some(Arc::new(Vec::from(v))),
-                                                });
-                                            }
-
-                                            Err(Error::NotFound) => {
-                                                qr.push(TabKV {
-                                                    ware: q.ware.clone(),
-                                                    tab: q.tab.clone(),
-                                                    key: q.key.clone(),
-                                                    index: q.index,
-                                                    value: None,
-                                                });
-                                            }
-
-                                            Err(_) => {
-                                                query_error = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    let _ = txn.commit().unwrap();
-
-                                    if query_error {
-                                        cb(Err(format!("lmdb query internal error")));
-                                    } else {
-                                        cb(Ok(qr));
-                                    }
-                                }
-
-                                Ok(DbTabROMessage::CreateItemIter(txid, desc, key, sender)) => {
-                                    let txn = env.begin_ro_txn().unwrap();
-                                    let cursor = txn.open_ro_cursor(db).unwrap();
-
-                                    println!(
-                                        "pool create item iter txid: {:?}, key: {:?}, tab: {:?}",
-                                        txid, key, db
-                                    );
-                                    txn_count
-                                        .lock()
-                                        .unwrap()
-                                        .entry(txid)
-                                        .and_modify(|count| *count += 1)
-                                        .or_insert(1);
-
-                                    match (desc, key) {
-                                        (true, None) => match cursor.get(None, None, MDB_FIRST) {
-                                            Ok(val) => {
-                                                tab_iterators.lock().unwrap().insert(
-                                                    (txid, true, None),
-                                                    Some(Arc::new(val.0.unwrap().to_vec())),
-                                                );
-                                            }
-                                            Err(Error::NotFound) => {
-                                                tab_iterators
-                                                    .lock()
-                                                    .unwrap()
-                                                    .entry((txid, true, None))
-                                                    .or_insert(None);
-                                            }
-                                            Err(_) => {}
-                                        },
-                                        (true, Some(k)) => {
-                                            match cursor.get(Some(k.as_ref()), None, MDB_SET_KEY) {
-                                                Ok(val) => {
-                                                    tab_iterators.lock().unwrap().insert(
-                                                        (txid, true, Some(k)),
-                                                        Some(Arc::new(val.0.unwrap().to_vec())),
-                                                    );
-                                                }
-                                                Err(Error::NotFound) => {
-                                                    tab_iterators
-                                                        .lock()
-                                                        .unwrap()
-                                                        .entry((txid, true, Some(k)))
-                                                        .or_insert(None);
-                                                }
-                                                Err(_) => {}
-                                            }
-                                        }
-                                        (false, None) => match cursor.get(None, None, MDB_LAST) {
-                                            Ok(val) => {
-                                                tab_iterators.lock().unwrap().insert(
-                                                    (txid, false, None),
-                                                    Some(Arc::new(val.0.unwrap().to_vec())),
-                                                );
-                                            }
-                                            Err(Error::NotFound) => {
-                                                tab_iterators
-                                                    .lock()
-                                                    .unwrap()
-                                                    .entry((txid, false, None))
-                                                    .or_insert(None);
-                                            }
-                                            Err(_) => {}
-                                        },
-                                        (false, Some(k)) => {
-                                            match cursor.get(None, None, MDB_SET_KEY) {
-                                                Ok(val) => {
-                                                    tab_iterators.lock().unwrap().insert(
-                                                        (txid, false, Some(k)),
-                                                        Some(Arc::new(val.0.unwrap().to_vec())),
-                                                    );
-                                                }
-                                                Err(Error::NotFound) => {
-                                                    tab_iterators
-                                                        .lock()
-                                                        .unwrap()
-                                                        .entry((txid, false, Some(k)))
-                                                        .or_insert(None);
-                                                }
-                                                Err(_) => {}
-                                            }
-                                        }
-                                    }
-                                    // notify create iter success
-                                    let _ = sender.send(()).unwrap();
-                                }
-
-                                Ok(DbTabROMessage::NextItem(txid, desc, start_key, cb)) => {
-                                    println!("Next item  txid: {:?}", txid);
-                                    let txn = env.begin_ro_txn().unwrap();
-                                    let cursor = txn.open_ro_cursor(db).unwrap();
-
-                                    let cur_key = tab_iterators
-                                        .lock()
-                                        .unwrap()
-                                        .get(&(txid, desc, start_key.clone()))
-                                        .unwrap()
-                                        .clone();
-
-                                    match (desc, start_key, cur_key) {
-                                        (true, None, None) => cb(Ok(None)),
-                                        (true, None, Some(k)) => {
-                                            match cursor.get(Some(k.as_ref()), None, MDB_SET_KEY) {
-                                                Ok(val) => {
-                                                    cb(Ok(Some((
-                                                        k.clone(),
-                                                        Arc::new(val.1.to_vec()),
-                                                    ))));
-                                                }
-                                                Err(Error::NotFound) => {}
-                                                Err(_) => {}
-                                            }
-
-                                            // get next key
-                                            match cursor.get(Some(k.as_ref()), None, MDB_NEXT) {
-                                                Ok(val) => {
-                                                    // update current key for txid
-                                                    tab_iterators.lock().unwrap().insert(
-                                                        (txid, true, None),
-                                                        Some(Arc::new(val.0.unwrap().to_vec())),
-                                                    );
-                                                }
-
-                                                Err(Error::NotFound) => {
-                                                    tab_iterators
-                                                        .lock()
-                                                        .unwrap()
-                                                        .insert((txid, true, None), None);
-                                                }
-
-                                                Err(e) => cb(Err(format!(
-                                                    "lmdb iter internal error: {:?}",
-                                                    e
-                                                ))),
-                                            }
-                                        }
-
-                                        (false, None, None) => cb(Ok(None)),
-                                        (false, None, Some(k)) => {
-                                            match cursor.get(Some(k.as_ref()), None, MDB_SET_KEY) {
-                                                Ok(val) => {
-                                                    cb(Ok(Some((
-                                                        k.clone(),
-                                                        Arc::new(val.1.to_vec()),
-                                                    ))));
-                                                }
-                                                Err(Error::NotFound) => {}
-                                                Err(_) => {}
-                                            }
-
-                                            // get prev key
-                                            match cursor.get(Some(k.as_ref()), None, MDB_PREV) {
-                                                Ok(val) => {
-                                                    // update current key for txid
-                                                    tab_iterators.lock().unwrap().insert(
-                                                        (txid, false, None),
-                                                        Some(Arc::new(val.0.unwrap().to_vec())),
-                                                    );
-                                                }
-
-                                                Err(Error::NotFound) => {
-                                                    tab_iterators
-                                                        .lock()
-                                                        .unwrap()
-                                                        .insert((txid, false, None), None);
-                                                }
-
-                                                Err(e) => cb(Err(format!(
-                                                    "lmdb iter internal error: {:?}",
-                                                    e
-                                                ))),
-                                            }
-                                        }
-
-                                        (true, Some(_), None) => cb(Ok(None)),
-                                        (true, Some(sk), Some(k)) => {
-                                            match cursor.get(Some(k.as_ref()), None, MDB_SET_KEY) {
-                                                Ok(val) => {
-                                                    cb(Ok(Some((
-                                                        k.clone(),
-                                                        Arc::new(val.1.to_vec()),
-                                                    ))));
-                                                }
-                                                Err(Error::NotFound) => {}
-                                                Err(_) => {}
-                                            }
-
-                                            // get next key
-                                            match cursor.get(Some(k.as_ref()), None, MDB_NEXT) {
-                                                Ok(val) => {
-                                                    // update current key for txid
-                                                    tab_iterators.lock().unwrap().insert(
-                                                        (txid, true, Some(sk)),
-                                                        Some(Arc::new(val.0.unwrap().to_vec())),
-                                                    );
-                                                }
-
-                                                Err(Error::NotFound) => {
-                                                    tab_iterators
-                                                        .lock()
-                                                        .unwrap()
-                                                        .insert((txid, true, Some(sk)), None);
-                                                }
-
-                                                Err(e) => cb(Err(format!(
-                                                    "lmdb iter internal error: {:?}",
-                                                    e
-                                                ))),
-                                            }
-                                        }
-
-                                        (false, Some(_), None) => cb(Ok(None)),
-                                        (false, Some(sk), Some(k)) => {
-                                            match cursor.get(Some(k.as_ref()), None, MDB_SET_KEY) {
-                                                Ok(val) => {
-                                                    cb(Ok(Some((
-                                                        k.clone(),
-                                                        Arc::new(val.1.to_vec()),
-                                                    ))));
-                                                }
-                                                Err(Error::NotFound) => {}
-                                                Err(_) => {}
-                                            }
-
-                                            // get prev key
-                                            match cursor.get(Some(k.as_ref()), None, MDB_PREV) {
-                                                Ok(val) => {
-                                                    // update current key for txid
-                                                    tab_iterators.lock().unwrap().insert(
-                                                        (txid, false, Some(sk)),
-                                                        Some(Arc::new(val.0.unwrap().to_vec())),
-                                                    );
-                                                }
-
-                                                Err(Error::NotFound) => {
-                                                    tab_iterators
-                                                        .lock()
-                                                        .unwrap()
-                                                        .insert((txid, false, Some(sk)), None);
-                                                }
-
-                                                Err(e) => cb(Err(format!(
-                                                    "lmdb iter internal error: {:?}",
-                                                    e
-                                                ))),
-                                            }
-                                        }
-                                    }
-
-                                    std::mem::drop(cursor);
-                                    let _ = txn.commit().unwrap();
-                                }
-
-                                // channel recv error
-                                Err(_) => {}
-                            }
-                        }
-                    });
-                tx
-            });
+            .create_db(Some(tab.as_str()), DatabaseFlags::empty())
+            .expect("Fatal error: open table failed");
+        OPENED_TABLES.write().unwrap().insert(tab.get_hash(), db);
     }
 
-    pub fn get_ro_sender(&self, tab: &Atom) -> Option<Sender<DbTabROMessage>> {
-        self.tab_sender_map
-            .lock()
-            .unwrap()
-            .get(&tab.get_hash())
-            .map(|sender| sender.clone())
+    pub fn start(&mut self) {
+        self.spawn_readers();
+        self.spawn_writer();
     }
 
-    pub fn commit_ro_txn(&self, txid: u64, cb: TxCallback) {
-        // println!("ro txn commit txid: {:?}", txid);
-        if *self.txn_count.lock().unwrap().get(&txid).unwrap() <= 1 {
-            // give back no op sender
-            if let Some(senders) = self.no_op_senders.lock().unwrap().get(&txid) {
-                senders
-                    .iter()
-                    .for_each(|s| NO_OP_POOL.lock().unwrap().push(s.clone()));
-            }
-            self.no_op_senders.lock().unwrap().remove(&txid);
-
-            let tab_iterators = self.tab_iterators.lock().unwrap().clone();
-            tab_iterators
-                .keys()
-                .filter(|(id, _, _)| *id != txid)
-                .for_each(|key| {
-                    self.tab_iterators.lock().unwrap().remove(&key);
-                });
-
-            // BUG: how to give back no op sender?
-            let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
-            let _ = nop_sender.send(NopMessage::Nop(cb));
-            println!("======= ro txid: {:?} finally committed ==========", txid);
-        } else {
-            let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
-            let _ = nop_sender.send(NopMessage::Nop(cb));
-            self.no_op_senders
-                .lock()
-                .unwrap()
-                .entry(txid)
-                .and_modify(|senders| {
-                    senders.push(nop_sender.clone());
-                })
-                .or_insert(vec![nop_sender]);
-
-            self.txn_count
-                .lock()
-                .unwrap()
-                .entry(txid)
-                .and_modify(|count| {
-                    *count -= 1;
-                });
-        }
+    pub fn ro_sender(&self, tab: &Atom) -> Option<Sender<ReaderMsg>> {
+        Some(self.readers[(tab.get_hash() as usize) % self.readers_count].clone())
     }
 
-    pub fn rollback_ro_txn(&self, txid: u64, cb: TxCallback) {
-        if *self.txn_count.lock().unwrap().get(&txid).unwrap() == 1 {
-            // give back no op sender
-            self.no_op_senders
-                .lock()
-                .unwrap()
-                .get(&txid)
-                .unwrap()
-                .iter()
-                .for_each(|s| {
-                    NO_OP_POOL.lock().unwrap().push(s.clone());
-                });
-            self.no_op_senders.lock().unwrap().remove(&txid);
-
-            let tab_iterators = self.tab_iterators.lock().unwrap().clone();
-            tab_iterators
-                .keys()
-                .filter(|(id, _, _)| *id != txid)
-                .for_each(|key| {
-                    self.tab_iterators.lock().unwrap().remove(&key);
-                });
-        } else {
-            let nop_sender = NO_OP_POOL.lock().unwrap().pop().unwrap();
-            let _ = nop_sender.send(NopMessage::Nop(cb));
-            self.no_op_senders
-                .lock()
-                .unwrap()
-                .entry(txid)
-                .and_modify(|senders| {
-                    senders.push(nop_sender.clone());
-                })
-                .or_insert(vec![nop_sender]);
-        }
-    }
-}
-
-pub enum NopMessage {
-    Nop(TxCallback),
-}
-
-#[derive(Debug)]
-pub struct NopPool {
-    senders: Vec<Sender<NopMessage>>,
-}
-
-unsafe impl Send for NopMessage {}
-
-impl NopPool {
-    pub fn new() -> Self {
-        Self {
-            senders: Vec::new(),
-        }
+    pub fn rw_sender(&self) -> Option<Sender<WriterMsg>> {
+        self.writer.clone()
     }
 
-    pub fn start_nop_pool(&mut self, cap: usize) {
-        for _ in 0..cap {
-            let (tx, rx) = bounded(1);
+    fn spawn_readers(&mut self) {
+        (0..self.readers_count).for_each(|i| {
+            let env = self.env.clone();
+            let (tx, rx) = unbounded();
 
             thread::spawn(move || loop {
                 match rx.recv() {
-                    Ok(NopMessage::Nop(cb)) => cb(Ok(())),
+                    Ok(ReaderMsg::Commit(cb)) => cb(Ok(())),
+                    Ok(ReaderMsg::Query(queries, cb)) => {
+                        let mut qr = vec![];
+                        let mut query_error = false;
+                        let txn = env.as_ref().unwrap()
+                            .begin_ro_txn()
+                            .expect("Fatal error: Lmdb can't create ro txn");
+                        for q in queries.iter() {
+                            let db = OPENED_TABLES
+                                .read()
+                                .unwrap()
+                                .get(&q.tab.get_hash())
+                                .unwrap()
+                                .clone();
+                            match txn.get(db, q.key.as_ref()) {
+                                Ok(v) => {
+                                    qr.push(TabKV {
+                                        ware: q.ware.clone(),
+                                        tab: q.tab.clone(),
+                                        key: q.key.clone(),
+                                        index: q.index,
+                                        value: Some(Arc::new(Vec::from(v))),
+                                    });
+                                }
 
-                    Err(_) => {}
+                                Err(Error::NotFound) => {
+                                    qr.push(TabKV {
+                                        ware: q.ware.clone(),
+                                        tab: q.tab.clone(),
+                                        key: q.key.clone(),
+                                        index: q.index,
+                                        value: None,
+                                    });
+                                }
+
+                                Err(_) => {
+                                    query_error = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if query_error {
+                            cb(Err(format!("lmdb query internal error")));
+                        } else {
+                            cb(Ok(qr));
+                        }
+
+                        let _ = txn.commit();
+                    }
+                    Ok(ReaderMsg::CreateItemIter(descending, tab, start_key, sndr)) => {
+                        let txn = env.as_ref().unwrap()
+                            .begin_ro_txn()
+                            .expect("Fatal error: Lmdb can't create ro txn");
+                        let db = OPENED_TABLES
+                            .read()
+                            .unwrap()
+                            .get(&tab.get_hash())
+                            .unwrap()
+                            .clone();
+                        let cursor = txn
+                            .open_ro_cursor(db)
+                            .expect(&format!("Fatal error: open cursor for db: {:?} failed", db));
+
+                        match (descending, start_key) {
+                            (true, None) => match cursor.get(None, None, MDB_FIRST) {
+                                Ok(val) => {
+                                    let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                }
+                                Err(Error::NotFound) => {
+                                    let _ = sndr.send(None);
+                                }
+
+                                Err(_) => {}
+                            },
+                            (true, Some(sk)) => {
+                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_KEY) {
+                                    Ok(val) => {
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+                                    Err(Error::NotFound) => {
+                                        let _ = sndr.send(None);
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                            (false, Some(sk)) => {
+                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_KEY) {
+                                    Ok(val) => {
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+                                    Err(Error::NotFound) => {
+                                        let _ = sndr.send(None);
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                            (false, None) => match cursor.get(None, None, MDB_LAST) {
+                                Ok(val) => {
+                                    let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                }
+                                Err(Error::NotFound) => {
+                                    let _ = sndr.send(None);
+                                }
+                                Err(_) => {}
+                            },
+                        }
+                    }
+                    Ok(ReaderMsg::NextItem(descending, tab, cur_key, cb, sndr)) => {
+                        let txn = env.as_ref().unwrap()
+                            .begin_ro_txn()
+                            .expect("Fatal error: Lmdb can't create ro txn");
+                        let db = OPENED_TABLES
+                            .read()
+                            .unwrap()
+                            .get(&tab.get_hash())
+                            .unwrap()
+                            .clone();
+                        let cursor = txn
+                            .open_ro_cursor(db)
+                            .expect(&format!("Fatal error: open cursor for db: {:?} failed", db));
+
+                        match (descending, cur_key) {
+                            (true, Some(ck)) => {
+                                match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
+                                    Ok(val) => {
+                                        cb(Ok(Some((ck.clone(), Arc::new(val.1.to_vec())))));
+                                    }
+                                    Err(Error::NotFound) => {}
+                                    Err(_) => {}
+                                }
+
+                                // get next key
+                                match cursor.get(Some(ck.as_ref()), None, MDB_NEXT) {
+                                    Ok(val) => {
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+
+                                    Err(Error::NotFound) => {
+                                        let _ = sndr.send(None);
+                                    }
+
+                                    Err(e) => cb(Err(format!("lmdb iter internal error: {:?}", e))),
+                                }
+                            }
+                            (false, Some(ck)) => {
+                                match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
+                                    Ok(val) => {
+                                        cb(Ok(Some((ck.clone(), Arc::new(val.1.to_vec())))));
+                                    }
+                                    Err(Error::NotFound) => {}
+                                    Err(_) => {}
+                                }
+
+                                // get next key
+                                match cursor.get(Some(ck.as_ref()), None, MDB_PREV) {
+                                    Ok(val) => {
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+
+                                    Err(Error::NotFound) => {
+                                        let _ = sndr.send(None);
+                                    }
+
+                                    Err(e) => cb(Err(format!("lmdb iter internal error: {:?}", e))),
+                                }
+                            }
+
+                            _ => ()
+                        }
+                    }
+                    Ok(ReaderMsg::Rollback(cb)) => cb(Ok(())),
+                    Err(_) => (),
                 }
             });
-
-            self.senders.push(tx);
-        }
+            self.readers.push(tx);
+        })
     }
 
-    pub fn push(&mut self, sender: Sender<NopMessage>) {
-        self.senders.push(sender);
-    }
+    fn spawn_writer(&mut self) {
+        let env = self.env.clone();
+        let (tx, rx) = unbounded();
 
-    pub fn pop(&mut self) -> Option<Sender<NopMessage>> {
-        self.senders.pop()
+        thread::spawn(move || loop {
+            match rx.recv() {
+                Ok(WriterMsg::Modify(cb)) => cb(Ok(())),
+                Ok(WriterMsg::Commit(modifies, meta, cb)) => {
+                    // if it is a meta txn commit it directly
+                    if meta {
+                        let db = OPENED_TABLES
+                            .read()
+                            .unwrap()
+                            .get(&Atom::from("_$sinfo").get_hash())
+                            .unwrap()
+                            .clone();
+
+                        let mut txn = env.as_ref().unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn");
+                        match txn.put(
+                            db,
+                            modifies[0].key.as_ref(),
+                            modifies[0].value.clone().unwrap().as_ref(),
+                            WriteFlags::empty(),
+                        ) {
+                            Ok(_) => {}
+                            Err(_) => cb(Err("meta txn modify error".to_owned())),
+                        }
+                        match txn.commit() {
+                            Ok(_) => cb(Ok(())),
+                            Err(_) => cb(Err("meta txn commit erorr".to_owned())),
+                        }
+                    } else {
+                        let mut txn = env.as_ref().unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn");
+
+                        for m in modifies.iter() {
+                            // this db should be opened previously, or this is a bug
+                            let db = OPENED_TABLES
+                                .read()
+                                .unwrap()
+                                .get(&m.tab.get_hash())
+                                .unwrap()
+                                .clone();
+
+                            // value is some, insert data
+                            if m.value.is_some() {
+                                match txn.put(
+                                    db,
+                                    m.key.as_ref(),
+                                    m.value.clone().unwrap().as_ref(),
+                                    WriteFlags::empty(),
+                                ) {
+                                    Ok(_) => {}
+                                    Err(e) => cb(Err(format!(
+                                        "lmdb internal insert data error: {:?}",
+                                        e.to_string()
+                                    ))),
+                                }
+                            // value is None, delete data
+                            } else {
+                                match txn.del(db, m.key.as_ref(), None) {
+                                    Ok(_) => {}
+                                    Err(Error::NotFound) => {
+                                        // TODO: when not found?
+                                    }
+                                    Err(e) => {
+                                        cb(Err(format!("delete data error: {:?}", e.to_string())))
+                                    }
+                                }
+                            }
+                        }
+
+                        match txn.commit() {
+                            Ok(_) => cb(Ok(())),
+                            Err(e) => cb(Err(format!(
+                                "commit failed with error: {:?}",
+                                e.to_string()
+                            ))),
+                        }
+                    }
+                }
+                Ok(WriterMsg::Rollback(cb)) => cb(Ok(())),
+                Err(_) => (),
+            }
+        });
+        self.writer = Some(tx);
     }
 }
 
 lazy_static! {
-    pub static ref NO_OP_POOL: Arc<Mutex<NopPool>> = Arc::new(Mutex::new(NopPool::new()));
-
     // all opened dbs in this env
-    static ref OPENED_TABLES: Arc<Mutex<HashMap<u64, Database>>> = Arc::new(Mutex::new(HashMap::new()));
-
-    pub static ref DB_TAB_READ_POOL: Arc<Mutex<DbTabReadPool>> = Arc::new(Mutex::new(DbTabReadPool::new()));
-    pub static ref DB_TAB_WRITE: Arc<Mutex<DbTabWrite>> = Arc::new(Mutex::new(DbTabWrite::new()));
+    static ref OPENED_TABLES: Arc<RwLock<HashMap<u64, Database>>> = Arc::new(RwLock::new(HashMap::new()));
 }
