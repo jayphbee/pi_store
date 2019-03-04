@@ -82,14 +82,17 @@ impl LmdbService {
     }
 
     pub fn create_tab(&mut self, tab: &Atom) {
-        println!("create tab: {:?}", tab);
-        let db = self
-            .env
-            .as_ref()
+        OPENED_TABLES
+            .write()
             .unwrap()
-            .create_db(Some(tab.as_str()), DatabaseFlags::empty())
-            .expect("Fatal error: open table failed");
-        OPENED_TABLES.write().unwrap().insert(tab.get_hash(), db);
+            .entry(tab.get_hash())
+            .or_insert_with(|| {
+                self.env
+                    .as_ref()
+                    .unwrap()
+                    .create_db(Some(tab.as_str()), DatabaseFlags::empty())
+                    .expect("Fatal error: open table failed")
+            });
     }
 
     pub fn start(&mut self) {
@@ -116,7 +119,9 @@ impl LmdbService {
                     Ok(ReaderMsg::Query(queries, cb)) => {
                         let mut qr = vec![];
                         let mut query_error = false;
-                        let txn = env.as_ref().unwrap()
+                        let txn = env
+                            .as_ref()
+                            .unwrap()
                             .begin_ro_txn()
                             .expect("Fatal error: Lmdb can't create ro txn");
                         for q in queries.iter() {
@@ -163,7 +168,9 @@ impl LmdbService {
                         let _ = txn.commit();
                     }
                     Ok(ReaderMsg::CreateItemIter(descending, tab, start_key, sndr)) => {
-                        let txn = env.as_ref().unwrap()
+                        let txn = env
+                            .as_ref()
+                            .unwrap()
                             .begin_ro_txn()
                             .expect("Fatal error: Lmdb can't create ro txn");
                         let db = OPENED_TABLES
@@ -221,7 +228,10 @@ impl LmdbService {
                         }
                     }
                     Ok(ReaderMsg::NextItem(descending, tab, cur_key, cb, sndr)) => {
-                        let txn = env.as_ref().unwrap()
+                        // println!("pool next item descending: {:?}, cur_key: {:?}", descending, cur_key);
+                        let txn = env
+                            .as_ref()
+                            .unwrap()
                             .begin_ro_txn()
                             .expect("Fatal error: Lmdb can't create ro txn");
                         let db = OPENED_TABLES
@@ -233,6 +243,8 @@ impl LmdbService {
                         let cursor = txn
                             .open_ro_cursor(db)
                             .expect(&format!("Fatal error: open cursor for db: {:?} failed", db));
+
+                        // println!("next item create txn and cursor");
 
                         match (descending, cur_key) {
                             (true, Some(ck)) => {
@@ -280,7 +292,7 @@ impl LmdbService {
                                 }
                             }
 
-                            _ => ()
+                            _ => (),
                         }
                     }
                     Ok(ReaderMsg::Rollback(cb)) => cb(Ok(())),
@@ -308,24 +320,33 @@ impl LmdbService {
                             .unwrap()
                             .clone();
 
-                        let mut txn = env.as_ref().unwrap()
+                        let mut txn = env
+                            .as_ref()
+                            .unwrap()
                             .begin_rw_txn()
                             .expect("Fatal error: failed to begin rw txn");
-                        match txn.put(
-                            db,
-                            modifies[0].key.as_ref(),
-                            modifies[0].value.clone().unwrap().as_ref(),
-                            WriteFlags::empty(),
-                        ) {
-                            Ok(_) => {}
-                            Err(_) => cb(Err("meta txn modify error".to_owned())),
+
+                        for m in modifies.iter() {
+                            match txn.put(
+                                db,
+                                m.key.as_ref(),
+                                m.value.clone().unwrap().as_ref(),
+                                WriteFlags::empty(),
+                            ) {
+                                Ok(_) => {}
+                                Err(_) => cb(Err("meta txn modify error".to_owned())),
+                            }
                         }
+
                         match txn.commit() {
                             Ok(_) => cb(Ok(())),
                             Err(_) => cb(Err("meta txn commit erorr".to_owned())),
                         }
+                        println!("meta txn finally commited =========== ");
                     } else {
-                        let mut txn = env.as_ref().unwrap()
+                        let mut txn = env
+                            .as_ref()
+                            .unwrap()
                             .begin_rw_txn()
                             .expect("Fatal error: failed to begin rw txn");
 
@@ -373,6 +394,7 @@ impl LmdbService {
                                 e.to_string()
                             ))),
                         }
+                        println!("normal txn finally committed ==========");
                     }
                 }
                 Ok(WriterMsg::Rollback(cb)) => cb(Ok(())),

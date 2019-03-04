@@ -53,12 +53,11 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        println!("======= create new txid: {:?} ==========", id.time());
+        println!("======= create new txid: {:?} writable: {:?} ==========", id.time(), writable);
         let t = Arc::new(LmdbTableTxn {
             id: id.time(),
             writable: writable,
             state: Arc::new(Mutex::new(TxState::Ok)),
-            is_meta: false,
             modify_count: AtomicUsize::new(0usize),
             query_count: AtomicUsize::new(0usize),
             modifies: Arc::new(Mutex::new(Vec::new())),
@@ -72,10 +71,9 @@ pub struct LmdbTableTxn {
     id: u64,
     writable: bool,
     state: Arc<Mutex<TxState>>,
-    is_meta: bool,
+    query_count: AtomicUsize,
     modifies: Arc<Mutex<Vec<Vec<TabKV>>>>,
     modify_count: AtomicUsize,
-    query_count: AtomicUsize,
 }
 
 impl Txn for LmdbTableTxn {
@@ -96,29 +94,41 @@ impl Txn for LmdbTableTxn {
         *self.state.lock().unwrap() = TxState::Committing;
         let state1 = self.state.clone();
         let state2 = self.state.clone();
+        let state3 = self.state.clone();
+
         let cb1 = cb.clone();
         let cb2 = cb.clone();
+        let cb3 = cb.clone();
 
-        if self.writable {
-            println!(
-                " ========= commit rw txn txid: {:?} ============= ",
-                self.id
-            );
-            println!("commit modify ----- : {:?}", self.modifies.lock().unwrap()[0]);
+
+        if self.writable && self.modifies.lock().unwrap().len() != 0 {
+            // println!(
+            //     ">>>>>>>>>>>>>>>>>>>>>>>>>> modifies: {:?}",
+            //     *self.modifies.lock().unwrap()
+            // );
             let is_meta = if self.modifies.lock().unwrap()[0][0].tab == Atom::from("") {
-                self.modifies.lock().unwrap()[0].remove(0);
                 true
             } else {
                 false
             };
 
             let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
+            let mc = self.modify_count.load(SeqCst);
 
-            if self.modify_count.load(SeqCst) == 1 {
-                // commit rw txn
+            if is_meta {
+                let meta_modifies = self
+                    .modifies
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .into_iter()
+                    .flatten()
+                    .filter(|tabkv| tabkv.tab != Atom::from(""))
+                    .collect::<Vec<TabKV>>();
+
                 let _ = sender.send(WriterMsg::Commit(
-                    Arc::new(self.modifies.lock().unwrap().clone().into_iter().flatten().collect::<Vec<TabKV>>()),
-                    is_meta,
+                    Arc::new(meta_modifies),
+                    true,
                     Arc::new(move |c| match c {
                         Ok(_) => {
                             *state1.lock().unwrap() = TxState::Commited;
@@ -130,40 +140,74 @@ impl Txn for LmdbTableTxn {
                         }
                     }),
                 ));
+            }
+
+            // println!(
+            //     " ========= commit rw txn txid: {:?} meta: {:?} modidify_count: {:?} ============= ",
+            //     self.id, is_meta, mc
+            // );
+
+            if mc == 1 {
+                // commit rw txn
+                let _ = sender.send(WriterMsg::Commit(
+                    Arc::new(
+                        self.modifies
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<TabKV>>(),
+                    ),
+                    is_meta,
+                    Arc::new(move |c| match c {
+                        Ok(_) => {
+                            *state2.lock().unwrap() = TxState::Commited;
+                            cb2(Ok(()));
+                        }
+                        Err(e) => {
+                            *state2.lock().unwrap() = TxState::CommitFail;
+                            cb2(Err(e.to_string()));
+                        }
+                    }),
+                ));
             } else {
                 self.modify_count.fetch_sub(1, SeqCst);
-                sender.send(WriterMsg::Modify(Arc::new(move |c| match c {
-                        Ok(_) => {
-                            *state1.lock().unwrap() = TxState::Commited;
-                            cb1(Ok(()));
-                        }
-                        Err(e) => {
-                            *state1.lock().unwrap() = TxState::CommitFail;
-                            cb1(Err(e.to_string()));
-                        }
-                    })));
+                let _ = sender.send(WriterMsg::Modify(Arc::new(move |c| match c {
+                    Ok(_) => {
+                        *state3.lock().unwrap() = TxState::Commited;
+                        cb3(Ok(()));
+                    }
+                    Err(e) => {
+                        *state3.lock().unwrap() = TxState::CommitFail;
+                        cb3(Err(e.to_string()));
+                    }
+                })));
             }
         } else {
-            println!(
-                " ========= commit ro txn txid: {:?} ============= ",
-                self.id
-            );
-            
             let idx = self.query_count.load(SeqCst);
+            // println!(
+            //     " ========= commit ro txn txid: {:?} count: {:?} ============= ",
+            //     self.id, idx
+            // );
 
             if idx >= 1 {
-                let tab = self.modifies.lock().unwrap()[0][0].tab.clone();
-                let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
-                sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
-                        Ok(_) => {
-                            *state1.lock().unwrap() = TxState::Commited;
-                            cb1(Ok(()));
-                        }
-                        Err(e) => {
-                            *state1.lock().unwrap() = TxState::CommitFail;
-                            cb1(Err(e.to_string()));
-                        }
-                    })));
+                // let tab = self.modifies.lock().unwrap()[0][0].tab.clone();
+                let sender = LMDB_SERVICE
+                    .lock()
+                    .unwrap()
+                    .ro_sender(&Atom::from("_$sinfo")) // TODO
+                    .unwrap();
+                let _ = sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
+                    Ok(_) => {
+                        *state1.lock().unwrap() = TxState::Commited;
+                        cb1(Ok(()));
+                    }
+                    Err(e) => {
+                        *state1.lock().unwrap() = TxState::CommitFail;
+                        cb1(Err(e.to_string()));
+                    }
+                })));
             }
 
             self.query_count.fetch_sub(1, SeqCst);
@@ -195,19 +239,19 @@ impl Txn for LmdbTableTxn {
         } else {
             let idx = self.query_count.load(SeqCst);
 
-            if idx >= 1 {
+            if idx >= 1 && self.modifies.lock().unwrap().len() != 0 {
                 let tab = self.modifies.lock().unwrap()[0][0].tab.clone();
                 let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
-                sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
-                        Ok(_) => {
-                            *state1.lock().unwrap() = TxState::Rollbacked;
-                            cb1(Ok(()));
-                        }
-                        Err(e) => {
-                            *state1.lock().unwrap() = TxState::RollbackFail;
-                            cb1(Err(e.to_string()));
-                        }
-                    })));
+                let _ = sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
+                    Ok(_) => {
+                        *state1.lock().unwrap() = TxState::Rollbacked;
+                        cb1(Ok(()));
+                    }
+                    Err(e) => {
+                        *state1.lock().unwrap() = TxState::RollbackFail;
+                        cb1(Err(e.to_string()));
+                    }
+                })));
             }
 
             self.query_count.fetch_sub(1, SeqCst);
@@ -240,7 +284,7 @@ impl TabTxn for LmdbTableTxn {
             self.modify_count.fetch_add(1, SeqCst);
         }
         let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&arr[0].tab).unwrap();
-        sender.send(ReaderMsg::Query(
+        let _ = sender.send(ReaderMsg::Query(
             arr,
             Arc::new(move |q| match q {
                 Ok(v) => cb(Ok(v)),
@@ -259,19 +303,19 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        println!("====== modify txid: {:?} data: {:?}========", self.id, arr);
+        // println!("====== modify txid: {:?} data: {:?}========", self.id, arr);
 
         let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-        sender.send(WriterMsg::Modify(Arc::new(move |m| match m {
-                Ok(_) => cb(Ok(())),
-                Err(e) => cb(Err(e.to_string())),
-            })));
+        let _ = sender.send(WriterMsg::Modify(Arc::new(move |m| match m {
+            Ok(_) => cb(Ok(())),
+            Err(e) => cb(Err(e.to_string())),
+        })));
 
         self.modify_count.fetch_add(1, SeqCst);
         let data = arr.iter().cloned().collect::<Vec<TabKV>>();
         self.modifies.lock().unwrap().push(data);
 
-        println!("modifies: {:?}, len = {:?}", self.modifies, self.modifies.lock().unwrap().len());
+        // println!("modifies: {:?}, len = {:?}", self.modifies, self.modifies.lock().unwrap().len());
 
         None
     }
@@ -296,15 +340,15 @@ impl TabTxn for LmdbTableTxn {
             descending,
             tab.clone(),
             key.clone(),
-            tx.clone()
+            tx.clone(),
         ));
 
         match rx.recv() {
-            Ok(_) => {
+            Ok(k) => {
                 return Some(Ok(Box::new(LmdbItemsIter::new(
                     descending,
                     tab.clone(),
-                    key,
+                    k,
                     tx,
                     rx,
                     filter,
@@ -381,7 +425,7 @@ impl Iter for LmdbItemsIter {
             cb(Ok(None))
         } else {
             let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
-            sender.send(ReaderMsg::NextItem(
+            let _ = sender.send(ReaderMsg::NextItem(
                 self.desc,
                 self.tab.clone(),
                 self.cur_key.clone(),
@@ -402,7 +446,7 @@ impl Iter for LmdbItemsIter {
 
         match self.receiver.recv() {
             Ok(v) => self.cur_key = v,
-            Err(_) => ()
+            Err(_) => (),
         }
 
         None
@@ -422,7 +466,7 @@ impl LmdbMetaTxn {
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
-        println!("==== call MetaTxn::alter {:?}======", tab);
+        // println!("==== call MetaTxn::alter {:?}======", tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -482,7 +526,6 @@ impl Txn for LmdbMetaTxn {
     }
     // 提交一个事务
     fn commit(&self, cb: TxCallback) -> CommitResult {
-        println!("========== commit meta txn ============");
         self.0.commit(cb)
     }
     // 回滚一个事务
@@ -529,7 +572,6 @@ impl DB {
 
         LMDB_SERVICE.lock().unwrap().set_env(env.clone());
         LMDB_SERVICE.lock().unwrap().start();
-        
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
