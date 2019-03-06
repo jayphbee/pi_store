@@ -8,28 +8,17 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
-
 use atom::Atom;
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use guid::Guid;
 use pi_db::db::{Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
 use sinfo::EnumType;
-
 use pi_db::tabs::{TabLog, Tabs};
-
-use lmdb::{
-    Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags,
-};
-
+use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 use pool::{LmdbService, ReaderMsg, WriterMsg};
-
-lazy_static! {
-    static ref LMDB_SERVICE: Arc<Mutex<LmdbService>> = Arc::new(Mutex::new(LmdbService::new(17)));
-}
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
-
 const TIMEOUT: usize = 100;
 
 #[derive(Debug, Clone)]
@@ -685,4 +674,8 @@ impl WareSnapshot for LmdbSnapshot {
     fn rollback(&self, id: &Guid) {
         (self.0).tabs.write().unwrap().rollback(id)
     }
+}
+
+lazy_static! {
+    static ref LMDB_SERVICE: Arc<Mutex<LmdbService>> = Arc::new(Mutex::new(LmdbService::new(17)));
 }
