@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool};
+use std::sync::atomic::{AtomicUsize};
 use std::sync::atomic::Ordering::{SeqCst};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -91,10 +91,6 @@ impl Txn for LmdbTableTxn {
 
 
         if self.writable && self.modifies.lock().unwrap().len() != 0 {
-            // println!(
-            //     ">>>>>>>>>>>>>>>>>>>>>>>>>> modifies: {:?}",
-            //     *self.modifies.lock().unwrap()
-            // );
             let is_meta = if self.modifies.lock().unwrap()[0][0].tab == Atom::from("") {
                 true
             } else {
@@ -103,7 +99,6 @@ impl Txn for LmdbTableTxn {
 
             let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
             let mc = self.modify_count.load(SeqCst);
-
             if is_meta {
                 let meta_modifies = self
                     .modifies
@@ -211,6 +206,7 @@ impl Txn for LmdbTableTxn {
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state1 = self.state.clone();
         let cb1 = cb.clone();
+        self.modifies.lock().unwrap().clear();
 
         if self.writable {
             // rollback rw txn

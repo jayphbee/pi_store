@@ -327,6 +327,7 @@ impl LmdbService {
                             .expect("Fatal error: failed to begin rw txn");
 
                         for m in modifies.iter() {
+                            if m.tab == Atom::from("") { continue } //skip placeholder item
                             match txn.put(
                                 db,
                                 m.key.as_ref(),
