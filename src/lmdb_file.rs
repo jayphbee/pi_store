@@ -42,7 +42,7 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        println!("======= create new txid: {:?} writable: {:?} ==========", id.time(), writable);
+        // println!("======= create new txid: {:?} writable: {:?} ==========", id.time(), writable);
         let t = Arc::new(LmdbTableTxn {
             id: id.time(),
             writable: writable,
@@ -162,6 +162,7 @@ impl Txn for LmdbTableTxn {
                 ));
             } else {
                 self.modify_count.fetch_sub(1, SeqCst);
+                // send WriterMsg::Modify to execute commit cb
                 let _ = sender.send(WriterMsg::Modify(Arc::new(move |c| match c {
                     Ok(_) => {
                         *state3.lock().unwrap() = TxState::Commited;
@@ -185,7 +186,8 @@ impl Txn for LmdbTableTxn {
                 let sender = LMDB_SERVICE
                     .lock()
                     .unwrap()
-                    .ro_sender(&Atom::from("_$sinfo")) // TODO
+                    // we choose the fixed thread to commit ro txn, because ro txn commit is very fast
+                    .ro_sender(&Atom::from(SINFO))
                     .unwrap();
                 let _ = sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
                     Ok(_) => {
@@ -208,9 +210,7 @@ impl Txn for LmdbTableTxn {
     fn rollback(&self, cb: TxCallback) -> DBResult {
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state1 = self.state.clone();
-        let state2 = self.state.clone();
         let cb1 = cb.clone();
-        let cb2 = cb.clone();
 
         if self.writable {
             // rollback rw txn
@@ -231,7 +231,7 @@ impl Txn for LmdbTableTxn {
             if idx >= 1 && self.modifies.lock().unwrap().len() != 0 {
                 let tab = self.modifies.lock().unwrap()[0][0].tab.clone();
                 let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
-                let _ = sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
+                let _ = sender.send(ReaderMsg::Rollback(Arc::new(move |c| match c {
                     Ok(_) => {
                         *state1.lock().unwrap() = TxState::Rollbacked;
                         cb1(Ok(()));

@@ -342,7 +342,7 @@ impl LmdbService {
                             Ok(_) => cb(Ok(())),
                             Err(_) => cb(Err("meta txn commit erorr".to_owned())),
                         }
-                        println!("meta txn finally commited =========== ");
+                        // println!("meta txn finally commited =========== ");
                     } else {
                         let mut txn = env
                             .as_ref()
@@ -394,7 +394,7 @@ impl LmdbService {
                                 e.to_string()
                             ))),
                         }
-                        println!("normal txn finally committed ==========");
+                        // println!("normal txn finally committed ==========");
                     }
                 }
                 Ok(WriterMsg::Rollback(cb)) => cb(Ok(())),
