@@ -113,7 +113,7 @@ impl LmdbService {
             let env = self.env.clone();
             let (tx, rx) = unbounded();
 
-            thread::spawn(move || loop {
+            thread::Builder::new().name("Lmdb Reader".to_string()).spawn(move || loop {
                 match rx.recv() {
                     Ok(ReaderMsg::Commit(cb)) => cb(Ok(())),
                     Ok(ReaderMsg::Query(queries, cb)) => {
@@ -307,7 +307,7 @@ impl LmdbService {
         let env = self.env.clone();
         let (tx, rx) = unbounded();
 
-        thread::spawn(move || loop {
+        thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || loop {
             match rx.recv() {
                 Ok(WriterMsg::Modify(cb)) => cb(Ok(())),
                 Ok(WriterMsg::Commit(modifies, meta, cb)) => {

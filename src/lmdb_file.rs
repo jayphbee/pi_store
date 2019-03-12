@@ -288,7 +288,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        // println!("====== modify txid: {:?} data: {:?}========", self.id, arr);
+        // println!("====== modify txid: {:?} len: {:?}========", self.id, arr.len());
 
         let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
         let _ = sender.send(WriterMsg::Modify(Arc::new(move |m| match m {
@@ -427,11 +427,11 @@ impl Iter for LmdbItemsIter {
                 }),
                 self.sender.clone(),
             ));
-        }
 
-        match self.receiver.recv() {
-            Ok(v) => self.cur_key = v,
-            Err(_) => (),
+            match self.receiver.recv() {
+                Ok(v) => self.cur_key = v,
+                Err(_) => (),
+            }
         }
 
         None
