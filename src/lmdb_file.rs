@@ -2,18 +2,17 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize};
-use std::sync::atomic::Ordering::{SeqCst};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use atom::Atom;
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use guid::Guid;
 use pi_db::db::{Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
 use sinfo::EnumType;
 use pi_db::tabs::{TabLog, Tabs};
+use pi_db::mgr::{COMMIT_CHAN, CommitChan};
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 use pool::{LmdbService, ReaderMsg, WriterMsg};
 
@@ -42,14 +41,12 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        // println!("======= create new txid: {:?} writable: {:?} ==========", id.time(), writable);
+        info!("create new txid: {:?}, tab: {:?}, writable: {:?}", id.time(), self.name, writable);
         let t = Arc::new(LmdbTableTxn {
+            tab: self.name.clone(),
             id: id.time(),
             writable: writable,
             state: Arc::new(Mutex::new(TxState::Ok)),
-            modify_count: AtomicUsize::new(0usize),
-            query_count: AtomicUsize::new(0usize),
-            modifies: Arc::new(Mutex::new(Vec::new())),
         });
 
         t
@@ -57,12 +54,10 @@ impl Tab for LmdbTable {
 }
 
 pub struct LmdbTableTxn {
+    tab: Atom,
     id: u64,
     writable: bool,
     state: Arc<Mutex<TxState>>,
-    query_count: AtomicUsize,
-    modifies: Arc<Mutex<Vec<Vec<TabKV>>>>,
-    modify_count: AtomicUsize,
 }
 
 impl Txn for LmdbTableTxn {
@@ -82,122 +77,23 @@ impl Txn for LmdbTableTxn {
     fn commit(&self, cb: TxCallback) -> CommitResult {
         *self.state.lock().unwrap() = TxState::Committing;
         let state1 = self.state.clone();
-        let state2 = self.state.clone();
-        let state3 = self.state.clone();
 
-        let cb1 = cb.clone();
-        let cb2 = cb.clone();
-        let cb3 = cb.clone();
+        let ro_sender = LMDB_SERVICE
+                        .lock()
+                        .unwrap()
+                        .ro_sender(&self.tab.clone())
+                        .expect(&format!("Fatal error: cannot get ro sender for {:?}", &self.tab.to_string()));
 
-
-        if self.writable && self.modifies.lock().unwrap().len() != 0 {
-            let is_meta = if self.modifies.lock().unwrap()[0][0].tab == Atom::from("") {
-                true
-            } else {
-                false
-            };
-
-            let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-            let mc = self.modify_count.load(SeqCst);
-            if is_meta {
-                let meta_modifies = self
-                    .modifies
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .into_iter()
-                    .flatten()
-                    .filter(|tabkv| tabkv.tab != Atom::from(""))
-                    .collect::<Vec<TabKV>>();
-
-                let _ = sender.send(WriterMsg::Commit(
-                    Arc::new(meta_modifies),
-                    true,
-                    Arc::new(move |c| match c {
-                        Ok(_) => {
-                            *state1.lock().unwrap() = TxState::Commited;
-                            cb1(Ok(()));
-                        }
-                        Err(e) => {
-                            *state1.lock().unwrap() = TxState::CommitFail;
-                            cb1(Err(e.to_string()));
-                        }
-                    }),
-                ));
+        let _ = ro_sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
+            Ok(_) => {
+                *state1.lock().unwrap() = TxState::Commited;
+                cb(Ok(()));
             }
-
-            // println!(
-            //     " ========= commit rw txn txid: {:?} meta: {:?} modidify_count: {:?} ============= ",
-            //     self.id, is_meta, mc
-            // );
-
-            if mc == 1 {
-                // commit rw txn
-                let _ = sender.send(WriterMsg::Commit(
-                    Arc::new(
-                        self.modifies
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<TabKV>>(),
-                    ),
-                    is_meta,
-                    Arc::new(move |c| match c {
-                        Ok(_) => {
-                            *state2.lock().unwrap() = TxState::Commited;
-                            cb2(Ok(()));
-                        }
-                        Err(e) => {
-                            *state2.lock().unwrap() = TxState::CommitFail;
-                            cb2(Err(e.to_string()));
-                        }
-                    }),
-                ));
-            } else {
-                self.modify_count.fetch_sub(1, SeqCst);
-                // send WriterMsg::Modify to execute commit cb
-                let _ = sender.send(WriterMsg::Modify(Arc::new(move |c| match c {
-                    Ok(_) => {
-                        *state3.lock().unwrap() = TxState::Commited;
-                        cb3(Ok(()));
-                    }
-                    Err(e) => {
-                        *state3.lock().unwrap() = TxState::CommitFail;
-                        cb3(Err(e.to_string()));
-                    }
-                })));
+            Err(e) => {
+                *state1.lock().unwrap() = TxState::CommitFail;
+                cb(Err(e.to_string()));
             }
-        } else {
-            let idx = self.query_count.load(SeqCst);
-            // println!(
-            //     " ========= commit ro txn txid: {:?} count: {:?} ============= ",
-            //     self.id, idx
-            // );
-
-            if idx >= 1 {
-                // let tab = self.modifies.lock().unwrap()[0][0].tab.clone();
-                let sender = LMDB_SERVICE
-                    .lock()
-                    .unwrap()
-                    // we choose the fixed thread to commit ro txn, because ro txn commit is very fast
-                    .ro_sender(&Atom::from(SINFO))
-                    .unwrap();
-                let _ = sender.send(ReaderMsg::Commit(Arc::new(move |c| match c {
-                    Ok(_) => {
-                        *state1.lock().unwrap() = TxState::Commited;
-                        cb1(Ok(()));
-                    }
-                    Err(e) => {
-                        *state1.lock().unwrap() = TxState::CommitFail;
-                        cb1(Err(e.to_string()));
-                    }
-                })));
-            }
-
-            self.query_count.fetch_sub(1, SeqCst);
-        }
+        })));
 
         None
     }
@@ -205,42 +101,29 @@ impl Txn for LmdbTableTxn {
     fn rollback(&self, cb: TxCallback) -> DBResult {
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state1 = self.state.clone();
-        let cb1 = cb.clone();
-        self.modifies.lock().unwrap().clear();
+        let ro_sender = LMDB_SERVICE
+                        .lock()
+                        .unwrap()
+                        .ro_sender(&self.tab)
+                        .expect(&format!("Fatal error: cannot get ro sender for {:?}", &self.tab.to_string()));
 
-        if self.writable {
-            // rollback rw txn
-            let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-            let _ = sender.send(WriterMsg::Rollback(Arc::new(move |c| match c {
-                Ok(_) => {
-                    *state1.lock().unwrap() = TxState::Rollbacked;
-                    cb1(Ok(()));
-                }
-                Err(e) => {
-                    *state1.lock().unwrap() = TxState::RollbackFail;
-                    cb1(Err(e.to_string()));
-                }
-            })));
-        } else {
-            let idx = self.query_count.load(SeqCst);
-
-            if idx >= 1 && self.modifies.lock().unwrap().len() != 0 {
-                let tab = self.modifies.lock().unwrap()[0][0].tab.clone();
-                let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
-                let _ = sender.send(ReaderMsg::Rollback(Arc::new(move |c| match c {
-                    Ok(_) => {
-                        *state1.lock().unwrap() = TxState::Rollbacked;
-                        cb1(Ok(()));
-                    }
-                    Err(e) => {
-                        *state1.lock().unwrap() = TxState::RollbackFail;
-                        cb1(Err(e.to_string()));
-                    }
-                })));
-            }
-
-            self.query_count.fetch_sub(1, SeqCst);
+        // 删除未提交的修改
+        match MODS.lock().unwrap().remove(&self.id) {
+            Some(m) => info!("rollback txid: {:?}, modifies: {:?}", self.id, m),
+            None => {}
         }
+
+        // 不管是读写事务还是只读事务，直接回滚，调用上层回调
+        let _ = ro_sender.send(ReaderMsg::Rollback(Arc::new(move |c| match c {
+            Ok(_) => {
+                *state1.lock().unwrap() = TxState::Rollbacked;
+                cb(Ok(()));
+            }
+            Err(e) => {
+                *state1.lock().unwrap() = TxState::RollbackFail;
+                cb(Err(e.to_string()));
+            }
+        })));
 
         None
     }
@@ -264,11 +147,8 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
-        // println!("====== query txid: {:?} data: {:?}", self.id, arr.clone());
-        if self.writable {
-            self.modify_count.fetch_add(1, SeqCst);
-        }
-        let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&arr[0].tab).unwrap();
+        info!("query txid: {:?}, query item: {:?}", self.id, arr);
+        let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
         let _ = sender.send(ReaderMsg::Query(
             arr,
             Arc::new(move |q| match q {
@@ -276,7 +156,6 @@ impl TabTxn for LmdbTableTxn {
                 Err(e) => cb(Err(e.to_string())),
             }),
         ));
-        self.query_count.fetch_add(1, SeqCst);
 
         None
     }
@@ -288,7 +167,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        // println!("====== modify txid: {:?} len: {:?}========", self.id, arr.len());
+        info!("MODIFY: txid: {:?}, tab: {:?}, len: {:?}", self.id, self.tab, arr);
 
         let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
         let _ = sender.send(WriterMsg::Modify(Arc::new(move |m| match m {
@@ -296,11 +175,14 @@ impl TabTxn for LmdbTableTxn {
             Err(e) => cb(Err(e.to_string())),
         })));
 
-        self.modify_count.fetch_add(1, SeqCst);
         let data = arr.iter().cloned().collect::<Vec<TabKV>>();
-        self.modifies.lock().unwrap().push(data);
 
-        // println!("modifies: {:?}, len = {:?}", self.modifies, self.modifies.lock().unwrap().len());
+        MODS.lock().unwrap()
+            .entry(self.id)
+            .and_modify(|v| {
+                v.extend(data.iter().cloned());
+            })
+            .or_insert(data);
 
         None
     }
@@ -313,11 +195,7 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
-        // println!("====== create iter txid: {:?} tab: {:?}, key: {:?} ========", self.id, tab, key);
-        if self.writable {
-            self.modify_count.fetch_add(1, SeqCst);
-        }
-        self.query_count.fetch_add(1, SeqCst);
+        info!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
 
         let (tx, rx) = bounded(1);
         let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
@@ -331,6 +209,7 @@ impl TabTxn for LmdbTableTxn {
         match rx.recv() {
             Ok(k) => {
                 return Some(Ok(Box::new(LmdbItemsIter::new(
+                    self.id,
                     descending,
                     tab.clone(),
                     k,
@@ -374,6 +253,7 @@ impl TabTxn for LmdbTableTxn {
 
 /// lmdb iterator that navigate key and value
 pub struct LmdbItemsIter {
+    txid: u64,
     desc: bool,
     tab: Atom,
     cur_key: Option<Bin>,
@@ -384,6 +264,7 @@ pub struct LmdbItemsIter {
 
 impl LmdbItemsIter {
     pub fn new(
+        txid: u64,
         desc: bool,
         tab: Atom,
         cur_key: Option<Bin>,
@@ -392,6 +273,7 @@ impl LmdbItemsIter {
         _filter: Filter,
     ) -> Self {
         LmdbItemsIter {
+            txid,
             desc,
             tab,
             cur_key,
@@ -406,6 +288,8 @@ impl Iter for LmdbItemsIter {
     type Item = (Bin, Bin);
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
+        info!("next item: txid: {:?}, tab: {:?}, cur_key: {:?}, descending: {:?}", self.txid, self.tab, self.cur_key, self.desc);
+
         if self.cur_key.is_none() {
             cb(Ok(None))
         } else {
@@ -451,7 +335,7 @@ impl LmdbMetaTxn {
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
-        // println!("==== call MetaTxn::alter {:?}======", tab);
+        info!("META TXN: alter tab: {:?}", tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -467,27 +351,13 @@ impl MetaTxn for LmdbMetaTxn {
 
         let tabkv = TabKV {
             ware: Atom::from("file"), // hard code
-            tab: tab.clone(),
+            tab: Atom::from(SINFO), // 元信息写入 SINFO表中
             key: key,
             index: 0,
             value: value,
         };
 
-        self.0.modify(
-            Arc::new(vec![
-                TabKV {
-                    ware: Atom::from(""),
-                    tab: Atom::from(""),
-                    key: Arc::new(vec![]),
-                    index: 0,
-                    value: None,
-                },
-                tabkv,
-            ]),
-            None,
-            false,
-            cb,
-        )
+        self.0.modify(Arc::new(vec![tabkv]), None, false, cb)
     }
 
     // 快照拷贝表
@@ -527,6 +397,7 @@ pub struct DB {
 
 impl DB {
     pub fn new(name: Atom, db_size: usize) -> Result<Self, String> {
+        info!("create new db: {:?}, db_size: {:?}", name, db_size);
         if !Path::new(&name.to_string()).exists() {
             let _ = fs::create_dir(name.to_string());
         }
@@ -547,7 +418,7 @@ impl DB {
         // retrive meta table info of a DB
         let db = match env.open_db(Some(SINFO)) {
             Ok(db) => db,
-            Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).unwrap(),
+            Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).expect("Failed to open db to retrive meta table"),
         };
 
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
@@ -557,6 +428,38 @@ impl DB {
 
         LMDB_SERVICE.lock().unwrap().set_env(env.clone());
         LMDB_SERVICE.lock().unwrap().start();
+
+        let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
+
+        let _ = thread::spawn(move || {
+            info!("start thread serving for the finally commit");
+            loop {
+                match COMMIT_CHAN.1.recv() {
+                    Ok(CommitChan(txid, cb, sndr)) => {
+                        info!("receive commit notification for txid: {:?} ", txid.time());
+                        match MODS.lock().unwrap().remove(&txid.time()) {
+                            Some(v) => {
+                                info!("modifications to be committed: {:?}", v);
+                                let _ = rw_sender.send(WriterMsg::Commit(Arc::new(v.clone()), Arc::new(move |c| match c {
+                                    Ok(_) => {
+                                        cb(Ok(()));
+                                        info!("txid: {:?} finnaly committed", txid.time());
+                                        sndr.send(Arc::new(v.clone()));
+                                    }
+                                    Err(e) =>{
+                                        cb(Err(e.to_string()));
+                                        warn!("txid: {:?} commit failed", txid.time());
+                                    }
+                                })));
+                            }
+
+                            None => cb(Ok(())),
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
 
         for kv in cursor.iter() {
             tabs.set_tab_meta(
@@ -674,4 +577,5 @@ impl WareSnapshot for LmdbSnapshot {
 
 lazy_static! {
     static ref LMDB_SERVICE: Arc<Mutex<LmdbService>> = Arc::new(Mutex::new(LmdbService::new(17)));
+    static ref MODS: Arc<Mutex<HashMap<u64, Vec<TabKV>>>> = Arc::new(Mutex::new(HashMap::new()));
 }

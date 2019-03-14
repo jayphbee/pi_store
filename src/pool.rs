@@ -16,14 +16,16 @@
 
 5. 关于回滚
 */
-use crossbeam_channel::{bounded, unbounded, Sender};
+use crossbeam_channel::{unbounded, Sender};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::RwLock;
 use std::thread;
 
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags};
+
+use worker::impls::cast_store_task;
+use worker::task::TaskType;
 
 const MDB_SET_KEY: u32 = 16;
 const MDB_PREV: u32 = 12;
@@ -53,7 +55,7 @@ unsafe impl Send for ReaderMsg {}
 
 pub enum WriterMsg {
     Modify(TxCallback),
-    Commit(Arc<Vec<TabKV>>, bool, TxCallback),
+    Commit(Arc<Vec<TabKV>>, TxCallback),
     Rollback(TxCallback),
 }
 
@@ -82,6 +84,7 @@ impl LmdbService {
     }
 
     pub fn create_tab(&mut self, tab: &Atom) {
+        info!("create tab: {:?}", tab);
         OPENED_TABLES
             .write()
             .unwrap()
@@ -113,9 +116,15 @@ impl LmdbService {
             let env = self.env.clone();
             let (tx, rx) = unbounded();
 
-            thread::Builder::new().name("Lmdb Reader".to_string()).spawn(move || loop {
+            let _ = thread::Builder::new().name(format!("Lmdb Reader {:?}", i)).spawn(move ||
+            loop {
                 match rx.recv() {
-                    Ok(ReaderMsg::Commit(cb)) => cb(Ok(())),
+                    Ok(ReaderMsg::Commit(cb)) => {
+                        let t = Box::new(move |_| {
+                            cb(Ok(()));
+                        });
+                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader commit"));
+                    }
                     Ok(ReaderMsg::Query(queries, cb)) => {
                         let mut qr = vec![];
                         let mut query_error = false;
@@ -160,9 +169,17 @@ impl LmdbService {
                         }
 
                         if query_error {
-                            cb(Err(format!("lmdb query internal error")));
+                            let t = Box::new(move |_| {
+                                cb(Err(format!("lmdb query internal error")));
+                            });
+                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query error"));
+                            warn!("queries error: {:?}", queries);
                         } else {
-                            cb(Ok(qr));
+                            info!("lmdb query success: {:?}", qr);
+                            let t = Box::new(move |_| {
+                                cb(Ok(qr));
+                            });
+                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query ok"));
                         }
 
                         let _ = txn.commit();
@@ -228,7 +245,6 @@ impl LmdbService {
                         }
                     }
                     Ok(ReaderMsg::NextItem(descending, tab, cur_key, cb, sndr)) => {
-                        // println!("pool next item descending: {:?}, cur_key: {:?}", descending, cur_key);
                         let txn = env
                             .as_ref()
                             .unwrap()
@@ -244,13 +260,18 @@ impl LmdbService {
                             .open_ro_cursor(db)
                             .expect(&format!("Fatal error: open cursor for db: {:?} failed", db));
 
-                        // println!("next item create txn and cursor");
-
                         match (descending, cur_key) {
                             (true, Some(ck)) => {
+                                let cb1 = cb.clone();
+                                let ck1 = ck.clone();
                                 match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
                                     Ok(val) => {
-                                        cb(Ok(Some((ck.clone(), Arc::new(val.1.to_vec())))));
+                                        let v = val.1.to_vec();
+                                        info!("iter next item descendin key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb1(Ok(Some((ck1, Arc::new(v)))));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader get next item"));
                                     }
                                     Err(Error::NotFound) => {}
                                     Err(_) => {}
@@ -259,20 +280,35 @@ impl LmdbService {
                                 // get next key
                                 match cursor.get(Some(ck.as_ref()), None, MDB_NEXT) {
                                     Ok(val) => {
+                                        info!("iter next key descending: item: {:?}", val.clone());
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
 
                                     Err(Error::NotFound) => {
+                                        info!("iter next key descending: NotFound");
                                         let _ = sndr.send(None);
                                     }
 
-                                    Err(e) => cb(Err(format!("lmdb iter internal error: {:?}", e))),
+                                    Err(e) => {
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb(Err(format!("lmdb iter internal error: {:?}", e)));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader get next item error")); 
+                                    }
                                 }
                             }
                             (false, Some(ck)) => {
+                                let cb1 = cb.clone();
+                                let ck1 = ck.clone();
+                                let cb2 = cb.clone();
                                 match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
                                     Ok(val) => {
-                                        cb(Ok(Some((ck.clone(), Arc::new(val.1.to_vec())))));
+                                        let v = val.1.to_vec();
+                                        info!("iter next item ascending key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb1(Ok(Some((ck1, Arc::new(v)))));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader get next item"));
                                     }
                                     Err(Error::NotFound) => {}
                                     Err(_) => {}
@@ -281,14 +317,21 @@ impl LmdbService {
                                 // get next key
                                 match cursor.get(Some(ck.as_ref()), None, MDB_PREV) {
                                     Ok(val) => {
+                                        info!("iter next item ascending item: {:?}", val);
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
 
                                     Err(Error::NotFound) => {
+                                        info!("iter next item ascending item: NotFound");
                                         let _ = sndr.send(None);
                                     }
 
-                                    Err(e) => cb(Err(format!("lmdb iter internal error: {:?}", e))),
+                                    Err(e) => {
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb2(Err(format!("Lmdb reader lmdb next item error: {:?}", e)));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query error"));
+                                    }
                                 }
                             }
 
@@ -307,27 +350,33 @@ impl LmdbService {
         let env = self.env.clone();
         let (tx, rx) = unbounded();
 
-        thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || loop {
+        let _ = thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || loop {
             match rx.recv() {
-                Ok(WriterMsg::Modify(cb)) => cb(Ok(())),
-                Ok(WriterMsg::Commit(modifies, meta, cb)) => {
-                    // if it is a meta txn commit it directly
-                    if meta {
+                Ok(WriterMsg::Modify(cb)) => {
+                    let t = Box::new(move |_: Option<isize>| {
+                        cb(Ok(()));
+                    });
+                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer modify"));
+                }
+                Ok(WriterMsg::Commit(modifies, cb)) => {
+                    let mut txn = env
+                        .as_ref()
+                        .unwrap()
+                        .begin_rw_txn()
+                        .expect("Fatal error: failed to begin rw txn");
+                    let mut modify_error = false;
+
+                    for m in modifies.iter() {
+                        // this db should be opened previously, or this is a bug
                         let db = OPENED_TABLES
                             .read()
                             .unwrap()
-                            .get(&Atom::from("_$sinfo").get_hash())
+                            .get(&m.tab.get_hash())
                             .unwrap()
                             .clone();
 
-                        let mut txn = env
-                            .as_ref()
-                            .unwrap()
-                            .begin_rw_txn()
-                            .expect("Fatal error: failed to begin rw txn");
-
-                        for m in modifies.iter() {
-                            if m.tab == Atom::from("") { continue } //skip placeholder item
+                        // value is some, insert data
+                        if m.value.is_some() {
                             match txn.put(
                                 db,
                                 m.key.as_ref(),
@@ -335,70 +384,46 @@ impl LmdbService {
                                 WriteFlags::empty(),
                             ) {
                                 Ok(_) => {}
-                                Err(_) => cb(Err("meta txn modify error".to_owned())),
+                                Err(_) => modify_error = true,
+                            }
+                        // value is None, delete data
+                        } else {
+                            match txn.del(db, m.key.as_ref(), None) {
+                                Ok(_) => {}
+                                Err(Error::NotFound) => {
+                                    // TODO: when not found?
+                                }
+                                Err(_) => modify_error = true,
                             }
                         }
+                    }
 
-                        match txn.commit() {
-                            Ok(_) => cb(Ok(())),
-                            Err(_) => cb(Err("meta txn commit erorr".to_owned())),
-                        }
-                        // println!("meta txn finally commited =========== ");
+                    if modify_error {
+                        cb(Err("modify error".to_string()));
+                        warn!("lmdb modify error");
                     } else {
-                        let mut txn = env
-                            .as_ref()
-                            .unwrap()
-                            .begin_rw_txn()
-                            .expect("Fatal error: failed to begin rw txn");
-
-                        for m in modifies.iter() {
-                            // this db should be opened previously, or this is a bug
-                            let db = OPENED_TABLES
-                                .read()
-                                .unwrap()
-                                .get(&m.tab.get_hash())
-                                .unwrap()
-                                .clone();
-
-                            // value is some, insert data
-                            if m.value.is_some() {
-                                match txn.put(
-                                    db,
-                                    m.key.as_ref(),
-                                    m.value.clone().unwrap().as_ref(),
-                                    WriteFlags::empty(),
-                                ) {
-                                    Ok(_) => {}
-                                    Err(e) => cb(Err(format!(
-                                        "lmdb internal insert data error: {:?}",
-                                        e.to_string()
-                                    ))),
-                                }
-                            // value is None, delete data
-                            } else {
-                                match txn.del(db, m.key.as_ref(), None) {
-                                    Ok(_) => {}
-                                    Err(Error::NotFound) => {
-                                        // TODO: when not found?
-                                    }
-                                    Err(e) => {
-                                        cb(Err(format!("delete data error: {:?}", e.to_string())))
-                                    }
-                                }
+                        match txn.commit() {
+                            Ok(_) => {
+                                let t = Box::new(move |_: Option<isize>| {
+                                    cb(Ok(()));
+                                });
+                                cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit"));
+                            }
+                            Err(e) => {
+                                let t = Box::new(move |_: Option<isize>| {
+                                    cb(Err(format!("commit failed with error: {:?}", e.to_string())));
+                                });
+                                cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
                             }
                         }
-
-                        match txn.commit() {
-                            Ok(_) => cb(Ok(())),
-                            Err(e) => cb(Err(format!(
-                                "commit failed with error: {:?}",
-                                e.to_string()
-                            ))),
-                        }
-                        // println!("normal txn finally committed ==========");
                     }
                 }
-                Ok(WriterMsg::Rollback(cb)) => cb(Ok(())),
+                Ok(WriterMsg::Rollback(cb)) => {
+                    let t = Box::new(move |_: Option<isize>| {
+                        cb(Ok(()));
+                    });
+                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer rollback txn commit"));
+                }
                 Err(_) => (),
             }
         });
