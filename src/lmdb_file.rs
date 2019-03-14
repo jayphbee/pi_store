@@ -547,7 +547,7 @@ impl DB {
         // retrive meta table info of a DB
         let db = match env.open_db(Some(SINFO)) {
             Ok(db) => db,
-            Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).unwrap(),
+            Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).expect("Failed to open db to retrive meta table"),
         };
 
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
