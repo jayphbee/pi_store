@@ -435,25 +435,25 @@ impl DB {
             info!("start thread serving for the finally commit");
             loop {
                 match COMMIT_CHAN.1.recv() {
-                    Ok(CommitChan(txid, cb, sndr)) => {
+                    Ok(CommitChan(txid, sndr)) => {
                         info!("receive commit notification for txid: {:?} ", txid.time());
                         match MODS.lock().unwrap().remove(&txid.time()) {
                             Some(v) => {
                                 info!("modifications to be committed: {:?}", v);
                                 let _ = rw_sender.send(WriterMsg::Commit(Arc::new(v.clone()), Arc::new(move |c| match c {
                                     Ok(_) => {
-                                        cb(Ok(()));
                                         info!("txid: {:?} finnaly committed", txid.time());
                                         sndr.send(Arc::new(v.clone()));
                                     }
                                     Err(e) =>{
-                                        cb(Err(e.to_string()));
                                         warn!("txid: {:?} commit failed", txid.time());
                                     }
                                 })));
                             }
 
-                            None => cb(Ok(())),
+                            None => {
+                                sndr.send(Arc::new(vec![]));
+                            }
                         }
                     }
                     Err(_) => {}
