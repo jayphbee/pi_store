@@ -272,6 +272,7 @@ impl LmdbService {
                                             cb1(Ok(Some((ck1, Arc::new(v)))));
                                         });
                                         cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader get next item"));
+                                        // cb1(Ok(Some((ck1, Arc::new(val.1.to_vec())))));
                                     }
                                     Err(Error::NotFound) => {}
                                     Err(_) => {}
@@ -309,6 +310,8 @@ impl LmdbService {
                                             cb1(Ok(Some((ck1, Arc::new(v)))));
                                         });
                                         cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader get next item"));
+                                        // cb1(Ok(Some((ck1, Arc::new(val.1.to_vec())))));
+
                                     }
                                     Err(Error::NotFound) => {}
                                     Err(_) => {}
