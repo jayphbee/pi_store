@@ -182,7 +182,10 @@ impl LmdbService {
                             cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query ok"));
                         }
 
-                        let _ = txn.commit();
+                        match txn.commit() {
+                            Ok(_) => {}
+                            Err(e) => panic!("query txn commit error: {:?}", e.to_string()),
+                        }
                     }
                     Ok(ReaderMsg::CreateItemIter(descending, tab, start_key, sndr)) => {
                         let txn = env
@@ -242,6 +245,12 @@ impl LmdbService {
                                 }
                                 Err(_) => {}
                             },
+                        }
+
+                        drop(cursor);
+                        match txn.commit() {
+                            Ok(_) => {}
+                            Err(e) => panic!("create iter txn commit error: {:?}", e.to_string()),
                         }
                     }
                     Ok(ReaderMsg::NextItem(descending, tab, cur_key, cb, sndr)) => {
@@ -340,8 +349,19 @@ impl LmdbService {
 
                             _ => (),
                         }
+
+                        drop(cursor);
+                        match txn.commit() {
+                            Ok(_) => {},
+                            Err(e) => panic!("Next item txn commit error: {:?}", e.to_string()),
+                        }
                     }
-                    Ok(ReaderMsg::Rollback(cb)) => cb(Ok(())),
+                    Ok(ReaderMsg::Rollback(cb)) => {
+                        let t = Box::new(move |_: Option<isize>| {
+                            cb(Ok(()));
+                        });
+                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader rollback error"));
+                    }
                     Err(_) => (),
                 }
             });
