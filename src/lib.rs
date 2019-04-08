@@ -22,6 +22,7 @@ extern crate log;
 extern crate rand;
 
 extern crate atom;
+extern crate apm;
 extern crate handler;
 extern crate worker;
 extern crate bon;

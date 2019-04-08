@@ -7,6 +7,7 @@ use std::thread;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use atom::Atom;
+use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use guid::Guid;
 use pi_db::db::{Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
@@ -20,16 +21,59 @@ const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
 const TIMEOUT: usize = 100;
 
+//LMDB库前缀
+const LMDB_WARE_PREFIX: &'static str = "lmdb_ware_";
+//LMDB表前缀
+const LMDB_TABLE_PREFIX: &'static str = "lmdb_table_";
+//LMDB表事务创建数量后缀
+const LMDB_TABLE_TRANS_COUNT_SUFFIX: &'static str = "_trans_count";
+//LMDB表事务预提交数量后缀
+const LMDB_TABLE_PREPARE_COUNT_SUFFIX: &'static str = "_prepare_count";
+//LMDB表事务提交数量后缀
+const LMDB_TABLE_COMMIT_COUNT_SUFFIX: &'static str = "_commit_count";
+//LMDB表事务回滚数量后缀
+const LMDB_TABLE_ROLLBACK_COUNT_SUFFIX: &'static str = "_rollback_count";
+//LMDB表读记录数量后缀
+const LMDB_TABLE_READ_COUNT_SUFFIX: &'static str = "_read_count";
+//LMDB表读记录字节数量后缀
+const LMDB_TABLE_READ_BYTE_COUNT_SUFFIX: &'static str = "_read_byte_count";
+//LMDB表写记录数量后缀
+const LMDB_TABLE_WRITE_COUNT_SUFFIX: &'static str = "_write_count";
+//LMDB表写记录字节数量后缀
+const LMDB_TABLE_WRITE_BYTE_COUNT_SUFFIX: &'static str = "_write_byte_count";
+//LMDB表删除记录数量后缀
+const LMDB_TABLE_REMOVE_COUNT_SUFFIX: &'static str = "_remove_count";
+//LMDB表删除记录字节数量后缀
+const LMDB_TABLE_REMOVE_BYTE_COUNT_SUFFIX: &'static str = "_remove_byte_count";
+//LMDB表关键字迭代数量后缀
+const LMDB_TABLE_KEY_ITER_COUNT_SUFFIX: &'static str = "_key_iter_count";
+//LMDB表关键字迭代字节数量后缀
+const LMDB_TABLE_KEY_ITER_BYTE_COUNT_SUFFIX: &'static str = "_key_iter_byte_count";
+//LMDB表迭代数量后缀
+const LMDB_TABLE_ITER_COUNT_SUFFIX: &'static str = "_iter_count";
+//LMDB表关键字迭代字节数量后缀
+const LMDB_TABLE_ITER_BYTE_COUNT_SUFFIX: &'static str = "_iter_byte_count";
+
+lazy_static! {
+	//LMDB库创建数量
+	static ref LMDB_WARE_CREATE_COUNT: PrefCounter = GLOBAL_PREF_COLLECT.new_static_counter(Atom::from("lmdb_ware_create_count"), 0).unwrap();
+	//LMDB表创建数量
+	static ref LMDB_TABLE_CREATE_COUNT: PrefCounter = GLOBAL_PREF_COLLECT.new_static_counter(Atom::from("lmdb_table_create_count"), 0).unwrap();
+}
+
 #[derive(Debug, Clone)]
 pub struct LmdbTable {
     name: Atom,
     env_flags: EnvironmentFlags,
     write_flags: WriteFlags,
     db_flags: DatabaseFlags,
+    trans_count:	PrefCounter,	//事务计数
 }
 
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
+        LMDB_TABLE_CREATE_COUNT.sum(1);
+
         LMDB_SERVICE.lock().unwrap().create_tab(db_name);
 
         LmdbTable {
@@ -37,16 +81,49 @@ impl Tab for LmdbTable {
             env_flags: EnvironmentFlags::empty(),
             write_flags: WriteFlags::empty(),
             db_flags: DatabaseFlags::empty(),
+            trans_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + db_name + LMDB_TABLE_TRANS_COUNT_SUFFIX), 0).unwrap(),
         }
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
         info!("create new txid: {:?}, tab: {:?}, writable: {:?}", id.time(), self.name, writable);
+        self.trans_count.sum(1);
+
+        let tab = &self.name;
         let t = Arc::new(LmdbTableTxn {
-            tab: self.name.clone(),
             id: id.time(),
+            tab: tab.clone(),
             writable: writable,
-            state: Arc::new(Mutex::new(TxState::Ok)),
+            state: Arc::new(Mutex::new(TxState::Ok)),            
+            prepare_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_PREPARE_COUNT_SUFFIX), 0).unwrap(),
+            commit_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_COMMIT_COUNT_SUFFIX), 0).unwrap(),
+            rollback_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_ROLLBACK_COUNT_SUFFIX), 0).unwrap(),
+            read_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_READ_COUNT_SUFFIX), 0).unwrap(),
+            read_byte: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_READ_BYTE_COUNT_SUFFIX), 0).unwrap(),
+            write_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_WRITE_COUNT_SUFFIX), 0).unwrap(),
+            write_byte: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_WRITE_BYTE_COUNT_SUFFIX), 0).unwrap(),
+            remove_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_REMOVE_COUNT_SUFFIX), 0).unwrap(),
+            remove_byte: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + tab + LMDB_TABLE_REMOVE_BYTE_COUNT_SUFFIX), 0).unwrap(),
         });
 
         t
@@ -54,10 +131,19 @@ impl Tab for LmdbTable {
 }
 
 pub struct LmdbTableTxn {
-    tab: Atom,
     id: u64,
+    tab: Atom,
     writable: bool,
     state: Arc<Mutex<TxState>>,
+    prepare_count:	PrefCounter,	//预提交计数
+    commit_count:	PrefCounter,	//提交计数
+    rollback_count:	PrefCounter,	//回滚计数
+    read_count:		PrefCounter,	//读计数
+    read_byte:		PrefCounter,	//读字节
+    write_count:	PrefCounter,	//写计数
+    write_byte:		PrefCounter,	//写字节
+    remove_count:	PrefCounter,	//删除计数
+    remove_byte:	PrefCounter,	//删除字节
 }
 
 impl Txn for LmdbTableTxn {
@@ -71,10 +157,15 @@ impl Txn for LmdbTableTxn {
 
     fn prepare(&self, _timeout: usize, _cb: TxCallback) -> DBResult {
         *self.state.lock().unwrap() = TxState::Preparing;
+
+        self.prepare_count.sum(1);
+
         Some(Ok(()))
     }
 
     fn commit(&self, cb: TxCallback) -> CommitResult {
+        self.commit_count.sum(1);
+
         *self.state.lock().unwrap() = TxState::Committing;
         let state1 = self.state.clone();
 
@@ -99,6 +190,8 @@ impl Txn for LmdbTableTxn {
     }
 
     fn rollback(&self, cb: TxCallback) -> DBResult {
+        self.rollback_count.sum(1);
+
         *self.state.lock().unwrap() = TxState::Rollbacking;
         let state1 = self.state.clone();
         let ro_sender = LMDB_SERVICE
@@ -149,13 +242,22 @@ impl TabTxn for LmdbTableTxn {
     ) -> Option<SResult<Vec<TabKV>>> {
         info!("query txid: {:?}, query item: {:?}", self.id, arr);
         let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
+
+        let read_byte = self.read_byte.clone();
+
         let _ = sender.send(ReaderMsg::Query(
             arr,
             Arc::new(move |q| match q {
-                Ok(v) => cb(Ok(v)),
+                Ok(v) => {
+                    read_byte.sum(v.len());
+
+                    cb(Ok(v))
+                },
                 Err(e) => cb(Err(e.to_string())),
             }),
         ));
+
+        self.read_count.sum(1);
 
         None
     }
@@ -176,6 +278,22 @@ impl TabTxn for LmdbTableTxn {
         })));
 
         let data = arr.iter().cloned().collect::<Vec<TabKV>>();
+
+        let write_count = self.write_count.clone();
+        let write_byte = self.write_byte.clone();
+        let remove_count = self.remove_count.clone();
+        let remove_byte = self.remove_byte.clone();
+        for kv in data.iter() {
+            if let &Some(ref v) = &kv.value {
+                //插入或更新
+                write_byte.sum(kv.key.len() + v.len());
+                write_count.sum(1);
+            } else {
+                //移除
+                remove_byte.sum(kv.key.len());
+                remove_count.sum(1);
+            }
+        }
 
         MODS.lock().unwrap()
             .entry(self.id)
@@ -260,6 +378,8 @@ pub struct LmdbItemsIter {
     sender: Sender<Option<Bin>>,
     receiver: Receiver<Option<Bin>>,
     _filter: Filter,
+    iter_count:		PrefCounter,	//迭代计数
+    iter_byte:		PrefCounter,	//迭代字节
 }
 
 impl LmdbItemsIter {
@@ -275,11 +395,17 @@ impl LmdbItemsIter {
         LmdbItemsIter {
             txid,
             desc,
-            tab,
+            tab: tab.clone(),
             cur_key,
             sender,
             receiver,
             _filter,
+            iter_count: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + &tab + LMDB_TABLE_ITER_COUNT_SUFFIX), 0).unwrap(),
+            iter_byte: GLOBAL_PREF_COLLECT.
+                new_dynamic_counter(
+                    Atom::from(LMDB_TABLE_PREFIX.to_string() + &tab + LMDB_TABLE_ITER_BYTE_COUNT_SUFFIX), 0).unwrap(),
         }
     }
 }
@@ -288,18 +414,25 @@ impl Iter for LmdbItemsIter {
     type Item = (Bin, Bin);
 
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
+        self.iter_count.sum(1);
+
         info!("next item: txid: {:?}, tab: {:?}, cur_key: {:?}, descending: {:?}", self.txid, self.tab, self.cur_key, self.desc);
 
         if self.cur_key.is_none() {
             cb(Ok(None))
         } else {
             let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
+
+            let iter_byte = self.iter_byte.clone();
+
             let _ = sender.send(ReaderMsg::NextItem(
                 self.desc,
                 self.tab.clone(),
                 self.cur_key.clone(),
                 Arc::new(move |item| match item {
                     Ok(Some(v)) => {
+                        iter_byte.sum(v.0.len() + v.1.len());
+
                         cb(Ok(Some(v)));
                     }
                     Ok(None) => {
@@ -475,6 +608,8 @@ impl DB {
 
         std::mem::drop(cursor);
         let _ = txn.commit().unwrap();
+
+        LMDB_WARE_CREATE_COUNT.sum(1);
 
         Ok(DB {
             name: name,
