@@ -28,6 +28,7 @@ use worker::impls::cast_store_task;
 use worker::task::TaskType;
 
 const MDB_SET_KEY: u32 = 16;
+const MDB_SET_RANGE: u32 = 17;
 const MDB_PREV: u32 = 12;
 const MDB_NEXT: u32 = 8;
 const MDB_FIRST: u32 = 0;
@@ -214,8 +215,9 @@ impl LmdbService {
 
                                 Err(_) => {}
                             },
+                            // MDB_SET_KEY 会找到第一个大于或者等于 sk 的 key
                             (true, Some(sk)) => {
-                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_KEY) {
+                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_RANGE) {
                                     Ok(val) => {
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
@@ -226,12 +228,21 @@ impl LmdbService {
                                 }
                             }
                             (false, Some(sk)) => {
-                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_KEY) {
+                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_RANGE) {
                                     Ok(val) => {
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
                                     Err(Error::NotFound) => {
-                                        let _ = sndr.send(None);
+                                        // 降序迭代起始 key 超过最大 key 则定位到表中最后一个元素
+                                        match cursor.get(None, None, MDB_LAST) {
+                                            Ok(val) => {
+                                                let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                            }
+                                            Err(Error::NotFound) => {
+                                                let _ = sndr.send(None);
+                                            }
+                                            Err(_) => {}
+                                        }
                                     }
                                     Err(_) => {}
                                 }
