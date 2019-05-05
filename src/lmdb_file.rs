@@ -241,21 +241,38 @@ impl TabTxn for LmdbTableTxn {
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
         info!("query txid: {:?}, query item: {:?}", self.id, arr);
-        let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
-
         let read_byte = self.read_byte.clone();
+        match self.writable {
+            true => {
+                let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
+                let _ = rw_sender.send(WriterMsg::Query(
+                    arr,
+                    Arc::new(move |q| match q {
+                        Ok(v) => {
+                            read_byte.sum(v.len());
 
-        let _ = sender.send(ReaderMsg::Query(
-            arr,
-            Arc::new(move |q| match q {
-                Ok(v) => {
-                    read_byte.sum(v.len());
+                            cb(Ok(v))
+                        },
+                        Err(e) => cb(Err(e.to_string())),
+                    }),
+                ));
+            }
 
-                    cb(Ok(v))
-                },
-                Err(e) => cb(Err(e.to_string())),
-            }),
-        ));
+            false => {
+                let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
+                let _ = sender.send(ReaderMsg::Query(
+                    arr,
+                    Arc::new(move |q| match q {
+                        Ok(v) => {
+                            read_byte.sum(v.len());
+
+                            cb(Ok(v))
+                        },
+                        Err(e) => cb(Err(e.to_string())),
+                    }),
+                ));
+            }
+        }
 
         self.read_count.sum(1);
 
@@ -314,15 +331,28 @@ impl TabTxn for LmdbTableTxn {
         _cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
         info!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
-
         let (tx, rx) = bounded(1);
-        let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
-        let _ = sender.send(ReaderMsg::CreateItemIter(
-            descending,
-            tab.clone(),
-            key.clone(),
-            tx.clone(),
-        ));
+        match self.writable {
+            true => {
+                let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
+                let _ = rw_sender.send(WriterMsg::CreateItemIter(
+                    descending,
+                    tab.clone(),
+                    key.clone(),
+                    tx.clone(),
+                ));
+            }
+
+            false => {
+                let ro_sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
+                let _ = ro_sender.send(ReaderMsg::CreateItemIter(
+                    descending,
+                    tab.clone(),
+                    key.clone(),
+                    tx.clone(),
+                ));
+            }
+        }
 
         match rx.recv() {
             Ok(k) => {
