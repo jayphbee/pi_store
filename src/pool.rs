@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::thread;
 
-use lmdb::{Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags};
+use lmdb::{Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags, RwTransaction};
 
 use worker::impls::cast_store_task;
 use worker::task::TaskType;
@@ -385,6 +385,8 @@ impl LmdbService {
         let (tx, rx) = unbounded();
 
         let _ = thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || loop {
+            let mut rw_txn: Option<RwTransaction> = None;
+
             match rx.recv() {
                 Ok(WriterMsg::Modify(cb)) => {
                     let t = Box::new(move |_: Option<isize>| {
@@ -393,11 +395,14 @@ impl LmdbService {
                     cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer modify"));
                 }
                 Ok(WriterMsg::Commit(modifies, cb)) => {
-                    let mut txn = env
+                    if rw_txn.is_none() {
+                        rw_txn = Some(env
                         .as_ref()
                         .unwrap()
                         .begin_rw_txn()
-                        .expect("Fatal error: failed to begin rw txn");
+                        .expect("Fatal error: failed to begin rw txn"));
+                    }
+
                     let mut modify_error = false;
 
                     for m in modifies.iter() {
@@ -411,7 +416,7 @@ impl LmdbService {
 
                         // value is some, insert data
                         if m.value.is_some() {
-                            match txn.put(
+                            match rw_txn.as_mut().unwrap().put(
                                 db,
                                 m.key.as_ref(),
                                 m.value.clone().unwrap().as_ref(),
@@ -422,7 +427,7 @@ impl LmdbService {
                             }
                         // value is None, delete data
                         } else {
-                            match txn.del(db, m.key.as_ref(), None) {
+                            match rw_txn.as_mut().unwrap().del(db, m.key.as_ref(), None) {
                                 Ok(_) => {}
                                 Err(Error::NotFound) => {
                                     // TODO: when not found?
@@ -436,7 +441,7 @@ impl LmdbService {
                         cb(Err("modify error".to_string()));
                         warn!("lmdb modify error");
                     } else {
-                        match txn.commit() {
+                        match rw_txn.take().unwrap().commit() {
                             Ok(_) => {
                                 let t = Box::new(move |_: Option<isize>| {
                                     cb(Ok(()));
