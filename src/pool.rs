@@ -359,104 +359,132 @@ impl LmdbService {
         let env = self.env.clone();
         let (tx, rx) = unbounded();
 
-        let _ = thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || loop {
+        let _ = thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || {
             let mut rw_txn: Option<RwTransaction> = None;
             let mut in_progress_tx = 0;
-
-            match rx.recv() {
-                Ok(WriterMsg::InProgressTx(txid, sndr)) => {
-                    info!("******* InProgressTx txid: {:?} ********", in_progress_tx);
-
-                    if in_progress_tx == 0 {
-                        let _ = sndr.send(0);
-                        in_progress_tx = txid;
-                    } else {
+            loop {
+                match rx.recv() {
+                    Ok(WriterMsg::InProgressTx(txid, sndr)) => {
+                        info!("******* InProgressTx txid: {:?} ********", in_progress_tx);
+                        if in_progress_tx == 0 {
+                            in_progress_tx = txid;
+                        }
                         let _ = sndr.send(in_progress_tx);
                     }
-                }
-                Ok(WriterMsg::Query(txid, queries, cb)) => {
-                    let mut qr = vec![];
-                    let mut query_error = false;
-                    if rw_txn.is_none() {
-                        rw_txn = Some(env
-                        .as_ref()
-                        .unwrap()
-                        .begin_rw_txn()
-                        .expect("Fatal error: failed to begin rw txn"));
-                    }
+                    Ok(WriterMsg::Query(txid, queries, cb)) => {
+                        info!("txid {:?} when query", in_progress_tx);
+                        let mut qr = vec![];
+                        let mut query_error = false;
+                        if rw_txn.is_none() {
+                            rw_txn = Some(env
+                            .as_ref()
+                            .unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn"));
+                        }
 
-                    for q in queries.iter() {
-                        let db = get_db(q.tab.get_hash());
-                        match rw_txn.as_ref().unwrap().get(db, q.key.as_ref()) {
-                            Ok(v) => {
-                                qr.push(TabKV {
-                                    ware: q.ware.clone(),
-                                    tab: q.tab.clone(),
-                                    key: q.key.clone(),
-                                    index: q.index,
-                                    value: Some(Arc::new(Vec::from(v))),
-                                });
-                            }
+                        for q in queries.iter() {
+                            let db = get_db(q.tab.get_hash());
+                            match rw_txn.as_ref().unwrap().get(db, q.key.as_ref()) {
+                                Ok(v) => {
+                                    qr.push(TabKV {
+                                        ware: q.ware.clone(),
+                                        tab: q.tab.clone(),
+                                        key: q.key.clone(),
+                                        index: q.index,
+                                        value: Some(Arc::new(Vec::from(v))),
+                                    });
+                                }
 
-                            Err(Error::NotFound) => {
-                                qr.push(TabKV {
-                                    ware: q.ware.clone(),
-                                    tab: q.tab.clone(),
-                                    key: q.key.clone(),
-                                    index: q.index,
-                                    value: None,
-                                });
-                            }
+                                Err(Error::NotFound) => {
+                                    qr.push(TabKV {
+                                        ware: q.ware.clone(),
+                                        tab: q.tab.clone(),
+                                        key: q.key.clone(),
+                                        index: q.index,
+                                        value: None,
+                                    });
+                                }
 
-                            Err(_) => {
-                                query_error = true;
-                                break;
+                                Err(_) => {
+                                    query_error = true;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    if query_error {
-                        let t = Box::new(move |_| {
-                            cb(Err(format!("lmdb rw query internal error")));
-                        });
-                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query error"));
-                        warn!("queries error: {:?}", queries);
-                    } else {
-                        info!("lmdb rw query success: {:?}", qr);
-                        let t = Box::new(move |_| {
-                            cb(Ok(qr));
-                        });
-                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query ok"));
-                    }
-                }
-
-                Ok(WriterMsg::CreateItemIter(txid, descending, tab, start_key, sndr)) => {
-                    if rw_txn.is_none() {
-                        rw_txn = Some(env
-                        .as_ref()
-                        .unwrap()
-                        .begin_rw_txn()
-                        .expect("Fatal error: failed to begin rw txn"));
+                        if query_error {
+                            let t = Box::new(move |_| {
+                                cb(Err(format!("lmdb rw query internal error")));
+                            });
+                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query error"));
+                            warn!("queries error: {:?}", queries);
+                        } else {
+                            info!("lmdb rw query success: {:?}", qr);
+                            let t = Box::new(move |_| {
+                                cb(Ok(qr));
+                            });
+                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query ok"));
+                        }
                     }
 
-                    let db = get_db(tab.get_hash());
-                    let cursor = rw_txn.as_mut().unwrap()
-                        .open_rw_cursor(db)
-                        .expect(&format!("Fatal error: open rw cursor for db: {:?} failed", db));
+                    Ok(WriterMsg::CreateItemIter(txid, descending, tab, start_key, sndr)) => {
+                        if rw_txn.is_none() {
+                            rw_txn = Some(env
+                            .as_ref()
+                            .unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn"));
+                        }
 
-                    match (descending, start_key) {
-                        (true, None) => match cursor.get(None, None, MDB_FIRST) {
-                            Ok(val) => {
-                                let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                        let db = get_db(tab.get_hash());
+                        let cursor = rw_txn.as_mut().unwrap()
+                            .open_rw_cursor(db)
+                            .expect(&format!("Fatal error: open rw cursor for db: {:?} failed", db));
+
+                        match (descending, start_key) {
+                            (true, None) => match cursor.get(None, None, MDB_FIRST) {
+                                Ok(val) => {
+                                    let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                }
+                                Err(Error::NotFound) => {
+                                    let _ = sndr.send(None);
+                                }
+
+                                Err(_) => {}
+                            },
+                            // MDB_SET_RANGE 会找到第一个大于或者等于 sk 的 key
+                            (true, Some(sk)) => {
+                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_RANGE) {
+                                    Ok(val) => {
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+                                    Err(Error::NotFound) => {
+                                        let _ = sndr.send(None);
+                                    }
+                                    Err(_) => {}
+                                }
                             }
-                            Err(Error::NotFound) => {
-                                let _ = sndr.send(None);
+                            (false, Some(sk)) => {
+                                match cursor.get(Some(sk.as_ref()), None, MDB_SET_RANGE) {
+                                    Ok(val) => {
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+                                    Err(Error::NotFound) => {
+                                        // 降序迭代起始 key 超过最大 key 则定位到表中最后一个元素
+                                        match cursor.get(None, None, MDB_LAST) {
+                                            Ok(val) => {
+                                                let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                            }
+                                            Err(Error::NotFound) => {
+                                                let _ = sndr.send(None);
+                                            }
+                                            Err(_) => {}
+                                        }
+                                    }
+                                    Err(_) => {}
+                                }
                             }
-
-                            Err(_) => {}
-                        },
-                        // MDB_SET_RANGE 会找到第一个大于或者等于 sk 的 key
-                        (true, Some(sk)) => {
-                            match cursor.get(Some(sk.as_ref()), None, MDB_SET_RANGE) {
+                            (false, None) => match cursor.get(None, None, MDB_LAST) {
                                 Ok(val) => {
                                     let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                 }
@@ -464,226 +492,198 @@ impl LmdbService {
                                     let _ = sndr.send(None);
                                 }
                                 Err(_) => {}
-                            }
+                            },
                         }
-                        (false, Some(sk)) => {
-                            match cursor.get(Some(sk.as_ref()), None, MDB_SET_RANGE) {
-                                Ok(val) => {
-                                    let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+
+                        drop(cursor);
+                    }
+
+                    Ok(WriterMsg::NextItem(txid, descending, tab, cur_key, cb, sndr)) => {
+                        if rw_txn.is_none() {
+                            rw_txn = Some(env
+                            .as_ref()
+                            .unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn"));
+                        }
+                        let db = get_db(tab.get_hash());
+                        let cursor = rw_txn.as_mut().unwrap()
+                            .open_rw_cursor(db)
+                            .expect(&format!("Fatal error: open rw cursor for db: {:?} failed", db));
+
+                        match (descending, cur_key) {
+                            (true, Some(ck)) => {
+                                let cb1 = cb.clone();
+                                let ck1 = ck.clone();
+                                match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
+                                    Ok(val) => {
+                                        let v = val.1.to_vec();
+                                        info!("iter next item descendin key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb1(Ok(Some((ck1, Arc::new(v)))));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader get next item"));
+                                    }
+                                    Err(Error::NotFound) => {}
+                                    Err(_) => {}
                                 }
-                                Err(Error::NotFound) => {
-                                    // 降序迭代起始 key 超过最大 key 则定位到表中最后一个元素
-                                    match cursor.get(None, None, MDB_LAST) {
-                                        Ok(val) => {
-                                            let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
-                                        }
-                                        Err(Error::NotFound) => {
-                                            let _ = sndr.send(None);
-                                        }
-                                        Err(_) => {}
+
+                                // get next key
+                                match cursor.get(Some(ck.as_ref()), None, MDB_NEXT) {
+                                    Ok(val) => {
+                                        info!("rw iter next key descending: item: {:?}", val.clone());
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+
+                                    Err(Error::NotFound) => {
+                                        info!("rw iter next key descending: NotFound");
+                                        let _ = sndr.send(None);
+                                    }
+
+                                    Err(e) => {
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb(Err(format!("lmdb rw iter internal error: {:?}", e)));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer get next item error")); 
                                     }
                                 }
-                                Err(_) => {}
                             }
-                        }
-                        (false, None) => match cursor.get(None, None, MDB_LAST) {
-                            Ok(val) => {
-                                let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
-                            }
-                            Err(Error::NotFound) => {
-                                let _ = sndr.send(None);
-                            }
-                            Err(_) => {}
-                        },
-                    }
-
-                    drop(cursor);
-                }
-
-                Ok(WriterMsg::NextItem(txid, descending, tab, cur_key, cb, sndr)) => {
-                    if rw_txn.is_none() {
-                        rw_txn = Some(env
-                        .as_ref()
-                        .unwrap()
-                        .begin_rw_txn()
-                        .expect("Fatal error: failed to begin rw txn"));
-                    }
-                    let db = get_db(tab.get_hash());
-                    let cursor = rw_txn.as_mut().unwrap()
-                        .open_rw_cursor(db)
-                        .expect(&format!("Fatal error: open rw cursor for db: {:?} failed", db));
-
-                    match (descending, cur_key) {
-                        (true, Some(ck)) => {
-                            let cb1 = cb.clone();
-                            let ck1 = ck.clone();
-                            match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
-                                Ok(val) => {
-                                    let v = val.1.to_vec();
-                                    info!("iter next item descendin key: {:?}, value: {:?}", ck.clone(), v.clone());
-                                    let t = Box::new(move |_: Option<isize>| {
-                                        cb1(Ok(Some((ck1, Arc::new(v)))));
-                                    });
-                                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader get next item"));
+                            (false, Some(ck)) => {
+                                let cb1 = cb.clone();
+                                let ck1 = ck.clone();
+                                let cb2 = cb.clone();
+                                match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
+                                    Ok(val) => {
+                                        let v = val.1.to_vec();
+                                        info!("rw iter next item ascending key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb1(Ok(Some((ck1, Arc::new(v)))));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer get next item"));
+                                    }
+                                    Err(Error::NotFound) => {}
+                                    Err(_) => {}
                                 }
-                                Err(Error::NotFound) => {}
-                                Err(_) => {}
+
+                                // get next key
+                                match cursor.get(Some(ck.as_ref()), None, MDB_PREV) {
+                                    Ok(val) => {
+                                        info!("rw iter next item ascending item: {:?}", val);
+                                        let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
+                                    }
+
+                                    Err(Error::NotFound) => {
+                                        info!("rw iter next item ascending item: NotFound");
+                                        let _ = sndr.send(None);
+                                    }
+
+                                    Err(e) => {
+                                        let t = Box::new(move |_: Option<isize>| {
+                                            cb2(Err(format!("Lmdb writer lmdb next item error: {:?}", e)));
+                                        });
+                                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer iter error"));
+                                    }
+                                }
                             }
 
-                            // get next key
-                            match cursor.get(Some(ck.as_ref()), None, MDB_NEXT) {
-                                Ok(val) => {
-                                    info!("rw iter next key descending: item: {:?}", val.clone());
-                                    let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
-                                }
-
-                                Err(Error::NotFound) => {
-                                    info!("rw iter next key descending: NotFound");
-                                    let _ = sndr.send(None);
-                                }
-
-                                Err(e) => {
-                                    let t = Box::new(move |_: Option<isize>| {
-                                        cb(Err(format!("lmdb rw iter internal error: {:?}", e)));
-                                    });
-                                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer get next item error")); 
-                                }
-                            }
-                        }
-                        (false, Some(ck)) => {
-                            let cb1 = cb.clone();
-                            let ck1 = ck.clone();
-                            let cb2 = cb.clone();
-                            match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
-                                Ok(val) => {
-                                    let v = val.1.to_vec();
-                                    info!("rw iter next item ascending key: {:?}, value: {:?}", ck.clone(), v.clone());
-                                    let t = Box::new(move |_: Option<isize>| {
-                                        cb1(Ok(Some((ck1, Arc::new(v)))));
-                                    });
-                                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer get next item"));
-                                }
-                                Err(Error::NotFound) => {}
-                                Err(_) => {}
-                            }
-
-                            // get next key
-                            match cursor.get(Some(ck.as_ref()), None, MDB_PREV) {
-                                Ok(val) => {
-                                    info!("rw iter next item ascending item: {:?}", val);
-                                    let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
-                                }
-
-                                Err(Error::NotFound) => {
-                                    info!("rw iter next item ascending item: NotFound");
-                                    let _ = sndr.send(None);
-                                }
-
-                                Err(e) => {
-                                    let t = Box::new(move |_: Option<isize>| {
-                                        cb2(Err(format!("Lmdb writer lmdb next item error: {:?}", e)));
-                                    });
-                                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer iter error"));
-                                }
-                            }
+                            _ => (),
                         }
 
-                        _ => (),
+                        drop(cursor);
                     }
 
-                    drop(cursor);
-                }
-
-                Ok(WriterMsg::Modify(txid, cb)) => {
-                    if rw_txn.is_none() {
-                        rw_txn = Some(env
-                        .as_ref()
-                        .unwrap()
-                        .begin_rw_txn()
-                        .expect("Fatal error: failed to begin rw txn"));
-                    }
-
-                    let t = Box::new(move |_: Option<isize>| {
-                        cb(Ok(()));
-                    });
-                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer modify"));
-                }
-                Ok(WriterMsg::Commit(s, txid, modifies, cb)) => {
-                    if rw_txn.is_none() {
-                        rw_txn = Some(env
-                        .as_ref()
-                        .unwrap()
-                        .begin_rw_txn()
-                        .expect("Fatal error: failed to begin rw txn"));
-                    }
-
-                    let mut modify_error = false;
-
-                    for m in modifies.iter() {
-                        let db = get_db(m.tab.get_hash());
-                        // value is some, insert data
-                        if m.value.is_some() {
-                            match rw_txn.as_mut().unwrap().put(
-                                db,
-                                m.key.as_ref(),
-                                m.value.clone().unwrap().as_ref(),
-                                WriteFlags::empty(),
-                            ) {
-                                Ok(_) => {}
-                                Err(_) => modify_error = true,
-                            }
-                        // value is None, delete data
-                        } else {
-                            match rw_txn.as_mut().unwrap().del(db, m.key.as_ref(), None) {
-                                Ok(_) => {}
-                                Err(Error::NotFound) => {
-                                    // TODO: when not found?
-                                }
-                                Err(_) => modify_error = true,
-                            }
+                    Ok(WriterMsg::Modify(txid, cb)) => {
+                        if rw_txn.is_none() {
+                            rw_txn = Some(env
+                            .as_ref()
+                            .unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn"));
                         }
-                    }
-                    let cb1 = cb.clone();
-                    if modify_error {
+
                         let t = Box::new(move |_: Option<isize>| {
-                            cb(Err("modify error".to_string()));
+                            cb(Ok(()));
                         });
-                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer error"));
-                        warn!("lmdb modify error");
+                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer modify"));
                     }
+                    Ok(WriterMsg::Commit(s, txid, modifies, cb)) => {
+                        if rw_txn.is_none() {
+                            rw_txn = Some(env
+                            .as_ref()
+                            .unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn"));
+                        }
 
-                    match rw_txn.take().unwrap().commit() {
-                        Ok(_) => {
-                            let t = Box::new(move |_: Option<isize>| {
-                                cb1(Ok(()));
-                            });
-                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit"));
-                            // cb1(Ok(()))
+                        let mut modify_error = false;
+
+                        for m in modifies.iter() {
+                            let db = get_db(m.tab.get_hash());
+                            // value is some, insert data
+                            if m.value.is_some() {
+                                match rw_txn.as_mut().unwrap().put(
+                                    db,
+                                    m.key.as_ref(),
+                                    m.value.clone().unwrap().as_ref(),
+                                    WriteFlags::empty(),
+                                ) {
+                                    Ok(_) => {}
+                                    Err(_) => modify_error = true,
+                                }
+                            // value is None, delete data
+                            } else {
+                                match rw_txn.as_mut().unwrap().del(db, m.key.as_ref(), None) {
+                                    Ok(_) => {}
+                                    Err(Error::NotFound) => {
+                                        // TODO: when not found?
+                                    }
+                                    Err(_) => modify_error = true,
+                                }
+                            }
                         }
-                        Err(e) => {
+                        let cb1 = cb.clone();
+                        if modify_error {
                             let t = Box::new(move |_: Option<isize>| {
-                                cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
+                                cb(Err("modify error".to_string()));
                             });
-                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
-                            // cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
+                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer error"));
+                            warn!("lmdb modify error");
                         }
+
+                        match rw_txn.take().unwrap().commit() {
+                            Ok(_) => {
+                                let t = Box::new(move |_: Option<isize>| {
+                                    cb1(Ok(()));
+                                });
+                                cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit"));
+                                // cb1(Ok(()))
+                            }
+                            Err(e) => {
+                                let t = Box::new(move |_: Option<isize>| {
+                                    cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
+                                });
+                                cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
+                                // cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
+                            }
+                        }
+                        info!("==== in_progress_tx {:?} set to 0 self txid {:?} =======", in_progress_tx, txid);
+
+                        in_progress_tx = 0;
+                        let _ = s.send(());
+
                     }
-                    info!("==== in_progress_tx {:?} set to 0 self txid {:?} =======", in_progress_tx, txid);
-
-                    in_progress_tx = 0;
-                    let _ = s.send(());
-
+                    Ok(WriterMsg::Rollback(txid, cb)) => {
+                        let t = Box::new(move |_: Option<isize>| {
+                            cb(Ok(()));
+                        });
+                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer rollback txn commit"));
+                        in_progress_tx = 0;
+                    }
+                    Err(_) => (),
                 }
-                Ok(WriterMsg::Rollback(txid, cb)) => {
-                    let t = Box::new(move |_: Option<isize>| {
-                        cb(Ok(()));
-                    });
-                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer rollback txn commit"));
-                    in_progress_tx = 0;
-                }
-                Err(_) => (),
             }
         });
+
         self.writer = Some(tx);
     }
 }
