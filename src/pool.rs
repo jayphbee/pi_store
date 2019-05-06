@@ -1,4 +1,4 @@
-use crossbeam_channel::{unbounded, Sender};
+use crossbeam_channel::{unbounded, Sender, Receiver};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -59,6 +59,7 @@ pub struct LmdbService {
     readers_count: usize,
     readers: Vec<Sender<ReaderMsg>>,
     writer: Option<Sender<WriterMsg>>,
+    notifier: Option<Receiver<()>>,
 }
 
 impl LmdbService {
@@ -68,6 +69,7 @@ impl LmdbService {
             readers_count,
             readers: vec![],
             writer: None,
+            notifier: None,
         }
     }
 
@@ -101,6 +103,10 @@ impl LmdbService {
 
     pub fn rw_sender(&self) -> Option<Sender<WriterMsg>> {
         self.writer.clone()
+    }
+
+    pub fn rw_notifier(&self) -> Option<Receiver<()>> {
+        self.notifier.clone()
     }
 
     fn spawn_readers(&mut self) {
@@ -356,6 +362,8 @@ impl LmdbService {
     fn spawn_writer(&mut self) {
         let env = self.env.clone();
         let (tx, rx) = unbounded();
+        let (notify_sender, notify_receiver) = unbounded();
+        let _ = notify_sender.send(());
 
         let _ = thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || loop {
             let mut rw_txn: Option<RwTransaction> = None;
@@ -645,6 +653,9 @@ impl LmdbService {
                             cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
                         }
                     }
+                    info!("before notify_sender");
+                    let _ = notify_sender.send(());
+                    info!("after notify_sender");
                 }
                 Ok(WriterMsg::Rollback(cb)) => {
                     let t = Box::new(move |_: Option<isize>| {
@@ -656,6 +667,7 @@ impl LmdbService {
             }
         });
         self.writer = Some(tx);
+        self.notifier = Some(notify_receiver);
     }
 }
 

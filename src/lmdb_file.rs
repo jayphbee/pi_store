@@ -245,17 +245,24 @@ impl TabTxn for LmdbTableTxn {
         match self.writable {
             true => {
                 let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-                let _ = rw_sender.send(WriterMsg::Query(
-                    arr,
-                    Arc::new(move |q| match q {
-                        Ok(v) => {
-                            read_byte.sum(v.len());
+                let notify_receiver = LMDB_SERVICE.lock().unwrap().rw_notifier().unwrap();
+                match notify_receiver.recv() {
+                    Ok(_) => {
+                        info!("query notify_receiver recv");
+                        let _ = rw_sender.send(WriterMsg::Query(
+                            arr,
+                            Arc::new(move |q| match q {
+                                Ok(v) => {
+                                    read_byte.sum(v.len());
 
-                            cb(Ok(v))
-                        },
-                        Err(e) => cb(Err(e.to_string())),
-                    }),
-                ));
+                                    cb(Ok(v))
+                                },
+                                Err(e) => cb(Err(e.to_string())),
+                            }),
+                        ));
+                    }
+                    Err(_) => {}
+                }
             }
 
             false => {
@@ -335,12 +342,19 @@ impl TabTxn for LmdbTableTxn {
         match self.writable {
             true => {
                 let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-                let _ = rw_sender.send(WriterMsg::CreateItemIter(
-                    descending,
-                    tab.clone(),
-                    key.clone(),
-                    tx.clone(),
-                ));
+                let notify_receiver = LMDB_SERVICE.lock().unwrap().rw_notifier().unwrap();
+                match notify_receiver.recv() {
+                    Ok(_) => {
+                        let _ = rw_sender.send(WriterMsg::CreateItemIter(
+                            descending,
+                            tab.clone(),
+                            key.clone(),
+                            tx.clone(),
+                        ));
+                    }
+                    Err(_) => { }
+                }
+                
             }
 
             false => {
@@ -606,7 +620,7 @@ impl DB {
                                 let _ = rw_sender.send(WriterMsg::Commit(Arc::new(v.clone()), Arc::new(move |c| match c {
                                     Ok(_) => {
                                         info!("txid: {:?} finnaly committed", txid.time());
-                                        sndr.send(Arc::new(v.clone()));
+                                        let _ = sndr.send(Arc::new(v.clone()));
                                     }
                                     Err(e) =>{
                                         warn!("txid: {:?} commit failed", txid.time());
@@ -615,7 +629,16 @@ impl DB {
                             }
 
                             None => {
-                                sndr.send(Arc::new(vec![]));
+                                let _ = rw_sender.send(WriterMsg::Commit(Arc::new(vec![]), Arc::new(move |c| match c {
+                                    Ok(_) => {
+                                        info!("txid: {:?} finnaly committed", txid.time());
+                                        let _ = sndr.send(Arc::new(vec![]));
+                                        
+                                    }
+                                    Err(e) =>{
+                                        warn!("txid: {:?} commit failed", txid.time());
+                                    }
+                                })));
                             }
                         }
                     }
