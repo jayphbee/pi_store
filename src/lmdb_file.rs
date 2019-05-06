@@ -242,20 +242,66 @@ impl TabTxn for LmdbTableTxn {
     ) -> Option<SResult<Vec<TabKV>>> {
         info!("query txid: {:?}, query item: {:?}", self.id, arr);
         let read_byte = self.read_byte.clone();
+        let mut retry = 5;
+
         match self.writable {
             true => {
                 let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-                let _ = rw_sender.send(WriterMsg::Query(
-                    arr,
-                    Arc::new(move |q| match q {
-                        Ok(v) => {
-                            read_byte.sum(v.len());
+                let (tx, rx) = unbounded();
+                let _ = rw_sender.send(WriterMsg::InProgressTx(self.id, tx));
+                match rx.recv() {
+                    Ok(txid) => {
+                        info!("===== query get in progress txid {:?} self txid {:?} =======", txid, self.id);
+                        if txid > 0 && txid != self.id {
+                            println!("txid {:?} query busy",self.id);
+                            while retry > 0 {
+                                thread::sleep_ms(10);
+                                info!("txid {:?} query wake up retry: {:?}", self.id, retry);
+                                let cb = cb.clone();
+                                let read_byte = read_byte.clone();
 
-                            cb(Ok(v))
-                        },
-                        Err(e) => cb(Err(e.to_string())),
-                    }),
-                ));
+                                let (t, r) = unbounded();
+                                let _ = rw_sender.send(WriterMsg::InProgressTx(self.id, t));
+                                match r.recv() {
+                                    Ok(txid) => {
+                                        if txid == 0 {
+                                            let _ = rw_sender.send(WriterMsg::Query(
+                                                self.id,
+                                                arr.clone(),
+                                                Arc::new(move |q| match q {
+                                                    Ok(v) => {
+                                                        read_byte.sum(v.len());
+
+                                                        cb(Ok(v))
+                                                    },
+                                                    Err(e) => cb(Err(e.to_string())),
+                                                }),
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {}
+                                }
+                                retry -= 1;
+                            }
+                            info!("before query timeout");
+                            cb(Err("query timeout".to_string()));
+                        } else {
+                            let _ = rw_sender.send(WriterMsg::Query(
+                                self.id,
+                                arr,
+                                Arc::new(move |q| match q {
+                                    Ok(v) => {
+                                        read_byte.sum(v.len());
+
+                                        cb(Ok(v))
+                                    },
+                                    Err(e) => cb(Err(e.to_string())),
+                                }),
+                            ));
+                        }
+                    }
+                    Err(e) => {}
+                }
             }
 
             false => {
@@ -289,7 +335,7 @@ impl TabTxn for LmdbTableTxn {
         info!("MODIFY: txid: {:?}, tab: {:?}, len: {:?}", self.id, self.tab, arr);
 
         let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-        let _ = sender.send(WriterMsg::Modify(Arc::new(move |m| match m {
+        let _ = sender.send(WriterMsg::Modify(self.id, Arc::new(move |m| match m {
             Ok(_) => cb(Ok(())),
             Err(e) => cb(Err(e.to_string())),
         })));
@@ -328,19 +374,59 @@ impl TabTxn for LmdbTableTxn {
         key: Option<Bin>,
         descending: bool,
         filter: Filter,
-        _cb: Arc<Fn(IterResult)>,
+        cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
         info!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
         let (tx, rx) = bounded(1);
+        let mut retry = 5;
         match self.writable {
             true => {
                 let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-                let _ = rw_sender.send(WriterMsg::CreateItemIter(
-                    descending,
-                    tab.clone(),
-                    key.clone(),
-                    tx.clone(),
-                ));
+                let (txx, rxx) = unbounded();
+                let _ = rw_sender.send(WriterMsg::InProgressTx(self.id, txx));
+                match rxx.recv() {
+                    Ok(txid) => {
+                        info!("===== create iter get in progress txid {:?} self txid {:?} =======", txid, self.id);
+                        if txid > 0 && txid != self.id {
+                            println!("iter busy");
+                            while retry > 0 {
+                                thread::sleep_ms(10);
+                                info!("txid {:?} iter wake up retry: {:?}", self.id, retry);
+
+                                let (t, r) = unbounded();
+                                let _ = rw_sender.send(WriterMsg::InProgressTx(self.id, t));
+                                match r.recv() {
+                                    Ok(txid) => {
+                                        if txid == 0 {
+                                            let _ = rw_sender.send(WriterMsg::CreateItemIter(
+                                                self.id,
+                                                descending,
+                                                tab.clone(),
+                                                key.clone(),
+                                                tx.clone(),
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {}
+                                }
+                                retry -= 1;
+                            }
+                            info!("before iter timeout");
+                            cb(Err("create iter timeout".to_string()));
+                        } else {
+                            let _ = rw_sender.send(WriterMsg::CreateItemIter(
+                                self.id,
+                                descending,
+                                tab.clone(),
+                                key.clone(),
+                                tx.clone(),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+
+                    }
+                }
             }
 
             false => {
@@ -603,19 +689,37 @@ impl DB {
                         match MODS.lock().unwrap().remove(&txid.time()) {
                             Some(v) => {
                                 info!("modifications to be committed: {:?}", v);
-                                let _ = rw_sender.send(WriterMsg::Commit(Arc::new(v.clone()), Arc::new(move |c| match c {
+                                let (s, r) = bounded(0);
+                                let _ = rw_sender.send(WriterMsg::Commit(s, txid.time(), Arc::new(v.clone()), Arc::new(move |c| match c {
                                     Ok(_) => {
                                         info!("txid: {:?} finnaly committed", txid.time());
-                                        sndr.send(Arc::new(v.clone()));
+                                        let _ = sndr.send(Arc::new(v.clone()));
                                     }
                                     Err(e) =>{
                                         warn!("txid: {:?} commit failed", txid.time());
                                     }
                                 })));
+                                match r.recv() {
+                                    Ok(_) => {}
+                                    Err(_) => {}
+                                }
                             }
 
                             None => {
-                                sndr.send(Arc::new(vec![]));
+                                let (s, r) = bounded(0);
+                                let _ = rw_sender.send(WriterMsg::Commit(s, txid.time(), Arc::new(vec![]), Arc::new(move |c| match c {
+                                    Ok(_) => {
+                                        info!("txid: {:?} finnaly committed", txid.time());
+                                        let _ = sndr.send(Arc::new(vec![]));
+                                    }
+                                    Err(e) =>{
+                                        warn!("txid: {:?} commit failed", txid.time());
+                                    }
+                                })));
+                                match r.recv() {
+                                    Ok(_) => {}
+                                    Err(_) => {}
+                                }
                             }
                         }
                     }

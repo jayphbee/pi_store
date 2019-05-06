@@ -1,6 +1,6 @@
 use crossbeam_channel::{unbounded, Sender};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::RwLock;
 use std::thread;
 
@@ -37,18 +37,20 @@ pub enum ReaderMsg {
 unsafe impl Send for ReaderMsg {}
 
 pub enum WriterMsg {
-    Query(Arc<Vec<TabKV>>, TxQueryCallback),
-    CreateItemIter(bool, Atom, Option<Bin>, Sender<Option<Bin>>),
+    Query(u64, Arc<Vec<TabKV>>, TxQueryCallback),
+    CreateItemIter(u64, bool, Atom, Option<Bin>, Sender<Option<Bin>>),
     NextItem(
+        u64,
         bool,
         Atom,
         Option<Bin>,
         Arc<Fn(NextResult<(Bin, Bin)>)>,
         Sender<Option<Bin>>,
     ),
-    Modify(TxCallback),
-    Commit(Arc<Vec<TabKV>>, TxCallback),
-    Rollback(TxCallback),
+    Modify(u64, TxCallback),
+    Commit(Sender<()>, u64, Arc<Vec<TabKV>>, TxCallback),
+    Rollback(u64, TxCallback),
+    InProgressTx(u64, Sender<u64>),
 }
 
 unsafe impl Send for WriterMsg {}
@@ -359,9 +361,20 @@ impl LmdbService {
 
         let _ = thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || loop {
             let mut rw_txn: Option<RwTransaction> = None;
+            let mut in_progress_tx = 0;
 
             match rx.recv() {
-                Ok(WriterMsg::Query(queries, cb)) => {
+                Ok(WriterMsg::InProgressTx(txid, sndr)) => {
+                    info!("******* InProgressTx txid: {:?} ********", in_progress_tx);
+
+                    if in_progress_tx == 0 {
+                        let _ = sndr.send(0);
+                        in_progress_tx = txid;
+                    } else {
+                        let _ = sndr.send(in_progress_tx);
+                    }
+                }
+                Ok(WriterMsg::Query(txid, queries, cb)) => {
                     let mut qr = vec![];
                     let mut query_error = false;
                     if rw_txn.is_none() {
@@ -416,7 +429,7 @@ impl LmdbService {
                     }
                 }
 
-                Ok(WriterMsg::CreateItemIter(descending, tab, start_key, sndr)) => {
+                Ok(WriterMsg::CreateItemIter(txid, descending, tab, start_key, sndr)) => {
                     if rw_txn.is_none() {
                         rw_txn = Some(env
                         .as_ref()
@@ -487,7 +500,7 @@ impl LmdbService {
                     drop(cursor);
                 }
 
-                Ok(WriterMsg::NextItem(descending, tab, cur_key, cb, sndr)) => {
+                Ok(WriterMsg::NextItem(txid, descending, tab, cur_key, cb, sndr)) => {
                     if rw_txn.is_none() {
                         rw_txn = Some(env
                         .as_ref()
@@ -581,13 +594,21 @@ impl LmdbService {
                     drop(cursor);
                 }
 
-                Ok(WriterMsg::Modify(cb)) => {
+                Ok(WriterMsg::Modify(txid, cb)) => {
+                    if rw_txn.is_none() {
+                        rw_txn = Some(env
+                        .as_ref()
+                        .unwrap()
+                        .begin_rw_txn()
+                        .expect("Fatal error: failed to begin rw txn"));
+                    }
+
                     let t = Box::new(move |_: Option<isize>| {
                         cb(Ok(()));
                     });
                     cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer modify"));
                 }
-                Ok(WriterMsg::Commit(modifies, cb)) => {
+                Ok(WriterMsg::Commit(s, txid, modifies, cb)) => {
                     if rw_txn.is_none() {
                         rw_txn = Some(env
                         .as_ref()
@@ -637,20 +658,28 @@ impl LmdbService {
                                 cb1(Ok(()));
                             });
                             cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit"));
+                            // cb1(Ok(()))
                         }
                         Err(e) => {
                             let t = Box::new(move |_: Option<isize>| {
                                 cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
                             });
                             cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
+                            // cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
                         }
                     }
+                    info!("==== in_progress_tx {:?} set to 0 self txid {:?} =======", in_progress_tx, txid);
+
+                    in_progress_tx = 0;
+                    let _ = s.send(());
+
                 }
-                Ok(WriterMsg::Rollback(cb)) => {
+                Ok(WriterMsg::Rollback(txid, cb)) => {
                     let t = Box::new(move |_: Option<isize>| {
                         cb(Ok(()));
                     });
                     cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer rollback txn commit"));
+                    in_progress_tx = 0;
                 }
                 Err(_) => (),
             }
