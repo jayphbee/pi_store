@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::RwLock;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags, RwTransaction};
 
@@ -362,14 +363,28 @@ impl LmdbService {
         let _ = thread::Builder::new().name("Lmdb writer".to_string()).spawn(move || {
             let mut rw_txn: Option<RwTransaction> = None;
             let mut in_progress_tx = 0;
+            let mut timeout = (0, Instant::now()); // (txid, duration)
             loop {
+                println!("====== in_progress_tx ===== {:?}", in_progress_tx);
                 match rx.recv() {
                     Ok(WriterMsg::InProgressTx(txid, sndr)) => {
                         info!("******* InProgressTx txid: {:?} ********", in_progress_tx);
                         if in_progress_tx == 0 {
                             in_progress_tx = txid;
+                            timeout.0 = txid;
+                            timeout.1 = Instant::now();
                         }
                         let _ = sndr.send(in_progress_tx);
+                        if timeout.0 != 0 {
+                            let now = Instant::now();
+                            if now.duration_since(timeout.1) > Duration::from_millis(50) {
+                                in_progress_tx = 0;
+                                if !rw_txn.is_none() {
+                                    let _ = rw_txn.take().unwrap().abort();
+                                }
+                                timeout.1 = Instant::now();
+                            }
+                        }
                     }
                     Ok(WriterMsg::Query(txid, queries, cb)) => {
                         info!("txid {:?} when query", in_progress_tx);
@@ -656,14 +671,12 @@ impl LmdbService {
                                     cb1(Ok(()));
                                 });
                                 cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit"));
-                                // cb1(Ok(()))
                             }
                             Err(e) => {
                                 let t = Box::new(move |_: Option<isize>| {
                                     cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
                                 });
                                 cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
-                                // cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
                             }
                         }
                         info!("==== in_progress_tx {:?} set to 0 self txid {:?} =======", in_progress_tx, txid);

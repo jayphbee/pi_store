@@ -253,18 +253,20 @@ impl TabTxn for LmdbTableTxn {
                     Ok(txid) => {
                         info!("===== query get in progress txid {:?} self txid {:?} =======", txid, self.id);
                         if txid > 0 && txid != self.id {
-                            println!("txid {:?} query busy",self.id);
                             while retry > 0 {
-                                thread::sleep_ms(10);
+                                info!("txid {:?} query going to sleep retry: {:?}", self.id, retry);
+                                thread::sleep_ms(100);
                                 info!("txid {:?} query wake up retry: {:?}", self.id, retry);
                                 let cb = cb.clone();
                                 let read_byte = read_byte.clone();
 
                                 let (t, r) = unbounded();
+                                let mut should_break = false;
                                 let _ = rw_sender.send(WriterMsg::InProgressTx(self.id, t));
                                 match r.recv() {
                                     Ok(txid) => {
                                         if txid == 0 {
+                                            should_break = true;
                                             let _ = rw_sender.send(WriterMsg::Query(
                                                 self.id,
                                                 arr.clone(),
@@ -281,10 +283,13 @@ impl TabTxn for LmdbTableTxn {
                                     }
                                     Err(e) => {}
                                 }
+                                if should_break {
+                                    break;
+                                }
                                 retry -= 1;
                             }
                             info!("before query timeout");
-                            cb(Err("query timeout".to_string()));
+                            // cb(Err("query timeout".to_string()));
                         } else {
                             let _ = rw_sender.send(WriterMsg::Query(
                                 self.id,
@@ -384,19 +389,21 @@ impl TabTxn for LmdbTableTxn {
                 let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
                 let (txx, rxx) = unbounded();
                 let _ = rw_sender.send(WriterMsg::InProgressTx(self.id, txx));
+                let mut should_break = false;
                 match rxx.recv() {
                     Ok(txid) => {
                         info!("===== create iter get in progress txid {:?} self txid {:?} =======", txid, self.id);
                         if txid > 0 && txid != self.id {
-                            println!("iter busy");
                             while retry > 0 {
-                                thread::sleep_ms(10);
+                                info!("txid {:?} iter going to sleep retry: {:?}", self.id, retry);
+                                thread::sleep_ms(100);
                                 info!("txid {:?} iter wake up retry: {:?}", self.id, retry);
 
                                 let (t, r) = unbounded();
                                 let _ = rw_sender.send(WriterMsg::InProgressTx(self.id, t));
                                 match r.recv() {
                                     Ok(txid) => {
+                                        should_break = true;
                                         if txid == 0 {
                                             let _ = rw_sender.send(WriterMsg::CreateItemIter(
                                                 self.id,
@@ -409,10 +416,13 @@ impl TabTxn for LmdbTableTxn {
                                     }
                                     Err(e) => {}
                                 }
+                                if should_break {
+                                    break;
+                                }
                                 retry -= 1;
                             }
                             info!("before iter timeout");
-                            cb(Err("create iter timeout".to_string()));
+                            // cb(Err("create iter timeout".to_string()));
                         } else {
                             let _ = rw_sender.send(WriterMsg::CreateItemIter(
                                 self.id,
