@@ -15,7 +15,7 @@ use sinfo::EnumType;
 use pi_db::tabs::{TabLog, Tabs};
 use pi_db::mgr::{COMMIT_CHAN, CommitChan};
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
-use pool::{LmdbService, ReaderMsg, WriterMsg};
+use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
@@ -73,9 +73,6 @@ pub struct LmdbTable {
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
         LMDB_TABLE_CREATE_COUNT.sum(1);
-
-        LMDB_SERVICE.lock().unwrap().create_tab(db_name);
-
         LmdbTable {
             name: db_name.clone(),
             env_flags: EnvironmentFlags::empty(),
@@ -495,10 +492,25 @@ impl LmdbMetaTxn {
     }
 }
 
+fn create_table_in_lmdb(tab: &Atom) {
+    let env = LMDB_SERVICE.lock().unwrap().get_env();
+    OPENED_TABLES
+        .write()
+        .unwrap()
+        .entry(tab.get_hash())
+        .or_insert_with(|| {
+            env
+            .as_ref()
+            .create_db(Some(tab.as_str()), DatabaseFlags::empty())
+            .expect("Fatal error: open table failed")
+        });
+}
+
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
         info!("META TXN: alter tab: {:?}", tab);
+        create_table_in_lmdb(tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -584,6 +596,8 @@ impl DB {
             Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).expect("Failed to open db to retrive meta table"),
         };
 
+        OPENED_TABLES.write().unwrap().insert(Atom::from(SINFO.to_string()).get_hash(), db);
+
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
@@ -600,22 +614,42 @@ impl DB {
                 match COMMIT_CHAN.1.recv() {
                     Ok(CommitChan(txid, sndr)) => {
                         info!("receive commit notification for txid: {:?} ", txid.time());
+                        let (tx, rx) = bounded(0);
                         match MODS.lock().unwrap().remove(&txid.time()) {
                             Some(v) => {
                                 info!("modifications to be committed: {:?}", v);
-                                let _ = rw_sender.send(WriterMsg::Commit(Arc::new(v.clone()), Arc::new(move |c| match c {
+                                let _ = rw_sender.send(WriterMsg::Commit(tx, Arc::new(v.clone()), Arc::new(move |c| match c {
                                     Ok(_) => {
                                         info!("txid: {:?} finnaly committed", txid.time());
-                                        sndr.send(Arc::new(v.clone()));
+                                        let _ = sndr.send(Arc::new(v.clone()));
                                     }
                                     Err(e) =>{
-                                        warn!("txid: {:?} commit failed", txid.time());
+                                        warn!("txid: {:?} commit failed {:?}", txid.time(), e);
                                     }
                                 })));
+                                // 阻塞等待提交完毕，保证读写事务的串行化
+                                match rx.recv() {
+                                    Ok(_) => {}
+                                    Err(_) => {}
+                                }
                             }
 
                             None => {
-                                sndr.send(Arc::new(vec![]));
+                                let (tx, rx) = bounded(0);
+                                let _ = rw_sender.send(WriterMsg::Commit(tx, Arc::new(vec![]), Arc::new(move |c| match c {
+                                    Ok(_) => {
+                                        info!("non write txid: {:?} finnaly committed", txid.time());
+                                        let _ = sndr.send(Arc::new(vec![]));
+                                    }
+                                    Err(e) =>{
+                                        warn!("non write txid: {:?} commit failed {:?}", txid.time(), e);
+                                    }
+                                })));
+                                // 阻塞等待提交完毕，保证读写事务的串行化
+                                match rx.recv() {
+                                    Ok(_) => {}
+                                    Err(_) => {}
+                                }
                             }
                         }
                     }
