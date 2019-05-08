@@ -2,7 +2,9 @@ use crossbeam_channel::{unbounded, Sender};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{Ordering, AtomicU64};
 use std::thread;
+use std::time::{Instant, Duration};
 
 use lmdb::{Cursor, Database, DatabaseFlags, Environment, Error, Transaction, WriteFlags, RwTransaction};
 
@@ -47,7 +49,7 @@ pub enum WriterMsg {
         Sender<Option<Bin>>,
     ),
     Modify(TxCallback),
-    Commit(Sender<()>, Arc<Vec<TabKV>>, TxCallback),
+    Commit(Arc<Vec<TabKV>>, TxCallback),
     Rollback(TxCallback),
 }
 
@@ -577,7 +579,7 @@ impl LmdbService {
                         });
                         cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer modify"));
                     }
-                    Ok(WriterMsg::Commit(tx, modifies, cb)) => {
+                    Ok(WriterMsg::Commit(modifies, cb)) => {
                         if rw_txn.is_none() {
                             rw_txn = Some(env
                             .as_ref()
@@ -635,14 +637,14 @@ impl LmdbService {
                                 cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
                             }
                         }
-
-                        let _ = tx.send(());
+                        IN_PROGRESS_TX.store(0, Ordering::SeqCst);
                     }
                     Ok(WriterMsg::Rollback(cb)) => {
                         let t = Box::new(move |_: Option<isize>| {
                             cb(Ok(()));
                         });
                         cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer rollback txn commit"));
+                        IN_PROGRESS_TX.store(0, Ordering::SeqCst);
                     }
                     Err(_) => (),
                 }
@@ -655,6 +657,7 @@ impl LmdbService {
 lazy_static! {
     // all opened dbs in this env
     pub static ref OPENED_TABLES: Arc<RwLock<HashMap<u64, Database>>> = Arc::new(RwLock::new(HashMap::new()));
+    pub static ref IN_PROGRESS_TX: AtomicU64 = AtomicU64::new(0);
 }
 
 fn get_db(tab: u64) -> Database {
