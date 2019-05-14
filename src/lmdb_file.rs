@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::Ordering;
 use std::thread;
+
+use worker::impls::cast_store_task;
+use worker::task::TaskType;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use atom::Atom;
@@ -15,7 +19,7 @@ use sinfo::EnumType;
 use pi_db::tabs::{TabLog, Tabs};
 use pi_db::mgr::{COMMIT_CHAN, CommitChan};
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
-use pool::{LmdbService, ReaderMsg, WriterMsg};
+use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
@@ -73,9 +77,6 @@ pub struct LmdbTable {
 impl Tab for LmdbTable {
     fn new(db_name: &Atom) -> Self {
         LMDB_TABLE_CREATE_COUNT.sum(1);
-
-        LMDB_SERVICE.lock().unwrap().create_tab(db_name);
-
         LmdbTable {
             name: db_name.clone(),
             env_flags: EnvironmentFlags::empty(),
@@ -241,21 +242,54 @@ impl TabTxn for LmdbTableTxn {
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
         info!("query txid: {:?}, query item: {:?}", self.id, arr);
-        let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
-
         let read_byte = self.read_byte.clone();
+        match self.writable {
+            true => {
+                let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
+                let mut retry = 10;
+                let cb1= cb.clone();
+                while retry > 0 {
+                    if IN_PROGRESS_TX.load(Ordering::SeqCst) == self.id || IN_PROGRESS_TX.compare_and_swap(0, self.id, Ordering::SeqCst) == 0 {
+                        let _ = rw_sender.send(WriterMsg::Query(
+                            arr.clone(),
+                            Arc::new(move |q| match q {
+                                Ok(v) => {
+                                    read_byte.sum(v.len());
 
-        let _ = sender.send(ReaderMsg::Query(
-            arr,
-            Arc::new(move |q| match q {
-                Ok(v) => {
-                    read_byte.sum(v.len());
+                                    cb(Ok(v))
+                                },
+                                Err(e) => cb(Err(e.to_string())),
+                            }),
+                        ));
+                        break;
+                    }
+                    thread::sleep_ms(10);
+                    retry -= 1;
+                }
 
-                    cb(Ok(v))
-                },
-                Err(e) => cb(Err(e.to_string())),
-            }),
-        ));
+                if retry == 0 {
+                    let t = Box::new(move |_| {
+                        cb1(Err("query timeout".to_string()));
+                    });
+                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("query timeout callback"));
+                }
+            }
+
+            false => {
+                let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&self.tab).unwrap();
+                let _ = sender.send(ReaderMsg::Query(
+                    arr,
+                    Arc::new(move |q| match q {
+                        Ok(v) => {
+                            read_byte.sum(v.len());
+
+                            cb(Ok(v))
+                        },
+                        Err(e) => cb(Err(e.to_string())),
+                    }),
+                ));
+            }
+        }
 
         self.read_count.sum(1);
 
@@ -311,18 +345,46 @@ impl TabTxn for LmdbTableTxn {
         key: Option<Bin>,
         descending: bool,
         filter: Filter,
-        _cb: Arc<Fn(IterResult)>,
+        cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
         info!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
-
         let (tx, rx) = bounded(1);
-        let sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
-        let _ = sender.send(ReaderMsg::CreateItemIter(
-            descending,
-            tab.clone(),
-            key.clone(),
-            tx.clone(),
-        ));
+        match self.writable {
+            true => {
+                let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
+                let mut retry = 10;
+                while retry > 0 {
+                    if IN_PROGRESS_TX.load(Ordering::SeqCst) == self.id || IN_PROGRESS_TX.compare_and_swap(0, self.id, Ordering::SeqCst) == 0 {
+                        let _ = rw_sender.send(WriterMsg::CreateItemIter(
+                            descending,
+                            tab.clone(),
+                            key.clone(),
+                            tx.clone(),
+                        ));
+                        break;
+                    }
+                    thread::sleep_ms(10);
+                    retry -= 1;
+                }
+
+                if retry == 0 {
+                    let t = Box::new(move |_| {
+                        cb(Err("create iter timeout".to_string()));
+                    });
+                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("create iter timeout callback"));
+                }
+            }
+
+            false => {
+                let ro_sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
+                let _ = ro_sender.send(ReaderMsg::CreateItemIter(
+                    descending,
+                    tab.clone(),
+                    key.clone(),
+                    tx.clone(),
+                ));
+            }
+        }
 
         match rx.recv() {
             Ok(k) => {
@@ -465,10 +527,25 @@ impl LmdbMetaTxn {
     }
 }
 
+fn create_table_in_lmdb(tab: &Atom) {
+    let env = LMDB_SERVICE.lock().unwrap().get_env();
+    OPENED_TABLES
+        .write()
+        .unwrap()
+        .entry(tab.get_hash())
+        .or_insert_with(|| {
+            env
+            .as_ref()
+            .create_db(Some(tab.as_str()), DatabaseFlags::empty())
+            .expect("Fatal error: open table failed")
+        });
+}
+
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
         info!("META TXN: alter tab: {:?}", tab);
+        create_table_in_lmdb(tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -554,6 +631,8 @@ impl DB {
             Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).expect("Failed to open db to retrive meta table"),
         };
 
+        OPENED_TABLES.write().unwrap().insert(Atom::from(SINFO.to_string()).get_hash(), db);
+
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
 
@@ -576,16 +655,23 @@ impl DB {
                                 let _ = rw_sender.send(WriterMsg::Commit(Arc::new(v.clone()), Arc::new(move |c| match c {
                                     Ok(_) => {
                                         info!("txid: {:?} finnaly committed", txid.time());
-                                        sndr.send(Arc::new(v.clone()));
+                                        let _ = sndr.send(Arc::new(v.clone()));
                                     }
                                     Err(e) =>{
-                                        warn!("txid: {:?} commit failed", txid.time());
+                                        warn!("txid: {:?} commit failed {:?}", txid.time(), e);
                                     }
                                 })));
                             }
-
                             None => {
-                                sndr.send(Arc::new(vec![]));
+                                let _ = rw_sender.send(WriterMsg::Commit(Arc::new(vec![]), Arc::new(move |c| match c {
+                                    Ok(_) => {
+                                        info!("non write txid: {:?} finnaly committed", txid.time());
+                                        let _ = sndr.send(Arc::new(vec![]));
+                                    }
+                                    Err(e) =>{
+                                        warn!("non write txid: {:?} commit failed {:?}", txid.time(), e);
+                                    }
+                                })));
                             }
                         }
                     }
