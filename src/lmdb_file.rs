@@ -246,7 +246,7 @@ impl TabTxn for LmdbTableTxn {
         match self.writable {
             true => {
                 let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-                let mut retry = 10;
+                let mut retry = 250;
                 let cb1= cb.clone();
                 while retry > 0 {
                     if IN_PROGRESS_TX.load(Ordering::SeqCst) == self.id || IN_PROGRESS_TX.compare_and_swap(0, self.id, Ordering::SeqCst) == 0 {
@@ -263,7 +263,7 @@ impl TabTxn for LmdbTableTxn {
                         ));
                         break;
                     }
-                    thread::sleep_ms(10);
+                    thread::sleep_ms(20);
                     retry -= 1;
                 }
 
@@ -352,7 +352,7 @@ impl TabTxn for LmdbTableTxn {
         match self.writable {
             true => {
                 let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
-                let mut retry = 10;
+                let mut retry = 250;
                 while retry > 0 {
                     if IN_PROGRESS_TX.load(Ordering::SeqCst) == self.id || IN_PROGRESS_TX.compare_and_swap(0, self.id, Ordering::SeqCst) == 0 {
                         let _ = rw_sender.send(WriterMsg::CreateItemIter(
@@ -363,7 +363,7 @@ impl TabTxn for LmdbTableTxn {
                         ));
                         break;
                     }
-                    thread::sleep_ms(10);
+                    thread::sleep_ms(20);
                     retry -= 1;
                 }
 
