@@ -14,7 +14,7 @@ use atom::Atom;
 use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use guid::Guid;
-use pi_db::db::{Event, Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
+use pi_db::db::{EventType, Event, Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
 use sinfo::EnumType;
 use pi_db::tabs::{TabLog, Tabs};
 use pi_db::memery_db::{MTab, MemeryTxn, RefMemeryTxn};
@@ -820,7 +820,22 @@ impl WareSnapshot for LmdbSnapshot {
         (self.0).tabs.write().unwrap().rollback(id)
     }
 
-    fn notify(&self, event: Event) {}
+    fn notify(&self, event: Event) {
+        let env = LMDB_SERVICE.lock().unwrap().get_env();
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = get_db(event.tab.get_hash());
+
+        match event.other {
+            EventType::Tab {key, value} => {
+                if value.is_none() {
+                    txn.del(db, key.as_ref(), None);
+                } else {
+                    txn.put(db, key.as_ref(), value.unwrap().as_ref(), WriteFlags::empty());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 lazy_static! {
