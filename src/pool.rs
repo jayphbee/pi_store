@@ -18,6 +18,8 @@ const MDB_NEXT: u32 = 8;
 const MDB_FIRST: u32 = 0;
 const MDB_LAST: u32 = 6;
 
+const SLOW_TIME: u64 = 10;
+
 use pi_db::db::{Bin, NextResult, TabKV, TxCallback, TxQueryCallback};
 
 use atom::Atom;
@@ -103,12 +105,19 @@ impl LmdbService {
             loop {
                 match rx.recv() {
                     Ok(ReaderMsg::Commit(cb)) => {
+                        let start_time = Instant::now();
                         let t = Box::new(move |_| {
                             cb(Ok(()));
                         });
                         cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader commit"));
+
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            println!("===> Slow reader/writer commit, time: {:?}", elapsed);
+                        }
                     }
                     Ok(ReaderMsg::Query(queries, cb)) => {
+                        let start_time = Instant::now();
                         let mut qr = vec![];
                         let mut query_error = false;
                         let txn = env
@@ -164,8 +173,16 @@ impl LmdbService {
                             Ok(_) => {}
                             Err(e) => panic!("query txn commit error: {:?}", e.to_string()),
                         }
+
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            let tabs = queries.iter().map(|q| q.tab.clone().to_string()).collect::<Vec<String>>();
+                            let qsize: usize = queries.iter().map(|q| q.key.clone().len()).sum();
+                            println!("===> Slow reader query, time: {:?}, tabs: {:?}, qsize: {:?}", elapsed, tabs, qsize);
+                        }
                     }
                     Ok(ReaderMsg::CreateItemIter(descending, tab, start_key, sndr)) => {
+                        let start_time = Instant::now();
                         let txn = env
                             .as_ref()
                             .unwrap()
@@ -235,8 +252,14 @@ impl LmdbService {
                             Ok(_) => {}
                             Err(e) => panic!("create iter txn commit error: {:?}", e.to_string()),
                         }
+
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            println!("===> Slow reader createItemIter, time: {:?}, tab: {:?}", elapsed, tab);
+                        }
                     }
                     Ok(ReaderMsg::NextItem(descending, tab, cur_key, cb, sndr)) => {
+                        let start_time = Instant::now();
                         let txn = env
                             .as_ref()
                             .unwrap()
@@ -247,7 +270,7 @@ impl LmdbService {
                             .open_ro_cursor(db)
                             .expect(&format!("Fatal error: open cursor for db: {:?} failed", db));
 
-                        match (descending, cur_key) {
+                        match (descending, cur_key.clone()) {
                             (true, Some(ck)) => {
                                 let cb1 = cb.clone();
                                 let ck1 = ck.clone();
@@ -330,6 +353,11 @@ impl LmdbService {
                             Ok(_) => {},
                             Err(e) => panic!("Next item txn commit error: {:?}", e.to_string()),
                         }
+
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            println!("===> Slow reader itemIter, time: {:?}, tab: {:?}, iter_key: {:?}", elapsed, tab, cur_key);
+                        }
                     }
                     Ok(ReaderMsg::Rollback(cb)) => {
                         let t = Box::new(move |_: Option<isize>| {
@@ -354,6 +382,7 @@ impl LmdbService {
             loop {
                 match rx.recv() {
                     Ok(WriterMsg::Query(queries, cb)) => {
+                        let start_time = Instant::now();
                         let mut qr = vec![];
                         let mut query_error = false;
                         if rw_txn.is_none() {
@@ -406,9 +435,16 @@ impl LmdbService {
                             });
                             cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query ok"));
                         }
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            let tabs = queries.iter().map(|q| q.tab.clone().to_string()).collect::<Vec<String>>();
+                            let qsize: usize = queries.iter().map(|q| q.key.clone().len()).sum();
+                            println!("===> Slow writer query, time: {:?}, tabs: {:?}, qsize: {:?}", elapsed, tabs, qsize);
+                        }
                     }
 
                     Ok(WriterMsg::CreateItemIter(descending, tab, start_key, sndr)) => {
+                        let start_time = Instant::now();
                         if rw_txn.is_none() {
                             rw_txn = Some(env
                             .as_ref()
@@ -477,9 +513,15 @@ impl LmdbService {
                         }
 
                         drop(cursor);
+
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            println!("===> Slow writer createItemIter, time: {:?}, tab: {:?}", elapsed, tab);
+                        }
                     }
 
                     Ok(WriterMsg::NextItem(descending, tab, cur_key, cb, sndr)) => {
+                        let start_time = Instant::now();
                         if rw_txn.is_none() {
                             rw_txn = Some(env
                             .as_ref()
@@ -492,7 +534,7 @@ impl LmdbService {
                             .open_rw_cursor(db)
                             .expect(&format!("Fatal error: open rw cursor for db: {:?} failed", db));
 
-                        match (descending, cur_key) {
+                        match (descending, cur_key.clone()) {
                             (true, Some(ck)) => {
                                 let cb1 = cb.clone();
                                 let ck1 = ck.clone();
@@ -571,6 +613,11 @@ impl LmdbService {
                         }
 
                         drop(cursor);
+
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            println!("===> Slow writer itemIter, time: {:?}, tab: {:?}, iter_key: {:?}", elapsed, tab, cur_key);
+                        }
                     }
 
                     Ok(WriterMsg::Modify(cb)) => {
@@ -580,6 +627,7 @@ impl LmdbService {
                         cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer modify"));
                     }
                     Ok(WriterMsg::Commit(modifies, cb)) => {
+                        let start_time = Instant::now();
                         if rw_txn.is_none() {
                             rw_txn = Some(env
                             .as_ref()
@@ -638,6 +686,13 @@ impl LmdbService {
                             }
                         }
                         IN_PROGRESS_TX.store(0, Ordering::SeqCst);
+
+                        let elapsed = start_time.elapsed();
+                        if elapsed > Duration::from_millis(SLOW_TIME) {
+                            let tabs = modifies.iter().map(|m| m.tab.clone().to_string()).collect::<Vec<String>>();
+                            let msize: usize = modifies.iter().filter(|m|m.value.is_some()).map(|m| m.value.clone().unwrap().len()).sum();
+                            println!("===> Slow writer commit, time: {:?}, tab: {:?}, commit and modify size: {:?}", elapsed, tabs, msize);
+                        }
                     }
                     Ok(WriterMsg::Rollback(cb)) => {
                         let t = Box::new(move |_: Option<isize>| {
