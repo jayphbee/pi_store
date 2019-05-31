@@ -349,19 +349,11 @@ impl TabTxn for LmdbTableTxn {
         cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
         info!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
-        let (tx, rx) = bounded(1);
         match self.writable {
             true => {
-                let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
                 let mut retry = 250;
                 while retry > 0 {
                     if IN_PROGRESS_TX.load(Ordering::SeqCst) == self.id || IN_PROGRESS_TX.compare_and_swap(0, self.id, Ordering::SeqCst) == 0 {
-                        let _ = rw_sender.send(WriterMsg::CreateItemIter(
-                            descending,
-                            tab.clone(),
-                            key.clone(),
-                            tx.clone(),
-                        ));
                         break;
                     }
                     thread::sleep_ms(20);
@@ -369,38 +361,23 @@ impl TabTxn for LmdbTableTxn {
                 }
 
                 if retry == 0 {
-                    let t = Box::new(move |_| {
-                        cb(Err("create iter timeout".to_string()));
-                    });
-                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("create iter timeout callback"));
+                    return Some(Err("create iter timeout callback".to_string()));
+                } else {
+                    if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&tab.get_hash()) {
+                        return mtxn.iter(tab, key, descending, filter, cb);
+                    } else {
+                        return Some(Err("create iter error".to_string()));
+                    }
                 }
             }
 
             false => {
                 let ro_sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
-                let _ = ro_sender.send(ReaderMsg::CreateItemIter(
-                    descending,
-                    tab.clone(),
-                    key.clone(),
-                    tx.clone(),
-                ));
-            }
-        }
-
-        match rx.recv() {
-            Ok(k) => {
-                return Some(Ok(Box::new(LmdbItemsIter::new(
-                    self.id,
-                    descending,
-                    tab.clone(),
-                    k,
-                    tx,
-                    rx,
-                    filter,
-                ))));
-            }
-            Err(e) => {
-                panic!("Create db item iter in pool failed: {:?}", e.to_string());
+                if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&tab.get_hash()) {
+                    return mtxn.iter(tab, key, descending, filter, cb);
+                } else {
+                    return Some(Err("create iter error".to_string()));
+                }
             }
         }
     }
@@ -821,17 +798,10 @@ impl WareSnapshot for LmdbSnapshot {
     }
 
     fn notify(&self, event: Event) {
-        let env = LMDB_SERVICE.lock().unwrap().get_env();
-        let mut txn = env.begin_rw_txn().unwrap();
-        let db = get_db(event.tab.get_hash());
-
+        let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
         match event.other {
             EventType::Tab {key, value} => {
-                if value.is_none() {
-                    txn.del(db, key.as_ref(), None);
-                } else {
-                    txn.put(db, key.as_ref(), value.unwrap().as_ref(), WriteFlags::empty());
-                }
+                rw_sender.send(WriterMsg::FinallCommit(event.tab.clone(), key, value));
             }
             _ => {}
         }

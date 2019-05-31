@@ -53,6 +53,7 @@ pub enum WriterMsg {
     ),
     Modify(TxCallback),
     Commit(Arc<Vec<TabKV>>, TxCallback),
+    FinallCommit(Atom, Bin, Option<Bin>),
     Rollback(TxCallback),
 }
 
@@ -120,60 +121,37 @@ impl LmdbService {
                     Ok(ReaderMsg::Query(queries, cb)) => {
                         let start_time = Instant::now();
                         let mut qr = vec![];
-                        let mut query_error = false;
-                        let txn = env
-                            .as_ref()
-                            .unwrap()
-                            .begin_ro_txn()
-                            .expect("Fatal error: Lmdb can't create ro txn");
+                        
                         for q in queries.iter() {
-                            let db = get_db(q.tab.get_hash());
-                            match txn.get(db, q.key.as_ref()) {
-                                Ok(v) => {
-                                    qr.push(TabKV {
-                                        ware: q.ware.clone(),
-                                        tab: q.tab.clone(),
-                                        key: q.key.clone(),
-                                        index: q.index,
-                                        value: Some(Arc::new(Vec::from(v))),
-                                    });
-                                }
-
-                                Err(Error::NotFound) => {
-                                    qr.push(TabKV {
-                                        ware: q.ware.clone(),
-                                        tab: q.tab.clone(),
-                                        key: q.key.clone(),
-                                        index: q.index,
-                                        value: None,
-                                    });
-                                }
-
-                                Err(_) => {
-                                    query_error = true;
-                                    break;
+                            if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&q.tab.get_hash()) {
+                                let mut mtxn = mtxn.borrow_mut();
+                                match mtxn.get(q.key.clone()) {
+                                    Some(v) => {
+                                        qr.push(TabKV {
+                                            ware: q.ware.clone(),
+                                            tab: q.tab.clone(),
+                                            key: q.key.clone(),
+                                            index: q.index,
+                                            value: Some(v),
+                                        });
+                                    }
+                                    None => {
+                                        qr.push(TabKV {
+                                            ware: q.ware.clone(),
+                                            tab: q.tab.clone(),
+                                            key: q.key.clone(),
+                                            index: q.index,
+                                            value: None,
+                                        });
+                                    }
                                 }
                             }
                         }
 
-                        if query_error {
-                            let t = Box::new(move |_| {
-                                cb(Err(format!("lmdb query internal error")));
-                            });
-                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query error"));
-                            warn!("queries error: {:?}", queries);
-                        } else {
-                            info!("lmdb query success: {:?}", qr);
-                            let t = Box::new(move |_| {
-                                cb(Ok(qr));
-                            });
-                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query ok"));
-                        }
-
-                        match txn.commit() {
-                            Ok(_) => {}
-                            Err(e) => panic!("query txn commit error: {:?}", e.to_string()),
-                        }
+                        let t = Box::new(move |_| {
+                            cb(Ok(qr));
+                        });
+                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query ok"));
 
                         let elapsed = start_time.elapsed();
                         if elapsed > Duration::from_millis(SLOW_TIME) {
@@ -382,9 +360,8 @@ impl LmdbService {
 
             loop {
                 match rx.recv() {
-                    Ok(WriterMsg::Query(queries, cb)) => {
-                        let start_time = Instant::now();
-                        let mut qr = vec![];
+                    Ok(WriterMsg::FinallCommit(tab, key, value)) => {
+                        let db = get_db(tab.get_hash());
                         if rw_txn.is_none() {
                             rw_txn = Some(env
                             .as_ref()
@@ -393,8 +370,18 @@ impl LmdbService {
                             .expect("Fatal error: failed to begin rw txn"));
                         }
 
+                        if value.is_none() {
+                             rw_txn.as_mut().unwrap().del(db, key.as_ref(), None);
+                        } else {
+                            rw_txn.as_mut().unwrap().put(db, key.as_ref(), value.unwrap().as_ref(), WriteFlags::empty());
+                        }
+                        let _ = rw_txn.take().unwrap().commit();
+                    }
+                    Ok(WriterMsg::Query(queries, cb)) => {
+                        let start_time = Instant::now();
+                        let mut qr = vec![];
+
                         for q in queries.iter() {
-                            let db = get_db(q.tab.get_hash());
                             if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&q.tab.get_hash()) {
                                 let mut mtxn = mtxn.borrow_mut();
                                 match mtxn.get(q.key.clone()) {
@@ -618,63 +605,22 @@ impl LmdbService {
                     }
                     Ok(WriterMsg::Commit(modifies, cb)) => {
                         let start_time = Instant::now();
-                        if rw_txn.is_none() {
-                            rw_txn = Some(env
-                            .as_ref()
-                            .unwrap()
-                            .begin_rw_txn()
-                            .expect("Fatal error: failed to begin rw txn"));
-                        }
-
-                        let mut modify_error = false;
-
                         for m in modifies.iter() {
-                            let db = get_db(m.tab.get_hash());
-                            // value is some, insert data
-                            if m.value.is_some() {
-                                match rw_txn.as_mut().unwrap().put(
-                                    db,
-                                    m.key.as_ref(),
-                                    m.value.clone().unwrap().as_ref(),
-                                    WriteFlags::empty(),
-                                ) {
-                                    Ok(_) => {}
-                                    Err(_) => modify_error = true,
-                                }
-                            // value is None, delete data
-                            } else {
-                                match rw_txn.as_mut().unwrap().del(db, m.key.as_ref(), None) {
-                                    Ok(_) => {}
-                                    Err(Error::NotFound) => {
-                                        // TODO: when not found?
-                                    }
-                                    Err(_) => modify_error = true,
+                             if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&m.tab.get_hash()) {
+                                let mut mtxn = mtxn.borrow_mut();
+                                if m.value.is_some() {
+                                    mtxn.upsert(Arc::new(m.key.to_vec()), Arc::new(m.value.clone().unwrap().to_vec()));
+                                } else {
+                                    mtxn.delete(Arc::new(m.key.to_vec()));
                                 }
                             }
-                        }
-                        let cb1 = cb.clone();
-                        if modify_error {
-                            let t = Box::new(move |_: Option<isize>| {
-                                cb(Err("modify error".to_string()));
-                            });
-                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer error"));
-                            warn!("lmdb modify error");
                         }
 
-                        match rw_txn.take().unwrap().commit() {
-                            Ok(_) => {
-                                let t = Box::new(move |_: Option<isize>| {
-                                    cb1(Ok(()));
-                                });
-                                cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit"));
-                            }
-                            Err(e) => {
-                                let t = Box::new(move |_: Option<isize>| {
-                                    cb1(Err(format!("commit failed with error: {:?}", e.to_string())));
-                                });
-                                cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit error"));
-                            }
-                        }
+                        let t = Box::new(move |_: Option<isize>| {
+                            cb(Ok(()));
+                        });
+                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer normal txn commit"));
+
                         IN_PROGRESS_TX.store(0, Ordering::SeqCst);
 
                         let elapsed = start_time.elapsed();
