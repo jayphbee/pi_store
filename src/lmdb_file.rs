@@ -372,7 +372,6 @@ impl TabTxn for LmdbTableTxn {
             }
 
             false => {
-                let ro_sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
                 if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&tab.get_hash()) {
                     return mtxn.iter(tab, key, descending, filter, cb);
                 } else {
@@ -697,6 +696,35 @@ impl DB {
         std::mem::drop(cursor);
         let _ = txn.commit().unwrap();
 
+        let _ = thread::spawn(move || {
+            let mut write_cache: HashMap<(Atom, Bin), Option<Bin>> = HashMap::new();
+            loop {
+                match FINAL_COMMIT_CHAN.1.recv() {
+                    Ok(((tab, key), val)) => {
+                        write_cache.insert((tab, key), val);
+                    }
+                    Err(_) => {}
+                }
+
+                while let Ok(((tab, key), val)) = FINAL_COMMIT_CHAN.1.try_recv() {
+                    write_cache.insert((tab, key), val);
+                }
+
+                let mut rw_txn = env.begin_rw_txn();
+
+                for ((tab, key), val) in write_cache.drain() {
+                    let db = get_db(tab.get_hash());
+
+                    if val.is_none() {
+                        rw_txn.as_mut().unwrap().del(db, key.as_ref(), None);
+                    } else {
+                        rw_txn.as_mut().unwrap().put(db, key.as_ref(), val.unwrap().as_ref(), WriteFlags::empty());
+                    }
+                }
+                let _ = rw_txn.unwrap().commit();
+            }
+        });
+
         LMDB_WARE_CREATE_COUNT.sum(1);
 
         Ok(DB {
@@ -798,10 +826,9 @@ impl WareSnapshot for LmdbSnapshot {
     }
 
     fn notify(&self, event: Event) {
-        let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
         match event.other {
             EventType::Tab {key, value} => {
-                rw_sender.send(WriterMsg::FinallCommit(event.tab.clone(), key, value));
+                FINAL_COMMIT_CHAN.0.send(((event.tab.clone(), key), value));
             }
             _ => {}
         }
@@ -812,4 +839,5 @@ lazy_static! {
     static ref LMDB_SERVICE: Arc<Mutex<LmdbService>> = Arc::new(Mutex::new(LmdbService::new(17)));
     static ref MODS: Arc<Mutex<HashMap<u64, Vec<TabKV>>>> = Arc::new(Mutex::new(HashMap::new()));
     pub static ref CACHE_TABLES: Arc<Mutex<HashMap<u64, RefMemeryTxn>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref FINAL_COMMIT_CHAN: (Sender<((Atom, Bin), Option<Bin>)>, Receiver<((Atom, Bin), Option<Bin>)>) = unbounded();
 }
