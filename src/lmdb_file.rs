@@ -17,6 +17,7 @@ use guid::Guid;
 use pi_db::db::{Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
 use sinfo::EnumType;
 use pi_db::tabs::{TabLog, Tabs};
+use pi_db::db::Event;
 use pi_db::mgr::{COMMIT_CHAN, CommitChan};
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX};
@@ -794,6 +795,8 @@ impl WareSnapshot for LmdbSnapshot {
     fn rollback(&self, id: &Guid) {
         (self.0).tabs.write().unwrap().rollback(id)
     }
+
+    fn notify(&self, evt: Event) {}
 }
 
 lazy_static! {
