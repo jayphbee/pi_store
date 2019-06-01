@@ -53,6 +53,7 @@ pub enum WriterMsg {
     ),
     Modify(TxCallback),
     Commit(Arc<Vec<TabKV>>, TxCallback),
+    FinallCommit(Atom, Bin, Option<Bin>),
     Rollback(TxCallback),
 }
 
@@ -359,6 +360,23 @@ impl LmdbService {
 
             loop {
                 match rx.recv() {
+                    Ok(WriterMsg::FinallCommit(tab, key, value)) => {
+                        let db = get_db(tab.get_hash());
+                        if rw_txn.is_none() {
+                            rw_txn = Some(env
+                            .as_ref()
+                            .unwrap()
+                            .begin_rw_txn()
+                            .expect("Fatal error: failed to begin rw txn"));
+                        }
+
+                        if value.is_none() {
+                             rw_txn.as_mut().unwrap().del(db, key.as_ref(), None);
+                        } else {
+                            rw_txn.as_mut().unwrap().put(db, key.as_ref(), value.unwrap().as_ref(), WriteFlags::empty());
+                        }
+                        let _ = rw_txn.take().unwrap().commit();
+                    }
                     Ok(WriterMsg::Query(queries, cb)) => {
                         let start_time = Instant::now();
                         let mut qr = vec![];
