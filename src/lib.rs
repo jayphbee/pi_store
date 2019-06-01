@@ -45,3 +45,4 @@ extern crate crossbeam_channel;
 pub mod lmdb_file;
 //pub mod log;
 pub mod pool;
+pub mod file_mem_db;

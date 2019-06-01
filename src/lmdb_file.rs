@@ -14,13 +14,13 @@ use atom::Atom;
 use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use guid::Guid;
-use pi_db::db::{EventType, Event, Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
+use pi_db::db::{Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
 use sinfo::EnumType;
 use pi_db::tabs::{TabLog, Tabs};
-use pi_db::memery_db::{MTab, MemeryTxn, RefMemeryTxn};
+use pi_db::db::Event;
 use pi_db::mgr::{COMMIT_CHAN, CommitChan};
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
-use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX, get_db};
+use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
@@ -349,11 +349,19 @@ impl TabTxn for LmdbTableTxn {
         cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
         info!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
+        let (tx, rx) = bounded(1);
         match self.writable {
             true => {
+                let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
                 let mut retry = 250;
                 while retry > 0 {
                     if IN_PROGRESS_TX.load(Ordering::SeqCst) == self.id || IN_PROGRESS_TX.compare_and_swap(0, self.id, Ordering::SeqCst) == 0 {
+                        let _ = rw_sender.send(WriterMsg::CreateItemIter(
+                            descending,
+                            tab.clone(),
+                            key.clone(),
+                            tx.clone(),
+                        ));
                         break;
                     }
                     thread::sleep_ms(20);
@@ -361,22 +369,38 @@ impl TabTxn for LmdbTableTxn {
                 }
 
                 if retry == 0 {
-                    return Some(Err("create iter timeout callback".to_string()));
-                } else {
-                    if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&tab.get_hash()) {
-                        return mtxn.iter(tab, key, descending, filter, cb);
-                    } else {
-                        return Some(Err("create iter error".to_string()));
-                    }
+                    let t = Box::new(move |_| {
+                        cb(Err("create iter timeout".to_string()));
+                    });
+                    cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("create iter timeout callback"));
                 }
             }
 
             false => {
-                if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&tab.get_hash()) {
-                    return mtxn.iter(tab, key, descending, filter, cb);
-                } else {
-                    return Some(Err("create iter error".to_string()));
-                }
+                let ro_sender = LMDB_SERVICE.lock().unwrap().ro_sender(&tab).unwrap();
+                let _ = ro_sender.send(ReaderMsg::CreateItemIter(
+                    descending,
+                    tab.clone(),
+                    key.clone(),
+                    tx.clone(),
+                ));
+            }
+        }
+
+        match rx.recv() {
+            Ok(k) => {
+                return Some(Ok(Box::new(LmdbItemsIter::new(
+                    self.id,
+                    descending,
+                    tab.clone(),
+                    k,
+                    tx,
+                    rx,
+                    filter,
+                ))));
+            }
+            Err(e) => {
+                panic!("Create db item iter in pool failed: {:?}", e.to_string());
             }
         }
     }
@@ -518,35 +542,11 @@ fn create_table_in_lmdb(tab: &Atom) {
         });
 }
 
-fn create_cache_table(tab: &Atom) {
-    CACHE_TABLES.lock().unwrap().insert(tab.get_hash(), MemeryTxn::new(MTab::new(tab), &Guid(0), true));
-    load_data_to_cache_table(&tab);
-}
-
-// 加载文件数据库到内存数据库
-fn load_data_to_cache_table(tab: &Atom) {
-    if let Some(mem_txn) = CACHE_TABLES.lock().unwrap().get_mut(&tab.get_hash()) {
-        let mut mem_txn = mem_txn.borrow_mut();
-        let env = LMDB_SERVICE.lock().unwrap().get_env();
-        let txn = env.begin_ro_txn().unwrap();
-        let mut cursor = txn.open_ro_cursor(get_db(tab.get_hash())).unwrap();
-        let mut load_count = 0;
-        for (k, v) in cursor.iter() {
-            mem_txn.upsert(Arc::new(k.to_vec()), Arc::new(v.to_vec()));
-            load_count += 1;
-        }
-        println!("load file tab {:?} to mem table, item count: {:?}", tab, load_count);
-        drop(cursor);
-        let _ = txn.commit();
-    }
-}
-
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
         info!("META TXN: alter tab: {:?}", tab);
         create_table_in_lmdb(tab);
-        create_cache_table(tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -681,10 +681,10 @@ impl DB {
             }
         });
 
-        for (k, v) in cursor.iter() {
+        for kv in cursor.iter() {
             tabs.set_tab_meta(
-                Atom::decode(&mut ReadBuffer::new(k, 0)).unwrap(),
-                Arc::new(TabMeta::decode(&mut ReadBuffer::new(v, 0)).unwrap()),
+                Atom::decode(&mut ReadBuffer::new(kv.0, 0)).unwrap(),
+                Arc::new(TabMeta::decode(&mut ReadBuffer::new(kv.1, 0)).unwrap()),
             );
         }
 
@@ -695,35 +695,6 @@ impl DB {
 
         std::mem::drop(cursor);
         let _ = txn.commit().unwrap();
-
-        let _ = thread::spawn(move || {
-            let mut write_cache: HashMap<(Atom, Bin), Option<Bin>> = HashMap::new();
-            loop {
-                match FINAL_COMMIT_CHAN.1.recv() {
-                    Ok(((tab, key), val)) => {
-                        write_cache.insert((tab, key), val);
-                    }
-                    Err(_) => {}
-                }
-
-                while let Ok(((tab, key), val)) = FINAL_COMMIT_CHAN.1.try_recv() {
-                    write_cache.insert((tab, key), val);
-                }
-
-                let mut rw_txn = env.begin_rw_txn();
-
-                for ((tab, key), val) in write_cache.drain() {
-                    let db = get_db(tab.get_hash());
-
-                    if val.is_none() {
-                        rw_txn.as_mut().unwrap().del(db, key.as_ref(), None);
-                    } else {
-                        rw_txn.as_mut().unwrap().put(db, key.as_ref(), val.unwrap().as_ref(), WriteFlags::empty());
-                    }
-                }
-                let _ = rw_txn.unwrap().commit();
-            }
-        });
 
         LMDB_WARE_CREATE_COUNT.sum(1);
 
@@ -825,19 +796,10 @@ impl WareSnapshot for LmdbSnapshot {
         (self.0).tabs.write().unwrap().rollback(id)
     }
 
-    fn notify(&self, event: Event) {
-        match event.other {
-            EventType::Tab {key, value} => {
-                FINAL_COMMIT_CHAN.0.send(((event.tab.clone(), key), value));
-            }
-            _ => {}
-        }
-    }
+    fn notify(&self, evt: Event) {}
 }
 
 lazy_static! {
     static ref LMDB_SERVICE: Arc<Mutex<LmdbService>> = Arc::new(Mutex::new(LmdbService::new(17)));
     static ref MODS: Arc<Mutex<HashMap<u64, Vec<TabKV>>>> = Arc::new(Mutex::new(HashMap::new()));
-    pub static ref CACHE_TABLES: Arc<Mutex<HashMap<u64, RefMemeryTxn>>> = Arc::new(Mutex::new(HashMap::new()));
-    static ref FINAL_COMMIT_CHAN: (Sender<((Atom, Bin), Option<Bin>)>, Receiver<((Atom, Bin), Option<Bin>)>) = unbounded();
 }
