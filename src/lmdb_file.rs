@@ -14,13 +14,12 @@ use atom::Atom;
 use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use guid::Guid;
-use pi_db::db::{Event, Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
+use pi_db::db::{Bin, CommitResult, DBResult, Filter, Iter, IterResult, KeyIterResult, MetaTxn, NextResult,OpenTab, SResult, Tab, TabKV, TabMeta, TabTxn, TxCallback, TxQueryCallback, TxState, Txn, Ware,WareSnapshot};
 use sinfo::EnumType;
 use pi_db::tabs::{TabLog, Tabs};
-use pi_db::memery_db::{MTab, MemeryTxn, RefMemeryTxn};
 use pi_db::mgr::{COMMIT_CHAN, CommitChan};
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
-use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX, get_db};
+use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
@@ -542,35 +541,11 @@ fn create_table_in_lmdb(tab: &Atom) {
         });
 }
 
-fn create_cache_table(tab: &Atom) {
-    CACHE_TABLES.lock().unwrap().insert(tab.get_hash(), MemeryTxn::new(MTab::new(tab), &Guid(0), true));
-    load_data_to_cache_table(&tab);
-}
-
-// 加载文件数据库到内存数据库
-fn load_data_to_cache_table(tab: &Atom) {
-    if let Some(mem_txn) = CACHE_TABLES.lock().unwrap().get_mut(&tab.get_hash()) {
-        let mut mem_txn = mem_txn.borrow_mut();
-        let env = LMDB_SERVICE.lock().unwrap().get_env();
-        let txn = env.begin_ro_txn().unwrap();
-        let mut cursor = txn.open_ro_cursor(get_db(tab.get_hash())).unwrap();
-        let mut load_count = 0;
-        for (k, v) in cursor.iter() {
-            mem_txn.upsert(Arc::new(k.to_vec()), Arc::new(v.to_vec()));
-            load_count += 1;
-        }
-        println!("load file tab {:?} to mem table, item count: {:?}", tab, load_count);
-        drop(cursor);
-        let _ = txn.commit();
-    }
-}
-
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
         info!("META TXN: alter tab: {:?}", tab);
         create_table_in_lmdb(tab);
-        create_cache_table(tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
         let key = Arc::new(key.unwrap());
@@ -705,10 +680,10 @@ impl DB {
             }
         });
 
-        for (k, v) in cursor.iter() {
+        for kv in cursor.iter() {
             tabs.set_tab_meta(
-                Atom::decode(&mut ReadBuffer::new(k, 0)).unwrap(),
-                Arc::new(TabMeta::decode(&mut ReadBuffer::new(v, 0)).unwrap()),
+                Atom::decode(&mut ReadBuffer::new(kv.0, 0)).unwrap(),
+                Arc::new(TabMeta::decode(&mut ReadBuffer::new(kv.1, 0)).unwrap()),
             );
         }
 
@@ -819,12 +794,9 @@ impl WareSnapshot for LmdbSnapshot {
     fn rollback(&self, id: &Guid) {
         (self.0).tabs.write().unwrap().rollback(id)
     }
-
-    fn notify(&self, event: Event) {}
 }
 
 lazy_static! {
     static ref LMDB_SERVICE: Arc<Mutex<LmdbService>> = Arc::new(Mutex::new(LmdbService::new(17)));
     static ref MODS: Arc<Mutex<HashMap<u64, Vec<TabKV>>>> = Arc::new(Mutex::new(HashMap::new()));
-    static ref CACHE_TABLES: Arc<Mutex<HashMap<u64, RefMemeryTxn>>> = Arc::new(Mutex::new(HashMap::new()));
 }

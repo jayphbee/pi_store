@@ -715,7 +715,7 @@ lazy_static! {
     pub static ref IN_PROGRESS_TX: AtomicU64 = AtomicU64::new(0);
 }
 
-pub fn get_db(tab: u64) -> Database {
+fn get_db(tab: u64) -> Database {
     OPENED_TABLES
         .read()
         .unwrap()
