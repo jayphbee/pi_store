@@ -21,7 +21,6 @@ const MDB_LAST: u32 = 6;
 const SLOW_TIME: u64 = 10;
 
 use pi_db::db::{Bin, NextResult, TabKV, TxCallback, TxQueryCallback};
-use lmdb_file::CACHE_TABLES;
 
 use atom::Atom;
 
@@ -385,6 +384,7 @@ impl LmdbService {
                     Ok(WriterMsg::Query(queries, cb)) => {
                         let start_time = Instant::now();
                         let mut qr = vec![];
+                        let mut query_error = false;
                         if rw_txn.is_none() {
                             rw_txn = Some(env
                             .as_ref()
@@ -395,36 +395,46 @@ impl LmdbService {
 
                         for q in queries.iter() {
                             let db = get_db(q.tab.get_hash());
-                            if let Some(mtxn) = CACHE_TABLES.lock().unwrap().get_mut(&q.tab.get_hash()) {
-                                let mut mtxn = mtxn.borrow_mut();
-                                match mtxn.get(q.key.clone()) {
-                                    Some(v) => {
-                                        qr.push(TabKV {
-                                            ware: q.ware.clone(),
-                                            tab: q.tab.clone(),
-                                            key: q.key.clone(),
-                                            index: q.index,
-                                            value: Some(v),
-                                        });
-                                    }
-                                    None => {
-                                        qr.push(TabKV {
-                                            ware: q.ware.clone(),
-                                            tab: q.tab.clone(),
-                                            key: q.key.clone(),
-                                            index: q.index,
-                                            value: None,
-                                        });
-                                    }
+                            match rw_txn.as_ref().unwrap().get(db, q.key.as_ref()) {
+                                Ok(v) => {
+                                    qr.push(TabKV {
+                                        ware: q.ware.clone(),
+                                        tab: q.tab.clone(),
+                                        key: q.key.clone(),
+                                        index: q.index,
+                                        value: Some(Arc::new(Vec::from(v))),
+                                    });
+                                }
+
+                                Err(Error::NotFound) => {
+                                    qr.push(TabKV {
+                                        ware: q.ware.clone(),
+                                        tab: q.tab.clone(),
+                                        key: q.key.clone(),
+                                        index: q.index,
+                                        value: None,
+                                    });
+                                }
+
+                                Err(_) => {
+                                    query_error = true;
+                                    break;
                                 }
                             }
                         }
-
-                        let t = Box::new(move |_| {
-                            cb(Ok(qr));
-                        });
-                        cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query ok"));
-
+                        if query_error {
+                            let t = Box::new(move |_| {
+                                cb(Err(format!("lmdb rw query internal error")));
+                            });
+                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query error"));
+                            warn!("queries error: {:?}", queries);
+                        } else {
+                            info!("lmdb rw query success: {:?}", qr);
+                            let t = Box::new(move |_| {
+                                cb(Ok(qr));
+                            });
+                            cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query ok"));
+                        }
                         let elapsed = start_time.elapsed();
                         if elapsed > Duration::from_millis(SLOW_TIME) {
                             let tabs = queries.iter().map(|q| q.tab.clone().to_string()).collect::<Vec<String>>();

@@ -826,5 +826,5 @@ impl WareSnapshot for LmdbSnapshot {
 lazy_static! {
     static ref LMDB_SERVICE: Arc<Mutex<LmdbService>> = Arc::new(Mutex::new(LmdbService::new(17)));
     static ref MODS: Arc<Mutex<HashMap<u64, Vec<TabKV>>>> = Arc::new(Mutex::new(HashMap::new()));
-    pub static ref CACHE_TABLES: Arc<Mutex<HashMap<u64, RefMemeryTxn>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref CACHE_TABLES: Arc<Mutex<HashMap<u64, RefMemeryTxn>>> = Arc::new(Mutex::new(HashMap::new()));
 }
