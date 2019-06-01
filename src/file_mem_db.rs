@@ -23,46 +23,10 @@ use pi_db::tabs::{TabLog, Tabs, Prepare};
 
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
-//内存库前缀
-const MEMORY_WARE_PREFIX: &'static str = "mem_ware_";
-//内存表前缀
-const MEMORY_TABLE_PREFIX: &'static str = "mem_table_";
-//内存表事务创建数量后缀
-const MEMORY_TABLE_TRANS_COUNT_SUFFIX: &'static str = "_trans_count";
-//内存表事务预提交数量后缀
-const MEMORY_TABLE_PREPARE_COUNT_SUFFIX: &'static str = "_prepare_count";
-//内存表事务提交数量后缀
-const MEMORY_TABLE_COMMIT_COUNT_SUFFIX: &'static str = "_commit_count";
-//内存表事务回滚数量后缀
-const MEMORY_TABLE_ROLLBACK_COUNT_SUFFIX: &'static str = "_rollback_count";
-//内存表读记录数量后缀
-const MEMORY_TABLE_READ_COUNT_SUFFIX: &'static str = "_read_count";
-//内存表读记录字节数量后缀
-const MEMORY_TABLE_READ_BYTE_COUNT_SUFFIX: &'static str = "_read_byte_count";
-//内存表写记录数量后缀
-const MEMORY_TABLE_WRITE_COUNT_SUFFIX: &'static str = "_write_count";
-//内存表写记录字节数量后缀
-const MEMORY_TABLE_WRITE_BYTE_COUNT_SUFFIX: &'static str = "_write_byte_count";
-//内存表删除记录数量后缀
-const MEMORY_TABLE_REMOVE_COUNT_SUFFIX: &'static str = "_remove_count";
-//内存表删除记录字节数量后缀
-const MEMORY_TABLE_REMOVE_BYTE_COUNT_SUFFIX: &'static str = "_remove_byte_count";
-//内存表关键字迭代数量后缀
-const MEMORY_TABLE_KEY_ITER_COUNT_SUFFIX: &'static str = "_key_iter_count";
-//内存表关键字迭代字节数量后缀
-const MEMORY_TABLE_KEY_ITER_BYTE_COUNT_SUFFIX: &'static str = "_key_iter_byte_count";
-//内存表迭代数量后缀
-const MEMORY_TABLE_ITER_COUNT_SUFFIX: &'static str = "_iter_count";
-//内存表关键字迭代字节数量后缀
-const MEMORY_TABLE_ITER_BYTE_COUNT_SUFFIX: &'static str = "_iter_byte_count";
 
 lazy_static! {
-	//内存库创建数量
-	static ref MEMORY_WARE_CREATE_COUNT: PrefCounter = GLOBAL_PREF_COLLECT.new_static_counter(Atom::from("mem_ware_create_count"), 0).unwrap();
-	//内存表创建数量
-	static ref MEMORY_TABLE_CREATE_COUNT: PrefCounter = GLOBAL_PREF_COLLECT.new_static_counter(Atom::from("mem_table_create_count"), 0).unwrap();
     static ref LMDB_CHAN: (Sender<LmdbMsg>, Receiver<LmdbMsg>) = unbounded();
-	static ref FINAL_COMMIT_CHAN: (Sender<((Atom, Atom, Bin), Option<Bin>)>, Receiver<((Atom, Atom, Bin), Option<Bin>)>) = unbounded();
+	static ref MTXN_MAP: Arc<Mutex<HashMap<Atom, FileMemTab>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
 const SINFO: &str = "_$sinfo";
@@ -72,68 +36,30 @@ const MAX_DBS_PER_ENV: u32 = 1024;
 pub struct FileMemTab(Arc<Mutex<MemeryTab>>);
 impl Tab for FileMemTab {
 	fn new(tab: &Atom) -> Self {
-		MEMORY_WARE_CREATE_COUNT.sum(1);
-
+		println!("FleMemTab new {:?}", tab);
 		let file_mem_tab = MemeryTab {
 			prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
 			root: OrdMap::new(None),
 			tab: tab.clone(),
-			trans_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_TRANS_COUNT_SUFFIX), 0).unwrap(),
-			prepare_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_PREPARE_COUNT_SUFFIX), 0).unwrap(),
-			commit_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_COMMIT_COUNT_SUFFIX), 0).unwrap(),
-			rollback_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_ROLLBACK_COUNT_SUFFIX), 0).unwrap(),
-			read_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_READ_COUNT_SUFFIX), 0).unwrap(),
-			read_byte: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_READ_BYTE_COUNT_SUFFIX), 0).unwrap(),
-			write_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_WRITE_COUNT_SUFFIX), 0).unwrap(),
-			write_byte: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_WRITE_BYTE_COUNT_SUFFIX), 0).unwrap(),
-			remove_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_REMOVE_COUNT_SUFFIX), 0).unwrap(),
-			remove_byte: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_REMOVE_BYTE_COUNT_SUFFIX), 0).unwrap(),
 		};
 		
 		let fm_tab = FileMemTab(Arc::new(Mutex::new(file_mem_tab)));
-		let txn = fm_tab.transaction(&Guid(0), true);
 
-		let (s, r) = unbounded();
-		LMDB_CHAN.0.send(LmdbMsg::OpenTab(tab.clone(), txn, s));
-		match r.recv() {
-			Ok(_) => {}
-			Err(_) => {
-				panic!("Open Tab failed");
-			}
-		}
+		MTXN_MAP.lock().unwrap().insert(tab.clone(), fm_tab.clone());
+
+		LMDB_CHAN.0.clone().send(LmdbMsg::CreateTab(tab.clone()));
 
 		fm_tab
 	}
 	fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-		self.0.lock().unwrap().trans_count.sum(1);
-
-		let txn = FileMemTxn::new(self.clone(), id, writable);
-		return Arc::new(txn)
+		let txn = Arc::new(FileMemTxn::new(self.clone(), id, writable));
+		return txn
 	}
 }
 
 enum LmdbMsg {
-    OpenTab(Atom, Arc<TabTxn>, Sender<Result<(), String>>),
+	CreateTab(Atom),
+    OpenTab(Atom, FileMemTab, Sender<Result<(), String>>),
     SaveData(Event),
 }
 
@@ -145,7 +71,9 @@ pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>);
 
 impl FileMemDB {
 	pub fn new(db_path: Atom, db_size: usize) -> Self {
-		MEMORY_WARE_CREATE_COUNT.sum(1);
+		if !Path::new(&db_path.to_string()).exists() {
+            let _ = fs::create_dir(db_path.to_string());
+        }
 
         let _  = thread::spawn(move || {
             let env = Arc::new(
@@ -163,21 +91,30 @@ impl FileMemDB {
 			let receiver = LMDB_CHAN.1.clone();
             loop {
                 match receiver.recv() {
-                    Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
-						let db = dbs.entry(tab.get_hash())
+					Ok(LmdbMsg::CreateTab(tab_name)) => {
+						println!("create new tab: {:?}", tab_name);
+						dbs.entry(tab_name.get_hash())
 							.or_insert(
-								env.create_db(Some(tab.clone().as_str()), DatabaseFlags::empty()).unwrap()
-							);
-
-						open_tab(&tab, *db, env.clone(), txn, sender);
+								env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
+						);
+					}
+                    Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
+						println!("receive open tab message {:?}", tab);
+						
+						if let Some(db) = dbs.get(&tab.get_hash()) {
+							open_tab(&tab, *db, env.clone(), txn, sender);
+						}
                     }
 
-					Ok(LmdbMsg::SaveData(evt)) => {
-						let db = dbs.entry(evt.tab.get_hash())
-							.or_insert(
-								env.create_db(Some(evt.tab.clone().as_str()), DatabaseFlags::empty()).unwrap()
-							);
-						 save_data(env.clone(), receiver.clone(), *db, evt, &mut write_cache);
+					Ok(LmdbMsg::SaveData(event)) => {
+						println!("receve save data message {:?}", event.tab);
+						match event.other {
+							EventType::Tab {key, value} => {
+								write_cache.insert((event.ware, event.tab, key), value);
+							}
+							_ => {}
+						}
+						save_data(&mut dbs, env.clone(), receiver.clone(), &mut write_cache);
 					}
 
 					Err(_) => {}
@@ -189,69 +126,94 @@ impl FileMemDB {
 	}
 }
 
-fn save_data(env: Arc<Environment>, receiver: Receiver<LmdbMsg>, db: Database, evt: Event, write_cache: &mut HashMap<(Atom, Atom, Bin), Option<Bin>>) {
-	match receiver.try_recv() {
-		Ok(LmdbMsg::SaveData(event)) => {
-			match event.other {
-				EventType::Tab {key, value} => {
-					write_cache.insert((event.ware, event.tab, key), value);
-				}
-				_ => {}
+fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: Receiver<LmdbMsg>, write_cache: &mut HashMap<(Atom, Atom, Bin), Option<Bin>>) {
+	loop {
+		match receiver.try_recv() {
+			Ok(LmdbMsg::CreateTab(tab_name)) => {
+				dbs.entry(tab_name.get_hash())
+					.or_insert(
+						env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
+				);
 			}
-		}
 
-		Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
-			open_tab(&tab, db, env, txn, sender);
-		}
-
-		Err(e) if e.is_empty() => {
-			let mut rw_txn = env.begin_rw_txn().unwrap();
-			for ((ware, tab, key), val) in write_cache.drain() {
-				if val.is_none() {
-					rw_txn.del(db, key.as_ref(), None);
-				} else {
-					rw_txn.put(db, key.as_ref(), val.unwrap().as_ref(), WriteFlags::empty());
+			Ok(LmdbMsg::SaveData(event)) => {
+				match event.other {
+					EventType::Tab {key, value} => {
+						write_cache.insert((event.ware, event.tab, key), value);
+					}
+					_ => {}
 				}
 			}
-			let _ = rw_txn.commit();
-		}
 
-		Err(e) => {
-			panic!("receive error: {:?}", e);
+			Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
+				if let Some(db) = dbs.get(&tab.get_hash()) {
+					open_tab(&tab, *db, env.clone(), txn, sender);
+				}
+			}
+
+			Err(e) if e.is_empty() => {
+				let mut rw_txn = env.begin_rw_txn().unwrap();
+				for ((ware, tab, key), val) in write_cache.drain() {
+					println!("save data empty mssage tab: {:?} key: {:?}, value: {:?}====== ", tab, key, val);
+					// let db = dbs.get(&tab.get_hash()).unwrap();
+					if let Some(db) = dbs.get(&tab.get_hash()) {
+						if val.is_none() {
+							match rw_txn.del(*db, key.as_ref(), None) {
+								Ok(_) => {}
+								Err(e) => {
+									panic!("file mem tab del fail {:?}", e);
+								}
+							}
+						} else {
+							match rw_txn.put(*db, key.as_ref(), val.unwrap().as_ref(), WriteFlags::empty()) {
+								Ok(_) => {}
+								Err(e) => {
+									panic!("file mem tab put fail {:?}", e);
+								}
+							}
+						}
+					}
+					
+				}
+
+				match rw_txn.commit() {
+					Ok(_) => {
+						break;
+					}
+					Err(e) => {
+						panic!("file mem tab commit fail +++++++++++++ {:?}", e);
+					}
+				}
+			}
+
+			Err(e) => {
+				panic!("receive error: {:?}", e);
+			}
 		}
 	}
 }
 
-fn open_tab(tab: &Atom, db: Database, env: Arc<Environment>, txn: Arc<TabTxn>, sender: Sender<Result<(), String>>) {
+fn open_tab(tab: &Atom, db: Database, env: Arc<Environment>, txn: FileMemTab, sender: Sender<Result<(), String>>) {
 	let lmdb_txn = env.begin_ro_txn().unwrap();
 	let mut cursor = lmdb_txn.open_ro_cursor(db).unwrap();
 
-	let mut mods = vec![];
+	let mut mtxn = txn.0.lock().unwrap();
 	for (k, v) in cursor.iter() {
-		mods.push(TabKV {
-			ware: Atom::from("filemem"),
-			tab: tab.clone(),
-			key: Arc::new(k.to_vec()),
-			index: 0,
-			value: Some(Arc::new(v.to_vec())),
-		});
-	}
-
-	if let Some(Ok(_)) = txn.modify(Arc::new(mods), None, false, Arc::new(move |_x| {})) {
-		if let Some(Ok(_)) = txn.prepare(1000, Arc::new(move |_x|{})) {
-			if let Some(Ok(_)) = txn.commit(Arc::new(move |_x| {})) {
-				drop(cursor);
-				lmdb_txn.commit();
-				sender.send(Ok(()));
-				return;
-			}
+		// println!("upsert data xxxxx : {:?} {:?}, {:?}", tab, k, v);
+		if v.len() > 0 {
+			mtxn.root.upsert(Bon::new(Arc::new(k.to_vec())), Arc::new(v.to_vec()), false);
 		}
 	}
 
 	drop(cursor);
-	lmdb_txn.commit();
-
-	sender.send(Err(format!("open file mem tab {:?} error", tab.clone())));
+	match lmdb_txn.commit(){
+		Ok(_) => {
+			sender.send(Ok(()));
+		}
+		Err(_) => {
+			sender.send(Err(format!("open file mem tab {:?} error", tab.clone())));
+		}
+	}
 }
 
 impl OpenTab for FileMemDB {
@@ -325,7 +287,7 @@ impl WareSnapshot for DBSnapshot {
 	}
 	// 库修改通知
 	fn notify(&self, event: Event) {
-		if event.ware == Atom::from("file_mem") {
+		if event.ware == Atom::from("file") {
 			self.2.send(LmdbMsg::SaveData(event));
 		}
 	}
@@ -346,6 +308,8 @@ pub struct FileMemTxn {
 
 pub struct RefMemeryTxn(RefCell<FileMemTxn>);
 
+unsafe impl Sync for RefMemeryTxn  {}
+
 impl FileMemTxn {
 	//开始事务
 	pub fn new(tab: FileMemTab, id: &Guid, writable: bool) -> RefMemeryTxn {
@@ -363,8 +327,6 @@ impl FileMemTxn {
 	}
 	//获取数据
 	pub fn get(&mut self, key: Bin) -> Option<Bin> {
-		self.tab.0.lock().unwrap().read_count.sum(1);
-
 		match self.root.get(&Bon::new(key.clone())) {
 			Some(v) => {
 				if self.writable {
@@ -377,8 +339,6 @@ impl FileMemTxn {
 					}
 				}
 
-				self.tab.0.lock().unwrap().read_byte.sum(v.len());
-
 				return Some(v.clone())
 			},
 			None => return None
@@ -389,23 +349,11 @@ impl FileMemTxn {
 		self.root.upsert(Bon::new(key.clone()), value.clone(), false);
 		self.rwlog.insert(key.clone(), RwLog::Write(Some(value.clone())));
 
-		{
-			let tab = self.tab.0.lock().unwrap();
-			tab.write_byte.sum(value.len());
-			tab.write_count.sum(1);
-		}
-
 		Ok(())
 	}
 	//删除
 	pub fn delete(&mut self, key: Bin) -> SResult<()> {
-		if let Some(Some(value)) = self.root.delete(&Bon::new(key.clone()), false) {
-			{
-				let tab = self.tab.0.lock().unwrap();
-				tab.remove_byte.sum(key.len() + value.len());
-				tab.remove_count.sum(1);
-			}
-		}
+		self.root.delete(&Bon::new(key.clone()), false);
 		self.rwlog.insert(key, RwLog::Write(None));
 
 		Ok(())
@@ -439,8 +387,6 @@ impl FileMemTxn {
 		let rwlog = mem::replace(&mut self.rwlog, FnvHashMap::with_capacity_and_hasher(0, Default::default()));
 		//写入预提交
 		tab.prepare.insert(self.id.clone(), rwlog);
-
-		tab.prepare_count.sum(1);
 
 		return Ok(())
 	}
@@ -480,16 +426,12 @@ impl FileMemTxn {
 			None => return Err(String::from("error prepare null"))
 		};
 
-		tab.commit_count.sum(1);
-
 		Ok(log)
 	}
 	//回滚
 	pub fn rollback1(&mut self) -> SResult<()> {
 		let mut tab = self.tab.0.lock().unwrap();
 		tab.prepare.remove(&self.id);
-
-		tab.rollback_count.sum(1);
 
 		Ok(())
 	}
@@ -522,6 +464,23 @@ impl Txn for RefMemeryTxn {
 		match txn.commit1() {
 			Ok(log) => {
 				txn.state = TxState::Commited;
+
+				let tab_name = txn.tab.0.lock().unwrap().tab.clone();
+
+				if let Some(tab) =  MTXN_MAP.lock().unwrap().remove(&tab_name) {
+					let (s, r) = unbounded();
+					LMDB_CHAN.0.send(LmdbMsg::OpenTab(tab_name.clone(), tab, s));
+					println!(" wait for receive ");
+					match r.recv() {
+						Ok(_) => {
+							println!("receive okkkkkkkk");
+						}
+						Err(e) => {
+							panic!("Open Tab {:?} error: {:?}", tab_name, e);
+						}
+					}
+				}
+
 				return Some(Ok(log))
 			},
 			Err(e) => return Some(Err(e.to_string())),
@@ -673,24 +632,12 @@ struct MemeryTab {
 	pub prepare: Prepare,
 	pub root: BinMap,
 	pub tab: Atom,
-	trans_count:	PrefCounter,	//事务计数
-	prepare_count:	PrefCounter,	//预提交计数
-	commit_count:	PrefCounter,	//提交计数
-	rollback_count:	PrefCounter,	//回滚计数
-	read_count:		PrefCounter,	//读计数
-	read_byte:		PrefCounter,	//读字节
-	write_count:	PrefCounter,	//写计数
-	write_byte:		PrefCounter,	//写字节
-	remove_count:	PrefCounter,	//删除计数
-	remove_byte:	PrefCounter,	//删除字节
 }
 
 pub struct MemIter{
 	_root: BinMap,
 	_filter: Filter,
 	point: usize,
-	iter_count:		PrefCounter,	//迭代计数
-	iter_byte:		PrefCounter,	//迭代字节
 }
 
 impl Drop for MemIter{
@@ -705,12 +652,6 @@ impl MemIter{
 			_root: root,
 			_filter: filter,
 			point: Box::into_raw(Box::new(it)) as usize,
-			iter_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_ITER_COUNT_SUFFIX), 0).unwrap(),
-			iter_byte: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_ITER_BYTE_COUNT_SUFFIX), 0).unwrap(),
 		}
 	}
 }
@@ -718,14 +659,11 @@ impl MemIter{
 impl Iter for MemIter{
 	type Item = (Bin, Bin);
 	fn next(&mut self, _cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>>{
-		self.iter_count.sum(1);
 
 		let mut it = unsafe{Box::from_raw(self.point as *mut <Tree<Bin, Bin> as OIter<'_>>::IterType)};
 		// println!("MemIter next----------------------------------------------------------------");
 		let r = Some(Ok(match it.next() {
 			Some(&Entry(ref k, ref v)) => {
-				self.iter_byte.sum(k.len() + v.len());
-
 				Some((k.clone(), v.clone()))
 			},
 			None => None,
@@ -739,8 +677,6 @@ pub struct MemKeyIter{
 	_root: BinMap,
 	_filter: Filter,
 	point: usize,
-	iter_count:		PrefCounter,	//迭代计数
-	iter_byte:		PrefCounter,	//迭代字节
 }
 
 impl Drop for MemKeyIter{
@@ -755,12 +691,6 @@ impl MemKeyIter{
 			_root: root,
 			_filter: filter,
 			point: Box::into_raw(Box::new(keys)) as usize,
-			iter_count: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_KEY_ITER_COUNT_SUFFIX), 0).unwrap(),
-			iter_byte: GLOBAL_PREF_COLLECT.
-				new_dynamic_counter(
-					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_KEY_ITER_BYTE_COUNT_SUFFIX), 0).unwrap(),
 		}
 	}
 }
@@ -768,13 +698,9 @@ impl MemKeyIter{
 impl Iter for MemKeyIter{
 	type Item = Bin;
 	fn next(&mut self, _cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>>{
-		self.iter_count.sum(1);
-
 		let it = unsafe{Box::from_raw(self.point as *mut Keys<'_, Tree<Bin, Bin>>)};
 		let r = Some(Ok(match unsafe{Box::from_raw(self.point as *mut Keys<'_, Tree<Bin, Bin>>)}.next() {
 			Some(k) => {
-				self.iter_byte.sum(k.len());
-
 				Some(k.clone())
 			},
 			None => None,
