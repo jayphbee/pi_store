@@ -2,17 +2,26 @@
 use std::sync::{Arc, Mutex, RwLock};
 use std::cell::RefCell;
 use std::mem;
+use std::path::Path;
+use std::fs;
+use std::thread;
 
 use fnv::FnvHashMap;
+use std::collections::HashMap;
 
 use ordmap::ordmap::{OrdMap, Entry, Iter as OIter, Keys};
 use ordmap::asbtree::{Tree};
 use atom::{Atom};
 use guid::Guid;
+use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
 
-use pi_db::db::{Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Event, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog, Bon, TabMeta};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+
+use pi_db::db::{EventType, Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Event, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog, Bon, TabMeta};
 use pi_db::tabs::{TabLog, Tabs, Prepare};
+
+use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
 //内存库前缀
 const MEMORY_WARE_PREFIX: &'static str = "mem_ware_";
@@ -52,15 +61,20 @@ lazy_static! {
 	static ref MEMORY_WARE_CREATE_COUNT: PrefCounter = GLOBAL_PREF_COLLECT.new_static_counter(Atom::from("mem_ware_create_count"), 0).unwrap();
 	//内存表创建数量
 	static ref MEMORY_TABLE_CREATE_COUNT: PrefCounter = GLOBAL_PREF_COLLECT.new_static_counter(Atom::from("mem_table_create_count"), 0).unwrap();
+    static ref LMDB_CHAN: (Sender<LmdbMsg>, Receiver<LmdbMsg>) = unbounded();
+	static ref FINAL_COMMIT_CHAN: (Sender<((Atom, Atom, Bin), Option<Bin>)>, Receiver<((Atom, Atom, Bin), Option<Bin>)>) = unbounded();
 }
 
+const SINFO: &str = "_$sinfo";
+const MAX_DBS_PER_ENV: u32 = 1024;
+
 #[derive(Clone)]
-pub struct MTab(Arc<Mutex<MemeryTab>>);
-impl Tab for MTab {
+pub struct FileMemTab(Arc<Mutex<MemeryTab>>);
+impl Tab for FileMemTab {
 	fn new(tab: &Atom) -> Self {
 		MEMORY_WARE_CREATE_COUNT.sum(1);
 
-		let tab = MemeryTab {
+		let file_mem_tab = MemeryTab {
 			prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
 			root: OrdMap::new(None),
 			tab: tab.clone(),
@@ -95,37 +109,161 @@ impl Tab for MTab {
 				new_dynamic_counter(
 					Atom::from(MEMORY_TABLE_PREFIX.to_string() + tab + MEMORY_TABLE_REMOVE_BYTE_COUNT_SUFFIX), 0).unwrap(),
 		};
-		MTab(Arc::new(Mutex::new(tab)))
+		
+		let fm_tab = FileMemTab(Arc::new(Mutex::new(file_mem_tab)));
+		let txn = fm_tab.transaction(&Guid(0), true);
+
+		let (s, r) = unbounded();
+		LMDB_CHAN.0.send(LmdbMsg::OpenTab(tab.clone(), txn, s));
+		match r.recv() {
+			Ok(_) => {}
+			Err(_) => {
+				panic!("Open Tab failed");
+			}
+		}
+
+		fm_tab
 	}
 	fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
 		self.0.lock().unwrap().trans_count.sum(1);
 
-		let txn = MemeryTxn::new(self.clone(), id, writable);
+		let txn = FileMemTxn::new(self.clone(), id, writable);
 		return Arc::new(txn)
 	}
 }
 
+enum LmdbMsg {
+    OpenTab(Atom, Arc<TabTxn>, Sender<Result<(), String>>),
+    SaveData(Event),
+}
+
+unsafe impl Send for LmdbMsg {}
+
 // 内存库
 #[derive(Clone)]
-pub struct DB(Arc<RwLock<Tabs<MTab>>>);
+pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>);
 
-impl DB {
-	pub fn new() -> Self {
+impl FileMemDB {
+	pub fn new(db_path: Atom, db_size: usize) -> Self {
 		MEMORY_WARE_CREATE_COUNT.sum(1);
 
-		DB(Arc::new(RwLock::new(Tabs::new())))
+        let _  = thread::spawn(move || {
+            let env = Arc::new(
+                Environment::new()
+                    .set_max_dbs(MAX_DBS_PER_ENV)
+                    .set_map_size(db_size)
+                    .set_flags(EnvironmentFlags::NO_TLS)
+                    .open(Path::new(&db_path.to_string()))
+                    .expect("create lmdb env failed")
+            );
+
+			let mut write_cache: HashMap<(Atom, Atom, Bin), Option<Bin>> = HashMap::new();
+			let mut dbs = HashMap::new();
+
+			let receiver = LMDB_CHAN.1.clone();
+            loop {
+                match receiver.recv() {
+                    Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
+						let db = dbs.entry(tab.get_hash())
+							.or_insert(
+								env.create_db(Some(tab.clone().as_str()), DatabaseFlags::empty()).unwrap()
+							);
+
+						open_tab(&tab, *db, env.clone(), txn, sender);
+                    }
+
+					Ok(LmdbMsg::SaveData(evt)) => {
+						let db = dbs.entry(evt.tab.get_hash())
+							.or_insert(
+								env.create_db(Some(evt.tab.clone().as_str()), DatabaseFlags::empty()).unwrap()
+							);
+						 save_data(env.clone(), receiver.clone(), *db, evt, &mut write_cache);
+					}
+
+					Err(_) => {}
+            	}
+			}
+        });
+
+		FileMemDB(Arc::new(RwLock::new(Tabs::new())))
 	}
 }
-impl OpenTab for DB {
+
+fn save_data(env: Arc<Environment>, receiver: Receiver<LmdbMsg>, db: Database, evt: Event, write_cache: &mut HashMap<(Atom, Atom, Bin), Option<Bin>>) {
+	match receiver.try_recv() {
+		Ok(LmdbMsg::SaveData(event)) => {
+			match event.other {
+				EventType::Tab {key, value} => {
+					write_cache.insert((event.ware, event.tab, key), value);
+				}
+				_ => {}
+			}
+		}
+
+		Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
+			open_tab(&tab, db, env, txn, sender);
+		}
+
+		Err(e) if e.is_empty() => {
+			let mut rw_txn = env.begin_rw_txn().unwrap();
+			for ((ware, tab, key), val) in write_cache.drain() {
+				if val.is_none() {
+					rw_txn.del(db, key.as_ref(), None);
+				} else {
+					rw_txn.put(db, key.as_ref(), val.unwrap().as_ref(), WriteFlags::empty());
+				}
+			}
+			let _ = rw_txn.commit();
+		}
+
+		Err(e) => {
+			panic!("receive error: {:?}", e);
+		}
+	}
+}
+
+fn open_tab(tab: &Atom, db: Database, env: Arc<Environment>, txn: Arc<TabTxn>, sender: Sender<Result<(), String>>) {
+	let lmdb_txn = env.begin_ro_txn().unwrap();
+	let mut cursor = lmdb_txn.open_ro_cursor(db).unwrap();
+
+	let mut mods = vec![];
+	for (k, v) in cursor.iter() {
+		mods.push(TabKV {
+			ware: Atom::from("filemem"),
+			tab: tab.clone(),
+			key: Arc::new(k.to_vec()),
+			index: 0,
+			value: Some(Arc::new(v.to_vec())),
+		});
+	}
+
+	if let Some(Ok(_)) = txn.modify(Arc::new(mods), None, false, Arc::new(move |_x| {})) {
+		if let Some(Ok(_)) = txn.prepare(1000, Arc::new(move |_x|{})) {
+			if let Some(Ok(_)) = txn.commit(Arc::new(move |_x| {})) {
+				drop(cursor);
+				lmdb_txn.commit();
+				sender.send(Ok(()));
+				return;
+			}
+		}
+	}
+
+	drop(cursor);
+	lmdb_txn.commit();
+
+	sender.send(Err(format!("open file mem tab {:?} error", tab.clone())));
+}
+
+impl OpenTab for FileMemDB {
 	// 打开指定的表，表必须有meta
 	fn open<'a, T: Tab>(&self, tab: &Atom, _cb: Box<Fn(SResult<T>) + 'a>) -> Option<SResult<T>> {
 		Some(Ok(T::new(tab)))
 	}
 }
-impl Ware for DB {
+impl Ware for FileMemDB {
 	// 拷贝全部的表
 	fn tabs_clone(&self) -> Arc<Ware> {
-		Arc::new(DB(Arc::new(RwLock::new(self.0.read().unwrap().clone_map()))))
+		Arc::new(FileMemDB(Arc::new(RwLock::new(self.0.read().unwrap().clone_map()))))
 	}
 	// 列出全部的表
 	fn list(&self) -> Box<Iterator<Item=Atom>> {
@@ -141,12 +279,12 @@ impl Ware for DB {
 	}
 	// 获取当前表结构快照
 	fn snapshot(&self) -> Arc<WareSnapshot> {
-		Arc::new(DBSnapshot(self.clone(), RefCell::new(self.0.read().unwrap().snapshot())))
+		Arc::new(DBSnapshot(self.clone(), RefCell::new(self.0.read().unwrap().snapshot()), LMDB_CHAN.0.clone()))
 	}
 }
 
 // 内存库快照
-pub struct DBSnapshot(DB, RefCell<TabLog<MTab>>);
+pub struct DBSnapshot(FileMemDB, RefCell<TabLog<FileMemTab>>, Sender<LmdbMsg>);
 
 impl WareSnapshot for DBSnapshot {
 	// 列出全部的表
@@ -186,32 +324,33 @@ impl WareSnapshot for DBSnapshot {
 		(self.0).0.write().unwrap().rollback(id)
 	}
 	// 库修改通知
-	fn notify(&self, event: Event) {}
-
+	fn notify(&self, event: Event) {
+		if event.ware == Atom::from("file_mem") {
+			self.2.send(LmdbMsg::SaveData(event));
+		}
+	}
 }
 
-
-
 // 内存事务
-pub struct MemeryTxn {
+pub struct FileMemTxn {
 	id: Guid,
 	writable: bool,
-	tab: MTab,
+	tab: FileMemTab,
 	root: BinMap,
 	old: BinMap,
 	rwlog: FnvHashMap<Bin, RwLog>,
 	state: TxState,
 }
 
-// pub type RefMemeryTxn = RefCell<MemeryTxn>;
+// pub type RefMemeryTxn = RefCell<FileMemTxn>;
 
-pub struct RefMemeryTxn(RefCell<MemeryTxn>);
+pub struct RefMemeryTxn(RefCell<FileMemTxn>);
 
-impl MemeryTxn {
+impl FileMemTxn {
 	//开始事务
-	pub fn new(tab: MTab, id: &Guid, writable: bool) -> RefMemeryTxn {
+	pub fn new(tab: FileMemTab, id: &Guid, writable: bool) -> RefMemeryTxn {
 		let root = tab.0.lock().unwrap().root.clone();
-		let txn = MemeryTxn {
+		let txn = FileMemTxn {
 			id: id.clone(),
 			writable: writable,
 			root: root.clone(),
