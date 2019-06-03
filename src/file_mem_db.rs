@@ -5,7 +5,7 @@ use std::mem;
 use std::path::Path;
 use std::fs;
 use std::thread;
-
+use std::time::Instant;
 use fnv::FnvHashMap;
 use std::collections::HashMap;
 
@@ -26,30 +26,31 @@ use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Tran
 
 lazy_static! {
     static ref LMDB_CHAN: (Sender<LmdbMsg>, Receiver<LmdbMsg>) = unbounded();
-	static ref MTXN_MAP: Arc<Mutex<HashMap<Atom, FileMemTab>>> = Arc::new(Mutex::new(HashMap::new()));
+	static ref LMDB_ENV: Arc<RwLock<Option<Arc<Environment>>>> = Arc::new(RwLock::new(None));
 }
 
-const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;
 
 #[derive(Clone)]
 pub struct FileMemTab(Arc<Mutex<MemeryTab>>);
 impl Tab for FileMemTab {
 	fn new(tab: &Atom) -> Self {
-		println!("FleMemTab new {:?}", tab);
-		let file_mem_tab = MemeryTab {
-			prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
-			root: OrdMap::new(None),
-			tab: tab.clone(),
-		};
-		
-		let fm_tab = FileMemTab(Arc::new(Mutex::new(file_mem_tab)));
+		let (s, r) = unbounded();
+		LMDB_CHAN.0.clone().send(LmdbMsg::CreateTab(tab.clone(), s));
+		match r.recv() {
+			Ok(root) => {
+				let file_mem_tab = MemeryTab {
+					prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
+					root: root,
+					tab: tab.clone(),
+				};
 
-		MTXN_MAP.lock().unwrap().insert(tab.clone(), fm_tab.clone());
-
-		LMDB_CHAN.0.clone().send(LmdbMsg::CreateTab(tab.clone()));
-
-		fm_tab
+				return FileMemTab(Arc::new(Mutex::new(file_mem_tab)));
+			}
+			Err(_) => {
+				panic!("create new tab failed");
+			}
+		}
 	}
 	fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
 		let txn = Arc::new(FileMemTxn::new(self.clone(), id, writable));
@@ -57,9 +58,36 @@ impl Tab for FileMemTab {
 	}
 }
 
+fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
+	let env = LMDB_ENV.read().unwrap().clone().unwrap();
+	if let Ok(db) = env.open_db(Some(file_tab.as_str())) {
+		let lmdb_txn = env.begin_ro_txn().unwrap();
+		let mut cursor = lmdb_txn.open_ro_cursor(db).unwrap();
+		let mut load_size = 0;
+		let start_time = Instant::now();
+		for (k, v) in cursor.iter() {
+			if v.len() > 0 {
+				load_size += v.len();
+				root.upsert(Bon::new(Arc::new(k.to_vec())), Arc::new(v.to_vec()), false);
+			}
+		}
+
+		drop(cursor);
+		match lmdb_txn.commit(){
+			Ok(_) => {}
+			Err(_) => {
+				panic!("lmdb txn cursor failed");
+			}
+		}
+
+		info!("====> load tab: {:?} size: {:?}byte time elapsed: {:?} <====", file_tab, load_size, start_time.elapsed());
+	} else {
+		error!("====> load data from unknown tab: {:?} <====", file_tab);
+	}
+}
+
 enum LmdbMsg {
-	CreateTab(Atom),
-    OpenTab(Atom, FileMemTab, Sender<Result<(), String>>),
+	CreateTab(Atom, Sender<OrdMap::<Tree<Bon, Bin>>>),
     SaveData(Event),
 }
 
@@ -74,40 +102,37 @@ impl FileMemDB {
 		if !Path::new(&db_path.to_string()).exists() {
             let _ = fs::create_dir(db_path.to_string());
         }
+		let env = Arc::new(
+			Environment::new()
+				.set_max_dbs(MAX_DBS_PER_ENV)
+				.set_map_size(db_size)
+				.set_flags(EnvironmentFlags::NO_TLS)
+				.open(Path::new(&db_path.to_string()))
+				.expect("create lmdb env failed")
+		);
+
+		let mut e = LMDB_ENV.write().unwrap();
+		*e = Some(env.clone());
 
         let _  = thread::spawn(move || {
-            let env = Arc::new(
-                Environment::new()
-                    .set_max_dbs(MAX_DBS_PER_ENV)
-                    .set_map_size(db_size)
-                    .set_flags(EnvironmentFlags::NO_TLS)
-                    .open(Path::new(&db_path.to_string()))
-                    .expect("create lmdb env failed")
-            );
-
 			let mut write_cache: HashMap<(Atom, Atom, Bin), Option<Bin>> = HashMap::new();
 			let mut dbs = HashMap::new();
 
 			let receiver = LMDB_CHAN.1.clone();
             loop {
                 match receiver.recv() {
-					Ok(LmdbMsg::CreateTab(tab_name)) => {
-						println!("create new tab: {:?}", tab_name);
+					Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
 						dbs.entry(tab_name.get_hash())
 							.or_insert(
 								env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
 						);
-					}
-                    Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
-						println!("receive open tab message {:?}", tab);
-						
-						if let Some(db) = dbs.get(&tab.get_hash()) {
-							open_tab(&tab, *db, env.clone(), txn, sender);
-						}
-                    }
+						let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
 
+						load_data_to_mem_tab(&tab_name, &mut root);
+						let _ = sender.send(root);
+					}
 					Ok(LmdbMsg::SaveData(event)) => {
-						println!("receve save data message {:?}", event.tab);
+						info!("====> save data for tab: {:?} <====", event.tab);
 						match event.other {
 							EventType::Tab {key, value} => {
 								write_cache.insert((event.ware, event.tab, key), value);
@@ -129,11 +154,14 @@ impl FileMemDB {
 fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: Receiver<LmdbMsg>, write_cache: &mut HashMap<(Atom, Atom, Bin), Option<Bin>>) {
 	loop {
 		match receiver.try_recv() {
-			Ok(LmdbMsg::CreateTab(tab_name)) => {
+			Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
 				dbs.entry(tab_name.get_hash())
 					.or_insert(
 						env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
 				);
+				let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
+				load_data_to_mem_tab(&tab_name, &mut root);
+				let _ = sender.send(root);
 			}
 
 			Ok(LmdbMsg::SaveData(event)) => {
@@ -145,17 +173,11 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 				}
 			}
 
-			Ok(LmdbMsg::OpenTab(tab, txn, sender)) => {
-				if let Some(db) = dbs.get(&tab.get_hash()) {
-					open_tab(&tab, *db, env.clone(), txn, sender);
-				}
-			}
-
 			Err(e) if e.is_empty() => {
+				let start_time = Instant::now();
+				let mut write_bytes = 0;
 				let mut rw_txn = env.begin_rw_txn().unwrap();
 				for ((ware, tab, key), val) in write_cache.drain() {
-					println!("save data empty mssage tab: {:?} key: {:?}, value: {:?}====== ", tab, key, val);
-					// let db = dbs.get(&tab.get_hash()).unwrap();
 					if let Some(db) = dbs.get(&tab.get_hash()) {
 						if val.is_none() {
 							match rw_txn.del(*db, key.as_ref(), None) {
@@ -165,53 +187,32 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 								}
 							}
 						} else {
-							match rw_txn.put(*db, key.as_ref(), val.unwrap().as_ref(), WriteFlags::empty()) {
-								Ok(_) => {}
+							match rw_txn.put(*db, key.as_ref(), val.clone().unwrap().as_ref(), WriteFlags::empty()) {
+								Ok(_) => {
+									write_bytes += val.as_ref().unwrap().len();
+								}
 								Err(e) => {
 									panic!("file mem tab put fail {:?}", e);
 								}
 							}
 						}
 					}
-					
 				}
 
 				match rw_txn.commit() {
 					Ok(_) => {
+						info!("====> lmdb commit write {:?}bytes time: {:?} <====", write_bytes, start_time.elapsed());
 						break;
 					}
 					Err(e) => {
-						panic!("file mem tab commit fail +++++++++++++ {:?}", e);
+						panic!("file mem tab commit fail: {:?}", e);
 					}
 				}
 			}
 
 			Err(e) => {
-				panic!("receive error: {:?}", e);
+				panic!("save data thread unexpected error: {:?}", e);
 			}
-		}
-	}
-}
-
-fn open_tab(tab: &Atom, db: Database, env: Arc<Environment>, txn: FileMemTab, sender: Sender<Result<(), String>>) {
-	let lmdb_txn = env.begin_ro_txn().unwrap();
-	let mut cursor = lmdb_txn.open_ro_cursor(db).unwrap();
-
-	let mut mtxn = txn.0.lock().unwrap();
-	for (k, v) in cursor.iter() {
-		// println!("upsert data xxxxx : {:?} {:?}, {:?}", tab, k, v);
-		if v.len() > 0 {
-			mtxn.root.upsert(Bon::new(Arc::new(k.to_vec())), Arc::new(v.to_vec()), false);
-		}
-	}
-
-	drop(cursor);
-	match lmdb_txn.commit(){
-		Ok(_) => {
-			sender.send(Ok(()));
-		}
-		Err(_) => {
-			sender.send(Err(format!("open file mem tab {:?} error", tab.clone())));
 		}
 	}
 }
@@ -464,23 +465,6 @@ impl Txn for RefMemeryTxn {
 		match txn.commit1() {
 			Ok(log) => {
 				txn.state = TxState::Commited;
-
-				let tab_name = txn.tab.0.lock().unwrap().tab.clone();
-
-				if let Some(tab) =  MTXN_MAP.lock().unwrap().remove(&tab_name) {
-					let (s, r) = unbounded();
-					LMDB_CHAN.0.send(LmdbMsg::OpenTab(tab_name.clone(), tab, s));
-					println!(" wait for receive ");
-					match r.recv() {
-						Ok(_) => {
-							println!("receive okkkkkkkk");
-						}
-						Err(e) => {
-							panic!("Open Tab {:?} error: {:?}", tab_name, e);
-						}
-					}
-				}
-
 				return Some(Ok(log))
 			},
 			Err(e) => return Some(Err(e.to_string())),
@@ -661,7 +645,6 @@ impl Iter for MemIter{
 	fn next(&mut self, _cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>>{
 
 		let mut it = unsafe{Box::from_raw(self.point as *mut <Tree<Bin, Bin> as OIter<'_>>::IterType)};
-		// println!("MemIter next----------------------------------------------------------------");
 		let r = Some(Ok(match it.next() {
 			Some(&Entry(ref k, ref v)) => {
 				Some((k.clone(), v.clone()))
