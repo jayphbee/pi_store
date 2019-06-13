@@ -86,13 +86,6 @@ fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
 	}
 }
 
-enum LmdbMsg {
-	CreateTab(Atom, Sender<OrdMap::<Tree<Bon, Bin>>>),
-    SaveData(Event),
-}
-
-unsafe impl Send for LmdbMsg {}
-
 // 内存库
 #[derive(Clone)]
 pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>);
@@ -728,3 +721,10 @@ impl Txn for MemeryMetaTxn {
 		Some(Ok(()))
 	}
 }
+
+enum LmdbMsg {
+	CreateTab(Atom, Sender<OrdMap::<Tree<Bon, Bin>>>),
+    SaveData(Event),
+}
+
+unsafe impl Send for LmdbMsg {}
