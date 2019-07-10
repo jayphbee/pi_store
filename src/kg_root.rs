@@ -9,7 +9,6 @@
  * 如果key为32字节，条目数量超过3亿，则子节点位置2字节就不够用，所以采用动态2字节或3字节。
  */
 
-use std::boxed::FnBox;
 use std::vec::Vec;
 use std::fs::remove_file;
 use std::path::Path;
@@ -34,7 +33,7 @@ pub struct RootLog {
 	pub name: String,
 	pub modify: u32,
 	pub file: SResult<AsyncFile>,
-	//wait: Option<FnBox>, //切换根日志文件时的等待函数
+	//wait: Option<FnOnce>, //切换根日志文件时的等待函数
 }
 impl RootLog {
 	// 用指定的文件名及后缀（为修改次数）创建根日志
@@ -46,7 +45,7 @@ impl RootLog {
 		}
 	}
 	// 初始化加载根文件，返回所有子表的子节点表及最后一次创建的子表ID
-	pub fn init<P: AsRef<Path> + Send + 'static>(mut vec: Vec<(u32, P)>, file: P, tab: Tab, cb: Box<FnBox(SResult<(FnvHashMap<u32, FnvHashSet<u32>>, u32)>)>) {
+	pub fn init<P: AsRef<Path> + Send + 'static>(mut vec: Vec<(u32, P)>, file: P, tab: Tab, cb: Box<FnOnce(SResult<(FnvHashMap<u32, FnvHashSet<u32>>, u32)>)>) {
 		match vec.pop() {
 			Some((m, path)) => {// 顺序加载根日志文件
 				AsyncFile::open(path, AsynFileOptions::ReadAppend(8), Box::new(move |f: IoResult<AsyncFile>| match f {

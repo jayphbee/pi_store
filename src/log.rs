@@ -16,7 +16,6 @@
  * 使用direct IO和pread来提升性能
  *
  */
-use std::boxed::FnBox;
 use std::cmp::{Ord, Ordering as Order, PartialOrd};
 use std::fs::{remove_file, rename, DirBuilder, File};
 use std::io::{Read, Result as IoResult, Write};
@@ -619,7 +618,7 @@ struct Writer {
     block: LogBlock, // 当前正在写的日志块
     // window: LZ4的窗口和hash表
     info: IndexInfo,                  // 当前块索引
-    waits: Option<Vec<Box<FnBox()>>>, //当前块上的写等待队列，None表示当前没有写
+    waits: Option<Vec<Box<FnOnce()>>>, //当前块上的写等待队列，None表示当前没有写
 }
 impl Writer {
     fn new(r: Reader) -> Self {
@@ -639,7 +638,7 @@ impl Writer {
  */
 struct FileInit {
     file: SResult<SharedFile>,
-    wait: Option<Vec<Box<FnBox(SResult<()>)>>>, // 为None表示file已经打开
+    wait: Option<Vec<Box<FnOnce(SResult<()>)>>>, // 为None表示file已经打开
 }
 
 //================================ 内部静态方法
@@ -813,7 +812,7 @@ fn load_rindex(
     file: SharedFile,
     mut reader: Reader,
     index_size: usize,
-    cb: Box<FnBox(SResult<Reader>)>,
+    cb: Box<FnOnce(SResult<Reader>)>,
 ) {
     file.pread(
         reader.info.pos as u64,
@@ -1202,7 +1201,7 @@ fn handle_create_rw_file(
                 match writer.reader.file.wait {
                     None => (),
                     Some(ref mut queue) => {
-                        let mut cb: Box<FnBox(SResult<()>)>;
+                        let mut cb: Box<FnOnce(SResult<()>)>;
                         let reason = &e.to_string();
                         let atom = Atom::from("init rw file failed, ".to_string() + &e.to_string());
                         let queue_len = queue.len();
@@ -1226,7 +1225,7 @@ fn handle_create_rw_file(
                 match writer.reader.file.wait {
                     None => (),
                     Some(ref mut queue) => {
-                        let mut cb: Box<FnBox(SResult<()>)>;
+                        let mut cb: Box<FnOnce(SResult<()>)>;
                         let queue_len = queue.len();
                         for _ in 0..queue_len {
                             cb = queue.remove(0);
@@ -1250,7 +1249,7 @@ fn handle_create_rw_file(
 }
 
 //创建指定的读写文件
-fn create_rw_file(dir: Atom, time: u64, count: usize, cb: Box<FnBox(IoResult<AsyncFile>)>) {
+fn create_rw_file(dir: Atom, time: u64, count: usize, cb: Box<FnOnce(IoResult<AsyncFile>)>) {
     let mut path = PathBuf::new();
     path.push(&**dir);
     path.push((&time.to_le_bytes()[..]).to_base58());

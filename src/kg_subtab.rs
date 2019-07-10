@@ -3,7 +3,6 @@
  * 支持创建新的子表，一般是在当前最大ID的子表上递增使用ID，如果溢出，则回环。内存中会克隆sbtree，根文件中追加{长度(2字节), 子表(4字节), [子节点位置(4字节)...]}。
  * 用二级的 cow BTree 存储。
  */
-use std::boxed::FnBox;
 use std::cmp::{Ord, Ordering as Order, PartialOrd};
 use std::fs::{remove_file, rename, DirBuilder, File};
 use std::io::Result as IoResult;

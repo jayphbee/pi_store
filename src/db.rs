@@ -5,7 +5,7 @@
 // use std::clone::Clone;
 // use std::ops::Deref;
 // use std::cell::RefCell;
-// use std::boxed::FnBox;
+// use std::boxed::FnOnce;
 // use std::rc::Rc;
 // use std::mem::replace;
 
@@ -575,7 +575,7 @@
 //     }
 // }
 
-// fn send_task(func: Box<FnBox()>){
+// fn send_task(func: Box<FnOnce()>){
 //     let &(ref lock, ref cvar) = &**STORE_TASK_POOL;
 //     let mut task_pool = lock.lock().unwrap();
 //     (*task_pool).push(ASYNC_DB_TYPE, DB_PRIORITY, func, DB_ASYNC_FILE_INFO.clone());

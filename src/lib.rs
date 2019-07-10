@@ -1,5 +1,4 @@
 #![crate_type = "rlib"]
-#![feature(fnbox)]
 #![feature(integer_atomics)]
 #![feature(generators, generator_trait)]
 #![feature(box_into_raw_non_null)]

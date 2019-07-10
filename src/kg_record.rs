@@ -4,7 +4,6 @@
  * 分裂和合并类似Cow的B+树的方式
  */
 
-use std::boxed::FnBox;
 use std::sync::{Arc, Weak, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::result::Result;
@@ -48,7 +47,7 @@ pub struct Record {
 }
 impl Record {
 	// 初始化记录文件，根据加载起来
-	pub fn new(node_file: PathBuf, leaf_file: PathBuf, cb: Box<FnBox(SResult<Self>)>) {
+	pub fn new(node_file: PathBuf, leaf_file: PathBuf, cb: Box<FnOnce(SResult<Self>)>) {
 		AsyncFile::open(node_file, AsynFileOptions::ReadAppend(8), Box::new(move |f: IoResult<AsyncFile>| match f {
 			Ok(file1) =>{
 				AsyncFile::open(leaf_file, AsynFileOptions::ReadAppend(8), Box::new(move |f: IoResult<AsyncFile>| match f {
@@ -66,7 +65,7 @@ impl Record {
 		}));
 	}
 	// 初始化方法，根据所有子表的子节点集合加载子节点，返回子节点的位置表
-	pub fn init(record: Arc<RwLock<Record>>, nodes: Arc<FnvHashMap<u32, FnvHashSet<u32>>>, cb: Box<FnBox(SResult<FnvHashMap<u32, Bin>>)>) {
+	pub fn init(record: Arc<RwLock<Record>>, nodes: Arc<FnvHashMap<u32, FnvHashSet<u32>>>, cb: Box<FnOnce(SResult<FnvHashMap<u32, Bin>>)>) {
 		let rfile = &record.write().unwrap().node;
 		let len = rfile.file_size as usize;
 		rfile.file.clone().pread(0, len, Box::new(move |f: SharedFile, r: IoResult<Vec<u8>>| match r {

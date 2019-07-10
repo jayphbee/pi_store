@@ -3,7 +3,6 @@
  * 	用日志整理作为写索引的驱动，批量处理，会所有的涉及到的子表更新子节点，并删除相关的等待表，写一次根文件。因为不同子表有自己独立缓存，如果掉电，需要从日志中恢复是那个子表缓存的，所以每条kv会在日志记录中记录子表(4字节)
  *
  */
-use std::boxed::FnBox;
 use std::cmp::{Ord, Ordering as Order, PartialOrd};
 use std::fs::{remove_file, rename, DirBuilder, File};
 use std::io::Result as IoResult;
