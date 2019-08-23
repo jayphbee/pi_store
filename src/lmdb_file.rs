@@ -600,6 +600,9 @@ impl Txn for LmdbMetaTxn {
     }
 }
 
+/**
+* Lmdb数据库
+*/
 #[derive(Clone)]
 pub struct DB {
     name: Atom,
@@ -607,6 +610,12 @@ pub struct DB {
 }
 
 impl DB {
+    /**
+    * 构建Lmdb数据库
+    * @param name 数据库路径
+    * @param db_size 数据库文件的最大大小
+    * @returns 返回Lmdb数据库，失败返回原因描述
+    */
     pub fn new(name: Atom, db_size: usize) -> Result<Self, String> {
         info!("create new db: {:?}, db_size: {:?}", name, db_size);
         if !Path::new(&name.to_string()).exists() {

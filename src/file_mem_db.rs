@@ -86,11 +86,19 @@ fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
 	}
 }
 
-// 内存库
+/**
+* 基于内存的Lmdb数据库
+*/
 #[derive(Clone)]
 pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>);
 
 impl FileMemDB {
+	/**
+	* 构建基于内存的Lmdb数据库
+	* @param db_path 数据库路径
+	* @param db_size 数据库文件最大大小
+	* @returns 返回基于内存的Lmdb数据库
+	*/
 	pub fn new(db_path: Atom, db_size: usize) -> Self {
 		if !Path::new(&db_path.to_string()).exists() {
             let _ = fs::create_dir(db_path.to_string());
