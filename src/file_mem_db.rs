@@ -10,8 +10,8 @@ use fnv::FnvHashMap;
 use std::collections::HashMap;
 
 use ordmap::ordmap::{OrdMap, Entry, Iter as OIter, Keys};
-use ordmap::asbtree::{Tree};
-use atom::{Atom};
+use ordmap::asbtree::Tree;
+use atom::Atom;
 use guid::Guid;
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
@@ -27,25 +27,48 @@ use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Tran
 lazy_static! {
     static ref LMDB_CHAN: (Sender<LmdbMsg>, Receiver<LmdbMsg>) = unbounded();
 	static ref LMDB_ENV: Arc<RwLock<Option<Arc<Environment>>>> = Arc::new(RwLock::new(None));
+	static ref MEM_TAB_ROOTS: Arc<Mutex<FnvHashMap<Atom, FileMemTab>>> = Arc::new(Mutex::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())));
 }
 
 const MAX_DBS_PER_ENV: u32 = 1024;
 
 #[derive(Clone)]
 pub struct FileMemTab(Arc<Mutex<MemeryTab>>);
+
+impl FileMemTab {
+	fn get_root(&self) -> BinMap {
+		self.0.lock().unwrap().root.clone()
+	}
+
+	fn set_root(&self, root: BinMap) {
+		self.0.lock().unwrap().root = root;
+	}
+}
+
 impl Tab for FileMemTab {
 	fn new(tab: &Atom) -> Self {
+		if let Some(mtab) = MEM_TAB_ROOTS.lock().unwrap().get(tab) {
+			let root = mtab.get_root();
+			let tab = MemeryTab {
+				prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
+				root,
+				tab: tab.clone(),
+			};
+			return FileMemTab(Arc::new(Mutex::new(tab)))
+		}
 		let (s, r) = unbounded();
 		LMDB_CHAN.0.clone().send(LmdbMsg::CreateTab(tab.clone(), s));
 		match r.recv() {
 			Ok(root) => {
 				let file_mem_tab = MemeryTab {
 					prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
-					root: root,
+					root,
 					tab: tab.clone(),
 				};
 
-				return FileMemTab(Arc::new(Mutex::new(file_mem_tab)));
+				let mtab = FileMemTab(Arc::new(Mutex::new(file_mem_tab)));
+				MEM_TAB_ROOTS.lock().unwrap().insert(tab.clone(), mtab.clone());
+				return mtab
 			}
 			Err(_) => {
 				panic!("create new tab failed");
@@ -141,6 +164,10 @@ impl FileMemDB {
         });
 
 		FileMemDB(Arc::new(RwLock::new(Tabs::new())))
+	}
+
+	pub fn get_arc_tabs(&self) -> Arc<RwLock<Tabs<FileMemTab>>> {
+		self.0.clone()
 	}
 }
 
@@ -265,7 +292,7 @@ impl WareSnapshot for DBSnapshot {
 	}
 	// 创建一个meta事务
 	fn meta_txn(&self, _id: &Guid) -> Arc<MetaTxn> {
-		Arc::new(MemeryMetaTxn())
+		Arc::new(MemeryMetaTxn(self.0.get_arc_tabs()))
 	}
 	// 元信息的预提交
 	fn prepare(&self, id: &Guid) -> SResult<()>{
@@ -687,7 +714,7 @@ impl Iter for MemKeyIter{
 }
 
 #[derive(Clone)]
-pub struct MemeryMetaTxn();
+pub struct MemeryMetaTxn(Arc<RwLock<Tabs<FileMemTab>>>);
 
 impl MetaTxn for MemeryMetaTxn {
 	// 创建表、修改指定表的元数据
@@ -695,7 +722,24 @@ impl MetaTxn for MemeryMetaTxn {
 		Some(Ok(()))
 	}
 	// 快照拷贝表
-	fn snapshot(&self, _tab: &Atom, _from: &Atom, _cb: TxCallback) -> DBResult{
+	fn snapshot(&self, tab: &Atom, from: &Atom, _cb: TxCallback) -> DBResult{
+		// 得到源表元信息
+		let meta = self.0.read().unwrap().get_tab_meta(from)?;
+		// 写入目标表元信息
+		self.0.write().unwrap().set_tab_meta(tab.clone(), meta);
+		// 拷贝 sbtree root
+		let original_mtab_root = MEM_TAB_ROOTS.lock().unwrap().get(from)?.get_root();
+
+		let tab1 = MemeryTab {
+			prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
+			root: OrdMap::new(None),
+			tab: tab.clone(),
+		};
+
+		let mtab = FileMemTab(Arc::new(Mutex::new(tab1)));
+		mtab.set_root(original_mtab_root);
+		MEM_TAB_ROOTS.lock().unwrap().insert(tab.clone(), mtab);
+
 		Some(Ok(()))
 	}
 	// 修改指定表的名字

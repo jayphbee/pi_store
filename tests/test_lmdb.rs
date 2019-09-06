@@ -16,12 +16,13 @@ use std::time;
 
 use atom::Atom;
 use bon::{Decode, Encode, ReadBonErr, ReadBuffer, WriteBuffer};
-use guid::Guid;
+use guid::{Guid, GuidGen};
 use sinfo::{EnumType, StructInfo};
 
 use pi_db::db::{Bin, TabKV, TabMeta, Ware};
 
 use pi_store::lmdb_file::DB;
+use pi_store::file_mem_db::FileMemDB;
 
 fn create_tabkv(ware: Atom, tab: Atom, key: Bin, index: usize, value: Option<Bin>) -> TabKV {
     TabKV {
@@ -256,4 +257,120 @@ fn test_file_db_mgr() {
     ttt1.commit(Arc::new(|c| {}));
 
     thread::sleep_ms(2000);
+}
+
+#[test]
+fn test_snapshot() {
+    use guid::GuidGen;
+    use pi_db::mgr::Mgr;
+
+    let mgr = Mgr::new(GuidGen::new(1, 1));
+    let db = FileMemDB::new(Atom::from("testdb"), 1024 * 1024 * 10);
+    mgr.register(Atom::from("testdb"), Arc::new(db));
+    let mgr = Arc::new(mgr);
+
+	let tr = mgr.transaction(true);
+	tr.alter(&Atom::from("testdb"), &Atom::from("test"), Some(Arc::new(TabMeta {
+            k: EnumType::Str,
+            v: EnumType::Str,
+        })), Arc::new(move |_| {}));
+	tr.prepare(Arc::new(move |_| {}));
+	tr.commit(Arc::new(move |_| {}));
+
+	println!("tr state:{:?}", tr.get_state());
+
+	// --------------------------
+	// 向 test 插入数据
+	
+	let tr3 = mgr.transaction(true);
+	let mut arr = vec![];
+	arr.push(TabKV {
+		ware: Atom::from("testdb"),
+		tab: Atom::from("test"),
+		key: build_db_key("hello"),
+		index: 0,
+		value: Some(build_db_val("world"))
+	});
+	tr3.modify(arr.clone(), None, false, Arc::new(move |_| {}));
+	tr3.prepare(Arc::new(move |_| {}));
+	tr3.commit(Arc::new(move |_| {}));
+
+	println!("after insert data");
+
+	// ----------------------
+	// 创建 test 的快照，表名为 test1
+
+	let tr2 = mgr.transaction(true);
+	tr2.snapshot(&Atom::from("test1"), &Atom::from("test"), Arc::new(move |_| {}));
+	tr2.prepare(Arc::new(move |_| {}));
+	tr2.commit(Arc::new(move |_| {}));
+
+	println!("xxxxxx: {:?}", mgr.tab_info(&Atom::from("testdb"), &Atom::from("test1")));
+
+	// ---------------------------
+	// 查询快照中是否包含有原来s数据
+	
+	let tr4 = mgr.transaction(true);
+	let mut arr2 = vec![];
+	arr2.push(TabKV {
+		ware: Atom::from("testdb"),
+		tab: Atom::from("test1"),
+		key: build_db_key("hello"),
+		index: 0,
+		value: None
+	});
+
+	let query_item = tr4.query(arr2.clone(), None, false, Arc::new(move |_| {}));
+	println!("query item: {:?}", query_item);
+	tr2.prepare(Arc::new(move |_| {}));
+	tr2.commit(Arc::new(move |_| {}));
+
+	// --------------------------
+	// 向 test 中插入另一个数据
+	let tr5 = mgr.transaction(true);
+	let mut arr = vec![];
+	arr.push(TabKV {
+		ware: Atom::from("testdb"),
+		tab: Atom::from("test"),
+		key: build_db_key("hello1"),
+		index: 0,
+		value: Some(build_db_val("world1"))
+	});
+	tr5.modify(arr.clone(), None, false, Arc::new(move |_| {}));
+	tr5.prepare(Arc::new(move |_| {}));
+	tr5.commit(Arc::new(move |_| {}));
+
+	// ---------------------------
+	// 查询上一步插入的数据
+	let tr6 = mgr.transaction(true);
+	let mut arr2 = vec![];
+	arr2.push(TabKV {
+		ware: Atom::from("testdb"),
+		tab: Atom::from("test"),
+		key: build_db_key("hello1"),
+		index: 0,
+		value: None
+	});
+
+	let query_item = tr6.query(arr2.clone(), None, false, Arc::new(move |_| {}));
+	println!("query item: {:?}", query_item);
+	tr6.prepare(Arc::new(move |_| {}));
+	tr6.commit(Arc::new(move |_| {}));
+
+	// -----------------------
+	// test1 表中不应该包含上一步中插入的数据
+	let tr7 = mgr.transaction(true);
+	let mut arr2 = vec![];
+	arr2.push(TabKV {
+		ware: Atom::from("testdb"),
+		tab: Atom::from("test1"), // <===== test1
+		key: build_db_key("hello1"),
+		index: 0,
+		value: None
+	});
+
+	let query_item = tr7.query(arr2.clone(), None, false, Arc::new(move |_| {}));
+	println!("query item should be none: {:?}", query_item);
+	tr7.prepare(Arc::new(move |_| {}));
+	tr7.commit(Arc::new(move |_| {}));
 }
