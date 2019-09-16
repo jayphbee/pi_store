@@ -301,7 +301,7 @@ fn test_snapshot() {
 	// 创建 test 的快照，表名为 test1
 
 	let tr2 = mgr.transaction(true);
-	tr2.snapshot(&Atom::from("test1"), &Atom::from("test"), Arc::new(move |_| {}));
+	tr2.snapshot(&Atom::from("testdb"), &Atom::from("test1"), &Atom::from("test"), Arc::new(move |_| {}));
 	tr2.prepare(Arc::new(move |_| {}));
 	tr2.commit(Arc::new(move |_| {}));
 
