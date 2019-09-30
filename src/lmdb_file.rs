@@ -533,7 +533,7 @@ fn create_table_in_lmdb(tab: &Atom) {
     OPENED_TABLES
         .write()
         .unwrap()
-        .entry(tab.get_hash())
+        .entry(tab.get_hash() as u64)
         .or_insert_with(|| {
             env
             .as_ref()
@@ -641,7 +641,7 @@ impl DB {
             Err(_) => env.create_db(Some(SINFO), DatabaseFlags::empty()).expect("Failed to open db to retrive meta table"),
         };
 
-        OPENED_TABLES.write().unwrap().insert(Atom::from(SINFO.to_string()).get_hash(), db);
+        OPENED_TABLES.write().unwrap().insert(Atom::from(SINFO.to_string()).get_hash() as u64, db);
 
         let txn = env.begin_ro_txn().map_err(|e| e.to_string())?;
         let mut cursor = txn.open_ro_cursor(db).map_err(|e| e.to_string())?;
