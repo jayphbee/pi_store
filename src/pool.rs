@@ -126,7 +126,7 @@ impl LmdbService {
                             .begin_ro_txn()
                             .expect("Fatal error: Lmdb can't create ro txn");
                         for q in queries.iter() {
-                            let db = get_db(q.tab.get_hash());
+                            let db = get_db(q.tab.get_hash() as u64);
                             match txn.get(db, q.key.as_ref()) {
                                 Ok(v) => {
                                     qr.push(TabKV {
@@ -188,7 +188,7 @@ impl LmdbService {
                             .unwrap()
                             .begin_ro_txn()
                             .expect("Fatal error: Lmdb can't create ro txn");
-                        let db = get_db(tab.get_hash());
+                        let db = get_db(tab.get_hash() as u64);
                         let cursor = txn
                             .open_ro_cursor(db)
                             .expect(&format!("Fatal error: open cursor for db: {:?} failed", db));
@@ -265,7 +265,7 @@ impl LmdbService {
                             .unwrap()
                             .begin_ro_txn()
                             .expect("Fatal error: Lmdb can't create ro txn");
-                        let db = get_db(tab.get_hash());
+                        let db = get_db(tab.get_hash() as u64);
                         let cursor = txn
                             .open_ro_cursor(db)
                             .expect(&format!("Fatal error: open cursor for db: {:?} failed", db));
@@ -394,7 +394,7 @@ impl LmdbService {
                         }
 
                         for q in queries.iter() {
-                            let db = get_db(q.tab.get_hash());
+                            let db = get_db(q.tab.get_hash() as u64);
                             match rw_txn.as_ref().unwrap().get(db, q.key.as_ref()) {
                                 Ok(v) => {
                                     qr.push(TabKV {
@@ -453,7 +453,7 @@ impl LmdbService {
                             .expect("Fatal error: failed to begin rw txn"));
                         }
 
-                        let db = get_db(tab.get_hash());
+                        let db = get_db(tab.get_hash() as u64);
                         let cursor = rw_txn.as_mut().unwrap()
                             .open_rw_cursor(db)
                             .expect(&format!("Fatal error: open rw cursor for db: {:?} failed", db));
@@ -529,7 +529,7 @@ impl LmdbService {
                             .begin_rw_txn()
                             .expect("Fatal error: failed to begin rw txn"));
                         }
-                        let db = get_db(tab.get_hash());
+                        let db = get_db(tab.get_hash() as u64);
                         let cursor = rw_txn.as_mut().unwrap()
                             .open_rw_cursor(db)
                             .expect(&format!("Fatal error: open rw cursor for db: {:?} failed", db));
@@ -639,7 +639,7 @@ impl LmdbService {
                         let mut modify_error = false;
 
                         for m in modifies.iter() {
-                            let db = get_db(m.tab.get_hash());
+                            let db = get_db(m.tab.get_hash() as u64);
                             // value is some, insert data
                             if m.value.is_some() {
                                 match rw_txn.as_mut().unwrap().put(

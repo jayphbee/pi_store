@@ -123,7 +123,7 @@ impl FileMemDB {
             loop {
                 match receiver.recv() {
 					Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
-						dbs.entry(tab_name.get_hash())
+						dbs.entry(tab_name.get_hash() as u64)
 							.or_insert(
 								env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
 						);
@@ -156,7 +156,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 	loop {
 		match receiver.try_recv() {
 			Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
-				dbs.entry(tab_name.get_hash())
+				dbs.entry(tab_name.get_hash() as u64)
 					.or_insert(
 						env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
 				);
@@ -179,7 +179,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 				let mut write_bytes = 0;
 				let mut rw_txn = env.begin_rw_txn().unwrap();
 				for ((ware, tab, key), val) in write_cache.drain() {
-					if let Some(db) = dbs.get(&tab.get_hash()) {
+					if let Some(db) = dbs.get(&(tab.get_hash() as u64)) {
 						if val.is_none() {
 							match rw_txn.del(*db, key.as_ref(), None) {
 								Ok(_) => {}
