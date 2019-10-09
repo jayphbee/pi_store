@@ -184,7 +184,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 							match rw_txn.del(*db, key.as_ref(), None) {
 								Ok(_) => {}
 								Err(e) => {
-									panic!("file mem tab del fail {:?}", e);
+									panic!("file mem tab del fail {:?}, ware: {:?}, tab:{:?}", e, ware, tab);
 								}
 							}
 						} else {
@@ -193,7 +193,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 									write_bytes += val.as_ref().unwrap().len();
 								}
 								Err(e) => {
-									panic!("file mem tab put fail {:?}", e);
+									panic!("file mem tab put fail {:?}, ware:{:?}, tab:{:?}", e, ware, tab);
 								}
 							}
 						}
