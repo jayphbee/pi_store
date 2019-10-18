@@ -80,7 +80,7 @@ fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
 			}
 		}
 
-		info!("====> load tab: {:?} size: {:?}byte time elapsed: {:?} <====", file_tab, load_size, start_time.elapsed());
+		debug!("====> load tab: {:?} size: {:?}byte time elapsed: {:?} <====", file_tab, load_size, start_time.elapsed());
 	} else {
 		error!("====> load data from unknown tab: {:?} <====", file_tab);
 	}
@@ -133,7 +133,7 @@ impl FileMemDB {
 						let _ = sender.send(root);
 					}
 					Ok(LmdbMsg::SaveData(event)) => {
-						info!("====> save data for tab: {:?} <====", event.tab);
+						debug!("====> save data for tab: {:?} <====", event.tab);
 						match event.other {
 							EventType::Tab {key, value} => {
 								write_cache.insert((event.ware, event.tab, key), value);
@@ -202,7 +202,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 
 				match rw_txn.commit() {
 					Ok(_) => {
-						info!("====> lmdb commit write {:?}bytes time: {:?} <====", write_bytes, start_time.elapsed());
+						debug!("====> lmdb commit write {:?}bytes time: {:?} <====", write_bytes, start_time.elapsed());
 						break;
 					}
 					Err(e) => {

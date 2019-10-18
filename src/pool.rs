@@ -162,7 +162,7 @@ impl LmdbService {
                             cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb reader query error"));
                             warn!("queries error: {:?}", queries);
                         } else {
-                            info!("lmdb query success: {:?}", qr);
+                            debug!("lmdb query success: {:?}", qr);
                             let t = Box::new(move |_| {
                                 cb(Ok(qr));
                             });
@@ -277,7 +277,7 @@ impl LmdbService {
                                 match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
                                     Ok(val) => {
                                         let v = val.1.to_vec();
-                                        info!("iter next item descendin key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        debug!("iter next item descendin key: {:?}, value: {:?}", ck.clone(), v.clone());
                                         let t = Box::new(move |_: Option<isize>| {
                                             cb1(Ok(Some((ck1, Arc::new(v)))));
                                         });
@@ -290,12 +290,12 @@ impl LmdbService {
                                 // get next key
                                 match cursor.get(Some(ck.as_ref()), None, MDB_NEXT) {
                                     Ok(val) => {
-                                        info!("iter next key descending: item: {:?}", val.clone());
+                                        debug!("iter next key descending: item: {:?}", val.clone());
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
 
                                     Err(Error::NotFound) => {
-                                        info!("iter next key descending: NotFound");
+                                        debug!("iter next key descending: NotFound");
                                         let _ = sndr.send(None);
                                     }
 
@@ -314,7 +314,7 @@ impl LmdbService {
                                 match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
                                     Ok(val) => {
                                         let v = val.1.to_vec();
-                                        info!("iter next item ascending key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        debug!("iter next item ascending key: {:?}, value: {:?}", ck.clone(), v.clone());
                                         let t = Box::new(move |_: Option<isize>| {
                                             cb1(Ok(Some((ck1, Arc::new(v)))));
                                         });
@@ -327,12 +327,12 @@ impl LmdbService {
                                 // get next key
                                 match cursor.get(Some(ck.as_ref()), None, MDB_PREV) {
                                     Ok(val) => {
-                                        info!("iter next item ascending item: {:?}", val);
+                                        debug!("iter next item ascending item: {:?}", val);
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
 
                                     Err(Error::NotFound) => {
-                                        info!("iter next item ascending item: NotFound");
+                                        debug!("iter next item ascending item: NotFound");
                                         let _ = sndr.send(None);
                                     }
 
@@ -429,7 +429,7 @@ impl LmdbService {
                             cast_store_task(TaskType::Async(false), 100, None, t, Atom::from("Lmdb writer query error"));
                             warn!("queries error: {:?}", queries);
                         } else {
-                            info!("lmdb rw query success: {:?}", qr);
+                            debug!("lmdb rw query success: {:?}", qr);
                             let t = Box::new(move |_| {
                                 cb(Ok(qr));
                             });
@@ -541,7 +541,7 @@ impl LmdbService {
                                 match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
                                     Ok(val) => {
                                         let v = val.1.to_vec();
-                                        info!("iter next item descendin key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        debug!("iter next item descendin key: {:?}, value: {:?}", ck.clone(), v.clone());
                                         let t = Box::new(move |_: Option<isize>| {
                                             cb1(Ok(Some((ck1, Arc::new(v)))));
                                         });
@@ -554,12 +554,12 @@ impl LmdbService {
                                 // get next key
                                 match cursor.get(Some(ck.as_ref()), None, MDB_NEXT) {
                                     Ok(val) => {
-                                        info!("rw iter next key descending: item: {:?}", val.clone());
+                                        debug!("rw iter next key descending: item: {:?}", val.clone());
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
 
                                     Err(Error::NotFound) => {
-                                        info!("rw iter next key descending: NotFound");
+                                        debug!("rw iter next key descending: NotFound");
                                         let _ = sndr.send(None);
                                     }
 
@@ -578,7 +578,7 @@ impl LmdbService {
                                 match cursor.get(Some(ck.as_ref()), None, MDB_SET_KEY) {
                                     Ok(val) => {
                                         let v = val.1.to_vec();
-                                        info!("rw iter next item ascending key: {:?}, value: {:?}", ck.clone(), v.clone());
+                                        debug!("rw iter next item ascending key: {:?}, value: {:?}", ck.clone(), v.clone());
                                         let t = Box::new(move |_: Option<isize>| {
                                             cb1(Ok(Some((ck1, Arc::new(v)))));
                                         });
@@ -591,12 +591,12 @@ impl LmdbService {
                                 // get next key
                                 match cursor.get(Some(ck.as_ref()), None, MDB_PREV) {
                                     Ok(val) => {
-                                        info!("rw iter next item ascending item: {:?}", val);
+                                        debug!("rw iter next item ascending item: {:?}", val);
                                         let _ = sndr.send(Some(Arc::new(val.0.unwrap().to_vec())));
                                     }
 
                                     Err(Error::NotFound) => {
-                                        info!("rw iter next item ascending item: NotFound");
+                                        debug!("rw iter next item ascending item: NotFound");
                                         let _ = sndr.send(None);
                                     }
 

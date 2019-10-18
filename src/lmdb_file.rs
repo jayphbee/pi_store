@@ -90,7 +90,7 @@ impl Tab for LmdbTable {
     }
 
     fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
-        info!("create new txid: {:?}, tab: {:?}, writable: {:?}", id.time(), self.name, writable);
+        debug!("create new txid: {:?}, tab: {:?}, writable: {:?}", id.time(), self.name, writable);
         self.trans_count.sum(1);
 
         let tab = &self.name;
@@ -204,7 +204,7 @@ impl Txn for LmdbTableTxn {
 
         // 删除未提交的修改
         match MODS.lock().unwrap().remove(&self.id) {
-            Some(m) => info!("rollback txid: {:?}, modifies: {:?}", self.id, m),
+            Some(m) => debug!("rollback txid: {:?}, modifies: {:?}", self.id, m),
             None => {}
         }
 
@@ -242,7 +242,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxQueryCallback,
     ) -> Option<SResult<Vec<TabKV>>> {
-        info!("query txid: {:?}, query item: {:?}", self.id, arr);
+        debug!("query txid: {:?}, query item: {:?}", self.id, arr);
         let read_byte = self.read_byte.clone();
         match self.writable {
             true => {
@@ -304,7 +304,7 @@ impl TabTxn for LmdbTableTxn {
         _readonly: bool,
         cb: TxCallback,
     ) -> DBResult {
-        info!("MODIFY: txid: {:?}, tab: {:?}, len: {:?}", self.id, self.tab, arr);
+        debug!("MODIFY: txid: {:?}, tab: {:?}, len: {:?}", self.id, self.tab, arr);
 
         let sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
         let _ = sender.send(WriterMsg::Modify(Arc::new(move |m| match m {
@@ -348,7 +348,7 @@ impl TabTxn for LmdbTableTxn {
         filter: Filter,
         cb: Arc<Fn(IterResult)>,
     ) -> Option<IterResult> {
-        info!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
+        debug!("create iter for txid: {:?}, tab: {:?}, key: {:?}, descending: {:?}", self.id, self.tab, key, descending);
         let (tx, rx) = bounded(1);
         match self.writable {
             true => {
@@ -479,7 +479,7 @@ impl Iter for LmdbItemsIter {
     fn next(&mut self, cb: Arc<Fn(NextResult<Self::Item>)>) -> Option<NextResult<Self::Item>> {
         self.iter_count.sum(1);
 
-        info!("next item: txid: {:?}, tab: {:?}, cur_key: {:?}, descending: {:?}", self.txid, self.tab, self.cur_key, self.desc);
+        debug!("next item: txid: {:?}, tab: {:?}, cur_key: {:?}, descending: {:?}", self.txid, self.tab, self.cur_key, self.desc);
 
         if self.cur_key.is_none() {
             cb(Ok(None))
@@ -545,7 +545,7 @@ fn create_table_in_lmdb(tab: &Atom) {
 impl MetaTxn for LmdbMetaTxn {
     // 创建表、修改指定表的元数据
     fn alter(&self, tab: &Atom, meta: Option<Arc<TabMeta>>, cb: TxCallback) -> DBResult {
-        info!("META TXN: alter tab: {:?}", tab);
+        debug!("META TXN: alter tab: {:?}", tab);
         create_table_in_lmdb(tab);
         let mut key = WriteBuffer::new();
         tab.encode(&mut key);
@@ -617,7 +617,7 @@ impl DB {
     * @returns 返回Lmdb数据库，失败返回原因描述
     */
     pub fn new(name: Atom, db_size: usize) -> Result<Self, String> {
-        info!("create new db: {:?}, db_size: {:?}", name, db_size);
+        debug!("create new db: {:?}, db_size: {:?}", name, db_size);
         if !Path::new(&name.to_string()).exists() {
             let _ = fs::create_dir(name.to_string());
         }
@@ -654,17 +654,17 @@ impl DB {
         let rw_sender = LMDB_SERVICE.lock().unwrap().rw_sender().unwrap();
 
         let _ = thread::spawn(move || {
-            info!("start thread serving for the finally commit");
+            debug!("start thread serving for the finally commit");
             loop {
                 match COMMIT_CHAN.1.recv() {
                     Ok(CommitChan(txid, sndr)) => {
-                        info!("receive commit notification for txid: {:?} ", txid.time());
+                        debug!("receive commit notification for txid: {:?} ", txid.time());
                         match MODS.lock().unwrap().remove(&txid.time()) {
                             Some(v) => {
-                                info!("modifications to be committed: {:?}", v);
+                                debug!("modifications to be committed: {:?}", v);
                                 let _ = rw_sender.send(WriterMsg::Commit(Arc::new(v.clone()), Arc::new(move |c| match c {
                                     Ok(_) => {
-                                        info!("txid: {:?} finnaly committed", txid.time());
+                                        debug!("txid: {:?} finnaly committed", txid.time());
                                         let _ = sndr.send(Arc::new(v.clone()));
                                     }
                                     Err(e) =>{
@@ -675,7 +675,7 @@ impl DB {
                             None => {
                                 let _ = rw_sender.send(WriterMsg::Commit(Arc::new(vec![]), Arc::new(move |c| match c {
                                     Ok(_) => {
-                                        info!("non write txid: {:?} finnaly committed", txid.time());
+                                        debug!("non write txid: {:?} finnaly committed", txid.time());
                                         let _ = sndr.send(Arc::new(vec![]));
                                     }
                                     Err(e) =>{
