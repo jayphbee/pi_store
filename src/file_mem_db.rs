@@ -76,7 +76,7 @@ fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
 		match lmdb_txn.commit(){
 			Ok(_) => {}
 			Err(_) => {
-				panic!("lmdb txn cursor failed");
+				error!("lmdb txn cursor failed");
 			}
 		}
 
@@ -115,7 +115,7 @@ impl FileMemDB {
 		let mut e = LMDB_ENV.write().unwrap();
 		*e = Some(env.clone());
 
-        let _  = thread::spawn(move || {
+        let _  = thread::Builder::new().name("lmdb_writer_thread".to_string()).spawn(move || {
 			let mut write_cache: HashMap<(Atom, Atom, Bin), Option<Bin>> = HashMap::new();
 			let mut dbs = HashMap::new();
 
@@ -184,7 +184,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 							match rw_txn.del(*db, key.as_ref(), None) {
 								Ok(_) => {}
 								Err(e) => {
-									panic!("file mem tab del fail {:?}, ware: {:?}, tab:{:?}", e, ware, tab);
+									error!("file mem tab del fail {:?}, ware: {:?}, tab:{:?}", e, ware, tab);
 								}
 							}
 						} else {
@@ -193,7 +193,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 									write_bytes += val.as_ref().unwrap().len();
 								}
 								Err(e) => {
-									panic!("file mem tab put fail {:?}, ware:{:?}, tab:{:?}", e, ware, tab);
+									error!("file mem tab put fail {:?}, ware:{:?}, tab:{:?}", e, ware, tab);
 								}
 							}
 						}
@@ -206,13 +206,13 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 						break;
 					}
 					Err(e) => {
-						panic!("file mem tab commit fail: {:?}", e);
+						error!("file mem tab commit fail: {:?}", e);
 					}
 				}
 			}
 
 			Err(e) => {
-				panic!("save data thread unexpected error: {:?}", e);
+				error!("save data thread unexpected error: {:?}", e);
 			}
 		}
 	}
