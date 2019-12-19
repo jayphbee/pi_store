@@ -27,6 +27,7 @@ use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Tran
 lazy_static! {
     static ref LMDB_CHAN: (Sender<LmdbMsg>, Receiver<LmdbMsg>) = unbounded();
 	static ref LMDB_ENV: Arc<RwLock<Option<Arc<Environment>>>> = Arc::new(RwLock::new(None));
+	static ref DBS: Arc<Mutex<HashMap<u64, Database>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
 const MAX_DBS_PER_ENV: u32 = 1024;
@@ -121,25 +122,31 @@ impl FileMemDB {
 
 			let receiver = LMDB_CHAN.1.clone();
             loop {
+				dbg!(&dbs);
                 match receiver.recv() {
 					Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
 						dbs.entry(tab_name.get_hash() as u64)
 							.or_insert(
 								env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
 						);
+						dbg!(&dbs);
+
 						let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
 
 						load_data_to_mem_tab(&tab_name, &mut root);
 						let _ = sender.send(root);
 					}
 					Ok(LmdbMsg::SaveData(event)) => {
-						debug!("====> save data for tab: {:?} <====", event.tab);
+						debug!("====> save data for tab: {:?} <====", event);
 						match event.other {
 							EventType::Tab {key, value} => {
+								debug!("before write_cache len: {:?}", write_cache.len());
 								write_cache.insert((event.ware, event.tab, key), value);
+								debug!("after write_cache len: {:?}", write_cache.len());
 							}
 							_ => {}
 						}
+						dbg!(&dbs);
 						save_data(&mut dbs, env.clone(), receiver.clone(), &mut write_cache);
 					}
 
@@ -153,6 +160,7 @@ impl FileMemDB {
 }
 
 fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: Receiver<LmdbMsg>, write_cache: &mut HashMap<(Atom, Atom, Bin), Option<Bin>>) {
+	dbg!(&dbs);
 	loop {
 		match receiver.try_recv() {
 			Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
@@ -160,6 +168,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 					.or_insert(
 						env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
 				);
+				dbg!("dbs {:?}, tab_name {:?}", &dbs, &tab_name);
 				let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
 				load_data_to_mem_tab(&tab_name, &mut root);
 				let _ = sender.send(root);
@@ -170,7 +179,9 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 					EventType::Tab {key, value} => {
 						write_cache.insert((event.ware, event.tab, key), value);
 					}
-					_ => {}
+					_ => {
+						panic!("save_data()");
+					}
 				}
 			}
 
@@ -179,7 +190,10 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 				let mut write_bytes = 0;
 				let mut rw_txn = env.begin_rw_txn().unwrap();
 				for ((ware, tab, key), val) in write_cache.drain() {
+					debug!("ware {:?}, tab {:?}, key {:?}, value {:?}", ware, tab, key, val);
+					dbg!(&dbs);
 					if let Some(db) = dbs.get(&(tab.get_hash() as u64)) {
+						debug!("found db: {:?}", db);
 						if val.is_none() {
 							match rw_txn.del(*db, key.as_ref(), None) {
 								Ok(_) => {}
@@ -190,13 +204,17 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 						} else {
 							match rw_txn.put(*db, key.as_ref(), val.clone().unwrap().as_ref(), WriteFlags::empty()) {
 								Ok(_) => {
+									debug!("before write_bytes {:?}", write_bytes);
 									write_bytes += val.as_ref().unwrap().len();
+									debug!("after write_bytes {:?}", write_bytes);
 								}
 								Err(e) => {
 									error!("file mem tab put fail {:?}, ware:{:?}, tab:{:?}", e, ware, tab);
 								}
 							}
 						}
+					} else {
+						debug!("db not found : {:?}", tab);
 					}
 				}
 
@@ -265,6 +283,7 @@ impl WareSnapshot for DBSnapshot {
 	}
 	// 新增 修改 删除 表
 	fn alter(&self, tab_name: &Atom, meta: Option<Arc<TabMeta>>) {
+		debug!("alter +++++++++++++++++");
 		self.1.borrow_mut().alter(tab_name, meta)
 	}
 	// 创建指定表的表事务
@@ -700,6 +719,7 @@ pub struct MemeryMetaTxn();
 impl MetaTxn for MemeryMetaTxn {
 	// 创建表、修改指定表的元数据
 	fn alter(&self, _tab: &Atom, _meta: Option<Arc<TabMeta>>, _cb: TxCallback) -> DBResult{
+		debug!("alter --------------");
 		Some(Ok(()))
 	}
 	// 快照拷贝表
