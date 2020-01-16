@@ -21,7 +21,7 @@ use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use pi_db::db::{EventType, Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Event, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog, Bon, TabMeta};
 use pi_db::tabs::{TabLog, Tabs, Prepare};
 
-use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
+use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags, Error};
 
 
 lazy_static! {
@@ -76,7 +76,7 @@ fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
 		match lmdb_txn.commit(){
 			Ok(_) => {}
 			Err(_) => {
-				error!("lmdb txn cursor failed");
+				error!("lmdb commit failed for tab: {:?}", file_tab);
 			}
 		}
 
@@ -183,8 +183,11 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 						if val.is_none() {
 							match rw_txn.del(*db, key.as_ref(), None) {
 								Ok(_) => {}
+								Err(Error::NotFound) => {
+									warn!("delete failed: key not found, key: {:?}, ware: {:?}, tab: {:?}", key, ware, tab);
+								}
 								Err(e) => {
-									error!("file mem tab del fail {:?}, ware: {:?}, tab:{:?}", e, ware, tab);
+									error!("delete failed, error: {:?} key: {:?} , ware: {:?}, tab:{:?}", e, key, ware, tab);
 								}
 							}
 						} else {
@@ -193,7 +196,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 									write_bytes += val.as_ref().unwrap().len();
 								}
 								Err(e) => {
-									error!("file mem tab put fail {:?}, ware:{:?}, tab:{:?}", e, ware, tab);
+									error!("file mem tab put fail {:?}, key: {:?}, val: {:?}, ware:{:?}, tab:{:?}", e, key, val, ware, tab);
 								}
 							}
 						}
