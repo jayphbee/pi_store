@@ -15,6 +15,7 @@ use atom::{Atom};
 use guid::Guid;
 use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
 use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
+use handler::GenType;
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 
@@ -32,7 +33,7 @@ lazy_static! {
 const MAX_DBS_PER_ENV: u32 = 1024;
 
 #[derive(Clone)]
-pub struct FileMemTab(Arc<Mutex<MemeryTab>>);
+pub struct FileMemTab(Arc<Mutex<MemeryTab>>, Option<Sender<LmdbMsg>>);
 impl Tab for FileMemTab {
 	fn new(tab: &Atom) -> Self {
 		let (s, r) = unbounded();
@@ -45,7 +46,7 @@ impl Tab for FileMemTab {
 					tab: tab.clone(),
 				};
 
-				return FileMemTab(Arc::new(Mutex::new(file_mem_tab)));
+				return FileMemTab(Arc::new(Mutex::new(file_mem_tab)), None);
 			}
 			Err(_) => {
 				panic!("create new tab failed");
@@ -55,6 +56,18 @@ impl Tab for FileMemTab {
 	fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
 		let txn = Arc::new(FileMemTxn::new(self.clone(), id, writable));
 		return txn
+	}
+
+	fn set_param(&mut self, t: GenType) {
+		match t {
+			GenType::USize(x) => {
+				let sender = unsafe { *Box::from_raw(x as *mut Sender<LmdbMsg>) };
+				self.1 = Some(sender);
+			}
+			_ => {
+
+			}
+		};
 	}
 }
 
@@ -90,7 +103,7 @@ fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
 * 基于内存的Lmdb数据库
 */
 #[derive(Clone)]
-pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>);
+pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>, Sender<LmdbMsg>);
 
 impl FileMemDB {
 	/**
@@ -115,11 +128,12 @@ impl FileMemDB {
 		let mut e = LMDB_ENV.write().unwrap();
 		*e = Some(env.clone());
 
+		let (sender, receiver) = unbounded();
+
         let _  = thread::Builder::new().name("lmdb_writer_thread".to_string()).spawn(move || {
 			let mut write_cache: HashMap<(Atom, Atom, Bin), Option<Bin>> = HashMap::new();
 			let mut dbs = HashMap::new();
 
-			let receiver = LMDB_CHAN.1.clone();
             loop {
                 match receiver.recv() {
 					Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
@@ -148,7 +162,7 @@ impl FileMemDB {
 			}
         });
 
-		FileMemDB(Arc::new(RwLock::new(Tabs::new())))
+		FileMemDB(Arc::new(RwLock::new(Tabs::new())), sender)
 	}
 }
 
@@ -224,13 +238,15 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 impl OpenTab for FileMemDB {
 	// 打开指定的表，表必须有meta
 	fn open<'a, T: Tab>(&self, tab: &Atom, _cb: Box<Fn(SResult<T>) + 'a>) -> Option<SResult<T>> {
-		Some(Ok(T::new(tab)))
+		let mut table = T::new(tab);
+		table.set_param(GenType::USize(Box::into_raw(Box::new(self.1.clone())) as usize));
+		Some(Ok(table))
 	}
 }
 impl Ware for FileMemDB {
 	// 拷贝全部的表
 	fn tabs_clone(&self) -> Arc<Ware> {
-		Arc::new(FileMemDB(Arc::new(RwLock::new(self.0.read().unwrap().clone_map()))))
+		Arc::new(FileMemDB(Arc::new(RwLock::new(self.0.read().unwrap().clone_map())), self.1.clone()))
 	}
 	// 列出全部的表
 	fn list(&self) -> Box<Iterator<Item=Atom>> {
