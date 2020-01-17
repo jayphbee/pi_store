@@ -13,22 +13,14 @@ use ordmap::ordmap::{OrdMap, Entry, Iter as OIter, Keys};
 use ordmap::asbtree::{Tree};
 use atom::{Atom};
 use guid::Guid;
-use bon::{Decode, Encode, ReadBuffer, WriteBuffer};
-use apm::counter::{GLOBAL_PREF_COLLECT, PrefCounter};
 use handler::GenType;
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use pi_db::db::{EventType, Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Event, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog, Bon, TabMeta};
 use pi_db::tabs::{TabLog, Tabs, Prepare};
 
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags, Error};
-
-
-lazy_static! {
-    static ref LMDB_CHAN: (Sender<LmdbMsg>, Receiver<LmdbMsg>) = unbounded();
-	static ref LMDB_ENV: Arc<RwLock<Option<Arc<Environment>>>> = Arc::new(RwLock::new(None));
-}
 
 const MAX_DBS_PER_ENV: u32 = 1024;
 
@@ -36,33 +28,40 @@ const MAX_DBS_PER_ENV: u32 = 1024;
 pub struct FileMemTab(Arc<Mutex<MemeryTab>>, Option<Sender<LmdbMsg>>);
 impl Tab for FileMemTab {
 	fn new(tab: &Atom) -> Self {
-		let (s, r) = unbounded();
-		LMDB_CHAN.0.clone().send(LmdbMsg::CreateTab(tab.clone(), s));
-		match r.recv() {
-			Ok(root) => {
-				let file_mem_tab = MemeryTab {
-					prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
-					root: root,
-					tab: tab.clone(),
-				};
+		// 创建一个空数据表，稍后在 set_param 里面填充具体的数据
+		let file_mem_tab = MemeryTab {
+			prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
+			root: OrdMap::<Tree<Bon, Bin>>::new(None),
+			tab: tab.clone(),
+		};
 
-				return FileMemTab(Arc::new(Mutex::new(file_mem_tab)), None);
-			}
-			Err(_) => {
-				panic!("create new tab failed");
-			}
-		}
+		return FileMemTab(Arc::new(Mutex::new(file_mem_tab)), None);
 	}
-	fn transaction(&self, id: &Guid, writable: bool) -> Arc<TabTxn> {
+	fn transaction(&self, id: &Guid, writable: bool) -> Arc<dyn TabTxn> {
 		let txn = Arc::new(FileMemTxn::new(self.clone(), id, writable));
 		return txn
 	}
 
+	// 通过这个函数来得到sender, sender 发送 LmdbMsg::CreateTab 消息给数据库线程，
+	// lmdb 把数据读出来之后放到 OrdMap 中, 通过sender返回OrdMap的 root， 覆盖原来的root
 	fn set_param(&mut self, t: GenType) {
 		match t {
 			GenType::USize(x) => {
 				let sender = unsafe { *Box::from_raw(x as *mut Sender<LmdbMsg>) };
-				self.1 = Some(sender);
+				self.1 = Some(sender.clone());
+
+				let tab_name = self.0.lock().unwrap().tab.clone();
+				let (s, r) = unbounded();
+				let _ = sender.send(LmdbMsg::CreateTab(tab_name, s));
+				match r.recv() {
+					Ok(root) => {
+						// 把从lmdb中存储的数据加载到内存表，替换原来的root
+						self.0.lock().unwrap().root = root;
+					}
+					Err(e) => {
+						error!("Can't receive OrdMap root, error: {:?}", e);
+					}
+				}
 			}
 			_ => {
 
@@ -71,9 +70,8 @@ impl Tab for FileMemTab {
 	}
 }
 
-fn load_data_to_mem_tab(file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
-	let env = LMDB_ENV.read().unwrap().clone().unwrap();
-	if let Ok(db) = env.open_db(Some(file_tab.as_str())) {
+fn load_data_to_mem_tab(env: Arc<Environment>, file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
+	if let Ok(db) = env.clone().open_db(Some(file_tab.as_str())) {
 		let lmdb_txn = env.begin_ro_txn().unwrap();
 		let mut cursor = lmdb_txn.open_ro_cursor(db).unwrap();
 		let mut load_size = 0;
@@ -125,9 +123,6 @@ impl FileMemDB {
 				.expect("create lmdb env failed")
 		);
 
-		let mut e = LMDB_ENV.write().unwrap();
-		*e = Some(env.clone());
-
 		let (sender, receiver) = unbounded();
 
         let _  = thread::Builder::new().name("lmdb_writer_thread".to_string()).spawn(move || {
@@ -143,7 +138,7 @@ impl FileMemDB {
 						);
 						let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
 
-						load_data_to_mem_tab(&tab_name, &mut root);
+						load_data_to_mem_tab(env.clone(), &tab_name, &mut root);
 						let _ = sender.send(root);
 					}
 					Ok(LmdbMsg::SaveData(event)) => {
@@ -175,7 +170,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 						env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
 				);
 				let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
-				load_data_to_mem_tab(&tab_name, &mut root);
+				load_data_to_mem_tab(env.clone(), &tab_name, &mut root);
 				let _ = sender.send(root);
 			}
 
@@ -262,7 +257,7 @@ impl Ware for FileMemDB {
 	}
 	// 获取当前表结构快照
 	fn snapshot(&self) -> Arc<WareSnapshot> {
-		Arc::new(DBSnapshot(self.clone(), RefCell::new(self.0.read().unwrap().snapshot()), LMDB_CHAN.0.clone()))
+		Arc::new(DBSnapshot(self.clone(), RefCell::new(self.0.read().unwrap().snapshot()), self.1.clone()))
 	}
 }
 
