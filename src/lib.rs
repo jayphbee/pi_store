@@ -35,6 +35,8 @@ extern crate timer;
 extern crate ordmap;
 extern crate pi_db;
 extern crate crossbeam_channel;
+extern crate nodec;
+extern crate json;
 
 //pub mod kg;
 //pub mod kg_log;

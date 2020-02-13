@@ -6,6 +6,7 @@ authors = ["zmythleo <zmythleo@gmail.com>"]
 [lib]
 
 [dependencies]
+json = "0.11.13"
 log = "0.4.6"
 crc = "*"
 bytes = "*"
@@ -30,3 +31,4 @@ sinfo = {path = "../pi_lib/sinfo" }
 timer = {path = "../pi_lib/timer" }
 ordmap = {path = "../pi_lib/ordmap" }
 crossbeam-channel = "0.3.4"
+nodec = { path = "../pi_net/nodec" }

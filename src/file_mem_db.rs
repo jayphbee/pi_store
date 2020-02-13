@@ -3,11 +3,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::cell::RefCell;
 use std::mem;
 use std::path::Path;
-use std::fs;
+use std::fs::{self, read_to_string};
 use std::thread;
 use std::time::Instant;
 use fnv::FnvHashMap;
 use std::collections::HashMap;
+use std::env;
+use std::collections::HashSet;
+use std::sync::atomic::{ Ordering, AtomicIsize };
 
 use ordmap::ordmap::{OrdMap, Entry, Iter as OIter, Keys};
 use ordmap::asbtree::{Tree};
@@ -22,7 +25,20 @@ use pi_db::tabs::{TabLog, Tabs, Prepare};
 
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags, Error};
 
+use nodec::rpc::RPCClient;
+use bon::WriteBuffer;
+use json;
+
+lazy_static! {
+	static ref BACKUP_TABLES: RwLock<HashSet<(String, String)>> =  RwLock::new(HashSet::new());
+	static ref SLAVE_ADDRS: RwLock<HashMap<String, Arc<AtomicIsize>>> = RwLock::new(HashMap::new());
+}
+
 const MAX_DBS_PER_ENV: u32 = 1024;
+
+fn should_backup(ware_name: &str, tab_name: &str) -> bool {
+	BACKUP_TABLES.read().unwrap().contains(&(ware_name.to_string(), tab_name.to_string()))
+}
 
 #[derive(Clone)]
 pub struct FileMemTab(Arc<Mutex<MemeryTab>>, Option<Sender<LmdbMsg>>);
@@ -113,7 +129,39 @@ impl FileMemDB {
 	pub fn new(db_path: Atom, db_size: usize) -> Self {
 		if !Path::new(&db_path.to_string()).exists() {
             let _ = fs::create_dir(db_path.to_string());
-        }
+		}
+
+		let projs = env::var("PROJECTS").unwrap().split(" ").map(|s|s.to_string()).collect::<Vec<String>>();
+		let proj_root = env::var("PROJECT_ROOT").unwrap();
+
+		let mut backups = BACKUP_TABLES.write().unwrap();
+		let mut slave_addrs = SLAVE_ADDRS.write().unwrap();
+		for p in projs {
+			let path = Path::new(&proj_root).join(p).join("ptconfig.json");
+
+			if let Ok(content) = read_to_string(path) {
+				match json::parse(&content) {
+					Ok(jobj) => {
+						for backup in jobj["BackupTables"].members() {
+							let ware = backup["ware"].as_str().unwrap().to_string();
+							for tab in backup["tabs"].members() {
+								// 读取需要备份的表名到全局变量中
+								backups.insert((ware.clone(), tab.as_str().unwrap().to_string()));
+							}
+						}
+
+						// 保存slave地址到全局变量中
+						for addr in jobj["SlaveAddrs"].members() {
+							slave_addrs.insert(format!("ws://{}", addr.as_str().unwrap().to_string()), Arc::new(AtomicIsize::new(0)));
+						}
+					}
+					Err(e) => {
+						panic!("please makes sure ptconfig.json is a valid json file, error： {:?}", e);
+					}
+				}
+			}
+		}
+
 		let env = Arc::new(
 			Environment::new()
 				.set_max_dbs(MAX_DBS_PER_ENV)
@@ -187,7 +235,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 				let start_time = Instant::now();
 				let mut write_bytes = 0;
 				let mut rw_txn = env.begin_rw_txn().unwrap();
-				for ((ware, tab, key), val) in write_cache.drain() {
+				for ((ware, tab, key), val) in write_cache.iter() {
 					if let Some(db) = dbs.get(&(tab.get_hash() as u64)) {
 						if val.is_none() {
 							match rw_txn.del(*db, key.as_ref(), None) {
@@ -215,6 +263,117 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 				match rw_txn.commit() {
 					Ok(_) => {
 						debug!("====> lmdb commit write {:?}bytes time: {:?} <====", write_bytes, start_time.elapsed());
+						for ((ware, tab, key), val) in write_cache.drain() {
+							if should_backup(ware.clone().as_str(), tab.clone().as_str()) {
+								let slave_addrs = SLAVE_ADDRS.read().unwrap();
+								for (addr, status) in slave_addrs.iter() {
+									let ware1 = ware.clone();
+									let tab1 = tab.clone();
+									let key1 = key.clone();
+									let val1 = val.clone();
+
+									let status3 = status.clone();
+
+									match RPCClient::create(&addr) {
+										Err(e) => error!("SYNCDB create rpc client failed, client_name: {:?} e: {:?}", addr, e),
+										Ok(client) => {
+											info!("SYNCDB create rpc client ok, client_name: {:?}", addr);
+											let client_copy = client.clone();
+											let client_copy_copy = client.clone();
+											let conn_name_copy = addr.clone();
+											let conn_name_copy_copy = addr.clone();
+											let status1 = status.clone();
+											let connect_cb = Arc::new(move |result| {
+												let status2 = status1.clone();
+												let client_copy2 = client_copy.clone();
+												let conn_name_copy = conn_name_copy.clone();
+												info!("SYNCDB connect result: {:?}, client_name: {:?}", result, conn_name_copy);
+												if let Ok(_) = result {
+													// 设置状态为已连接
+													status2.store(1, Ordering::SeqCst);
+												} else {
+													// 连接出错
+													status2.store(-1, Ordering::SeqCst);
+												}
+												let request_cb = Arc::new(move |result| {
+													info!("SYNCDB request result: {:?}, client_name: {:?}", result, conn_name_copy);
+													if let Err(_) = result {
+														// 请求出错则关闭连接
+														client_copy2.close();
+														// 请求出错也标记为不正常连接
+														status2.store(-1, Ordering::SeqCst);
+													}
+												});
+												let mut wb = WriteBuffer::new();
+												wb.write_utf8(ware1.as_str());
+												wb.write_utf8(tab1.as_str());
+												wb.write_bin(&key1, 0..key1.len());
+
+												if val1.is_some() {
+													wb.write_bin(&val1.clone().unwrap(), 0..val1.clone().unwrap().len());
+												} else {
+													let mut bb = WriteBuffer::new();
+													bb.write_nil();
+													let bin = bb.get_byte();
+													wb.write_bin(bin, 0..bin.len());
+												}
+
+												let mut wb2 = WriteBuffer::new();
+												let bin = wb.get_byte();
+												wb2.write_bin(bin, 0..bin.len());
+
+												client_copy.request("pi_pt/util/hotback.syncDB".to_string(), wb2.get_byte().clone(), 10, request_cb.clone());
+											});
+
+											let conn_name_copy = addr.clone();
+											let closed_cb = Arc::new(move |result| {
+												debug!("SYNCDB rpc client closed, client_name: {:?} result: {:?}", &conn_name_copy, result);
+											});
+
+											// 第一次连接
+											if status.load(Ordering::SeqCst) == 0 {
+												client.connect(65535, &addr, 10, connect_cb, closed_cb);
+											} else if status.load(Ordering::SeqCst) == 1 { // 已经连接成功了， 直接发送request
+												let ware1 = ware.clone();
+												let tab1 = tab.clone();
+												let key1 = key.clone();
+												let val1 = val.clone();
+												let client_copy_copy_copy = client_copy_copy.clone();
+
+												let request_cb = Arc::new(move |result| {
+													info!("SYNCDB request result: {:?}, client_name: {:?}", result, conn_name_copy_copy);
+													if let Err(_) = result {
+														// 请求出错则关闭连接
+														client_copy_copy.close();
+														// 标记为不正常连接
+														status3.store(-1, Ordering::SeqCst);
+													}
+												});
+												let mut wb = WriteBuffer::new();
+												wb.write_utf8(ware1.as_str());
+												wb.write_utf8(tab1.as_str());
+												wb.write_bin(&key1, 0..key1.len());
+
+												if val1.is_some() {
+													wb.write_bin(&val1.clone().unwrap(), 0..val1.clone().unwrap().len());
+												} else {
+													let mut bb = WriteBuffer::new();
+													bb.write_nil();
+													let bin = bb.get_byte();
+													wb.write_bin(bin, 0..bin.len());
+												}
+
+												let mut wb2 = WriteBuffer::new();
+												let bin = wb.get_byte();
+												wb2.write_bin(bin, 0..bin.len());
+
+												client_copy_copy_copy.request("pi_pt/util/hotback.syncDB".to_string(), wb2.get_byte().clone(), 10, request_cb.clone());
+											}
+										}
+									}
+								}
+							}
+						}
 						break;
 					}
 					Err(e) => {
