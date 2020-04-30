@@ -2,26 +2,26 @@
 name = "pi_store"
 version = "0.1.0"
 authors = ["zmythleo <zmythleo@gmail.com>"]
-
-[lib]
+edition = "2018"
 
 [dependencies]
 json = "0.11.13"
-log = "0.4.6"
+log = "0.4"
 crc = "*"
-bytes = "*"
+bytes = "0.5"
 lazy_static = "*"
 fnv = "1.0.3"
 tempdir = "0.3"
 rand = "*"
+crossbeam-channel = "0.4"
 pi_vm = { path = "../pi_vm" }
 lmdb = { git = "https://github.com/GaiaWorld/lmdb-rs"}
 pi_db = {path = "../pi_db"}
 hash_value = { path = "../pi_math/hash_value" }
-atom = { path = "../pi_lib/atom" }
+bon = { path = "../pi_lib/bon" }
 worker = { path = "../pi_lib/worker" }
 handler = { path = "../pi_lib/handler" }
-bon = { path = "../pi_lib/bon" }
+atom = { path = "../pi_lib/atom" }
 apm = { path = "../pi_lib/apm" }
 file = { path = "../pi_lib/file" }
 gray = {path = "../pi_lib/gray" }
@@ -30,5 +30,9 @@ util = {path = "../pi_lib/util" }
 sinfo = {path = "../pi_lib/sinfo" }
 timer = {path = "../pi_lib/timer" }
 ordmap = {path = "../pi_lib/ordmap" }
-crossbeam-channel = "0.3.4"
 nodec = { path = "../pi_net/nodec" }
+hash = { path = "../pi_lib/hash" }
+async = { path = "../pi_lib/async" }
+async_file = { path = "../pi_lib/async_file" }
+crc32fast = "1.2"
+fastcmp = "1.0"

@@ -20,7 +20,7 @@ use pi_db::tabs::{TabLog, Tabs};
 use pi_db::db::Event;
 use pi_db::mgr::{COMMIT_CHAN, CommitChan};
 use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
-use pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX};
+use crate::pool::{LmdbService, ReaderMsg, WriterMsg, OPENED_TABLES, IN_PROGRESS_TX};
 
 const SINFO: &str = "_$sinfo";
 const MAX_DBS_PER_ENV: u32 = 1024;

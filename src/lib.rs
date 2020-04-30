@@ -20,11 +20,12 @@ extern crate log;
 
 extern crate rand;
 
-extern crate atom;
 extern crate apm;
+extern crate atom;
+extern crate r#async;
+extern crate async_file;
 extern crate handler;
 extern crate worker;
-extern crate bon;
 extern crate file;
 extern crate gray;
 extern crate guid;
@@ -36,7 +37,11 @@ extern crate ordmap;
 extern crate pi_db;
 extern crate crossbeam_channel;
 extern crate nodec;
+extern crate crc32fast;
+extern crate fastcmp;
+extern crate bon;
 extern crate json;
+extern crate hash;
 
 //pub mod kg;
 //pub mod kg_log;
@@ -47,3 +52,4 @@ pub mod lmdb_file;
 //pub mod log;
 pub mod pool;
 pub mod file_mem_db;
+pub mod log_store;
