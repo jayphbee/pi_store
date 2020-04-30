@@ -43,7 +43,7 @@ impl Drop for Counter {
 
 #[test]
 fn test_log_append() {
-    let pool = MultiTaskPool::new("Test-Log-Append".to_string(), 8, 1024 * 1024, 10);
+    let pool = MultiTaskPool::new("Test-Log-Append".to_string(), 8, 1024 * 1024, 10, None);
     let rt = pool.startup(true);
 
     let rt_copy = rt.clone();
@@ -80,7 +80,7 @@ fn test_log_append() {
 
 #[test]
 fn test_log_remove() {
-    let pool = MultiTaskPool::new("Test-Log-Remove".to_string(), 8, 1024 * 1024, 10);
+    let pool = MultiTaskPool::new("Test-Log-Remove".to_string(), 8, 1024 * 1024, 10, None);
     let rt = pool.startup(true);
 
     let rt_copy = rt.clone();
@@ -117,7 +117,7 @@ fn test_log_remove() {
 
 #[test]
 fn test_log_read() {
-    let pool = MultiTaskPool::new("Test-Log-Read".to_string(), 8, 1024 * 1024, 10);
+    let pool = MultiTaskPool::new("Test-Log-Read".to_string(), 8, 1024 * 1024, 10, None);
     let rt = pool.startup(true);
 
     let rt_copy = rt.clone();
@@ -196,7 +196,7 @@ impl TestCache {
 
 #[test]
 fn test_log_load() {
-    let pool = MultiTaskPool::new("Test-Log-Load".to_string(), 8, 1024 * 1024, 10);
+    let pool = MultiTaskPool::new("Test-Log-Load".to_string(), 8, 1024 * 1024, 10, None);
     let rt = pool.startup(true);
 
     let rt_copy = rt.clone();
@@ -228,7 +228,7 @@ fn test_log_load() {
 
 #[test]
 fn test_log_collect() {
-    let pool = MultiTaskPool::new("Test-Log-Load".to_string(), 8, 1024 * 1024, 10);
+    let pool = MultiTaskPool::new("Test-Log-Load".to_string(), 8, 1024 * 1024, 10, None);
     let rt = pool.startup(true);
 
     let rt_copy = rt.clone();
