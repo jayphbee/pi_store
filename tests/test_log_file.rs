@@ -280,22 +280,13 @@ fn test_log_append_delay_commit() {
                         let key = ("Test".to_string() + index.to_string().as_str()).into_bytes();
                         let value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes();
                         let uid = log_copy.append(LogMethod::PlainAppend, key.as_slice(), value);
-                        log_copy.delay_commit(uid, true, 20);  //保底的延迟提交，响应无法保证的情况下，增大呑吐量
-                        if let Err(e) = log_copy.commit(uid, false).await {
+                        if let Err(e) = log_copy.delay_commit(uid, 20).await {
                             println!("!!!!!!commit log failed, e: {:?}", e);
                         } else {
                             counter_copy.0.fetch_add(1, Ordering::Relaxed);
                         }
                     });
                 }
-
-                let rt_copy_ = rt_copy.clone();
-                rt_copy.spawn(rt_copy.alloc(), async move {
-                    loop {
-                        rt_copy_.wait_timeout(10).await;
-                        log.delay_commit(0, true, 10);
-                    }
-                });
             },
         }
     });
@@ -326,22 +317,13 @@ fn test_log_remove_delay_commit() {
                         let key = ("Test".to_string() + index.to_string().as_str()).into_bytes();
                         let value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes();
                         let uid = log_copy.append(LogMethod::Remove, key.as_slice(), value);
-                        log_copy.delay_commit(uid, true, 20);  //保底的延迟提交，响应无法保证的情况下，增大呑吐量
-                        if let Err(e) = log_copy.commit(uid, false).await {
+                        if let Err(e) = log_copy.delay_commit(uid, 20).await {
                             println!("!!!!!!commit log failed, e: {:?}", e);
                         } else {
                             counter_copy.0.fetch_add(1, Ordering::Relaxed);
                         }
                     });
                 }
-
-                let rt_copy_ = rt_copy.clone();
-                rt_copy.spawn(rt_copy.alloc(), async move {
-                    loop {
-                        rt_copy_.wait_timeout(10).await;
-                        log.delay_commit(0, true, 10);
-                    }
-                });
             },
         }
     });
