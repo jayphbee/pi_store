@@ -586,7 +586,7 @@ impl LogFile {
             }
 
             //如果有延迟提交，则设置为无延迟提交
-            log_uid = (*lock).1;
+            log_uid = (*lock).1; //重置为当前提交时当前块的最大日志id
             self.0.delay_commit.store(false, Ordering::Relaxed);
         }
 
