@@ -2,28 +2,32 @@
 use std::sync::{Arc, Mutex, RwLock};
 use std::cell::RefCell;
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::fs::{self, read_to_string};
-use std::thread;
 use std::time::Instant;
 use fnv::FnvHashMap;
-use std::collections::HashMap;
+use std::collections::{ BTreeMap, HashMap };
 use std::env;
 use std::collections::HashSet;
 use std::sync::atomic::{ Ordering, AtomicIsize };
+use std::io::Result;
 
 use ordmap::ordmap::{OrdMap, Entry, Iter as OIter, Keys};
 use ordmap::asbtree::{Tree};
 use atom::{Atom};
 use guid::Guid;
-use handler::GenType;
+use hash::XHashMap;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-use pi_db::db::{EventType, Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Event, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog, Bon, TabMeta};
+use pi_db::db::{EventType, Bin, TabKV, SResult, DBResult, IterResult, KeyIterResult, NextResult, TxCallback, TxQueryCallback, Txn, TabTxn, MetaTxn, Tab, OpenTab, Event, Ware, WareSnapshot, Filter, TxState, Iter, CommitResult, RwLog, Bon, TabMeta, TxCbWrapper};
 use pi_db::tabs::{TabLog, Tabs, Prepare};
+use crate::log_store::log_file::{PairLoader, LogMethod, LogFile};
 
-use lmdb::{ Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags, Error};
+use r#async::rt::multi_thread::{MultiTaskPool, MultiTaskRuntime};
+use r#async::lock::spin_lock::SpinLock;
+
+use lmdb::{Database, Environment, Transaction, WriteFlags, Error};
 
 use nodec::rpc::RPCClient;
 use bon::WriteBuffer;
@@ -32,84 +36,156 @@ use json;
 lazy_static! {
 	static ref BACKUP_TABLES: RwLock<HashSet<(String, String)>> =  RwLock::new(HashSet::new());
 	static ref SLAVE_ADDRS: RwLock<HashMap<String, Arc<AtomicIsize>>> = RwLock::new(HashMap::new());
+	pub static ref STORE_RUNTIME: MultiTaskRuntime<()> = {
+        let pool = MultiTaskPool::new("File-Runtime".to_string(), 2, 1024 * 1024, 10, Some(10));
+        pool.startup(true)
+    };
+}
+#[derive(Clone)]
+struct AsyncLogFileStore {
+	removed: Arc<SpinLock<XHashMap<Vec<u8>, ()>>>,
+	map: Arc<SpinLock<BTreeMap<Vec<u8>, Arc<[u8]>>>>,
+	log_file: LogFile
 }
 
-const MAX_DBS_PER_ENV: u32 = 1024;
+unsafe impl Send for AsyncLogFileStore {}
+unsafe impl Sync for AsyncLogFileStore {}
+
+impl PairLoader for AsyncLogFileStore {
+    fn is_require(&self, key: &Vec<u8>) -> bool {
+		!self.removed.lock().contains_key(key) && !self.map.lock().contains_key(key)
+    }
+
+    fn load(&mut self, _method: LogMethod, key: Vec<u8>, value: Option<Vec<u8>>) {
+		if let Some(value) = value {
+			self.map.lock().insert(key, value.into());
+		} else {
+			self.removed.lock().insert(key, ());
+		}
+    }
+}
+
+impl AsyncLogFileStore {
+	async fn open<P: AsRef<Path> + std::fmt::Debug>(path: P, buf_len: usize, file_len: usize) -> Result<Self> {
+		match LogFile::open(STORE_RUNTIME.clone(), path, buf_len, file_len).await {
+            Err(e) => Err(e),
+            Ok(file) => {
+                //打开指定路径的日志存储成功
+                let mut store = AsyncLogFileStore {
+					removed: Arc::new(SpinLock::new(XHashMap::default())),
+					map: Arc::new(SpinLock::new(BTreeMap::new())),
+					log_file: file.clone()
+				};
+
+                if let Err(e) = file.load(&mut store, true).await {
+                    Err(e)
+                } else {
+                    //初始化内存数据成功
+                    Ok(store)
+                }
+            },
+        }
+	}
+
+	async fn write(&self, key: Vec<u8>, value: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let id = self.log_file.append(LogMethod::PlainAppend, key.as_ref(), value.as_ref());
+        if let Err(e) = self.log_file.delay_commit(id, 10).await {
+            Err(e)
+        } else {
+            if let Some(value) = self.map.lock().insert(key, value.into()) {
+                //更新指定key的存储数据，则返回更新前的存储数据
+                Ok(Some(value.to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
+	}
+	
+	fn read(&self, key: &[u8]) -> Option<Arc<[u8]>> {
+        if let Some(value) = self.map.lock().get(key) {
+            return Some(value.clone())
+        }
+
+        None
+	}
+
+	pub async fn remove(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let id = self.log_file.append(LogMethod::Remove, key.as_ref(), &[]);
+        if let Err(e) = self.log_file.delay_commit(id, 10).await {
+            Err(e)
+        } else {
+            if let Some(value) = self.map.lock().remove(&key) {
+                Ok(Some(value.to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
 
 fn should_backup(ware_name: &str, tab_name: &str) -> bool {
 	BACKUP_TABLES.read().unwrap().contains(&(ware_name.to_string(), tab_name.to_string()))
 }
 
 #[derive(Clone)]
-pub struct FileMemTab(Arc<Mutex<MemeryTab>>, Option<Sender<LmdbMsg>>);
+pub struct FileMemTab(Arc<Mutex<MemeryTab>>, AsyncLogFileStore);
+
+unsafe impl Send for FileMemTab {}
+unsafe impl Sync for FileMemTab {}
+
 impl Tab for FileMemTab {
 	fn new(tab: &Atom) -> Self {
-		// 创建一个空数据表，稍后在 set_param 里面填充具体的数据
-		let file_mem_tab = MemeryTab {
+		let mut file_mem_tab = MemeryTab {
 			prepare: Prepare::new(FnvHashMap::with_capacity_and_hasher(0, Default::default())),
 			root: OrdMap::<Tree<Bon, Bin>>::new(None),
 			tab: tab.clone(),
 		};
 
-		return FileMemTab(Arc::new(Mutex::new(file_mem_tab)), None);
+		let db_path = env::var("DB_PATH").unwrap();
+		let mut path = PathBuf::new();
+		let tab_name = tab.clone();
+		let tab_name_clone = tab.clone();
+		path.push(db_path);
+		path.push(tab_name.clone().to_string());
+		let (s, r) = unbounded();
+
+		// 异步加载数据， 通过channel 同步
+		let _ = STORE_RUNTIME.spawn(STORE_RUNTIME.alloc(), async move {
+			match AsyncLogFileStore::open(path, 8000, 200 * 1024 * 1024).await {
+				Err(e) => {
+					error!("!!!!!!open table = {:?} failed, e: {:?}", tab_name, e);
+				},
+				Ok(store) => {
+					// 数据加载完毕，通过channel返回句柄
+					let _ = s.send(store);
+				}
+			}
+		});
+		
+		match r.recv() {
+			Ok(store) => {
+				let mut root= OrdMap::<Tree<Bon, Bin>>::new(None);
+				let mut load_size = 0;
+				let start_time = Instant::now();
+				let map = store.map.lock();
+				for (k, v) in map.iter() {
+					load_size += v.len();
+					root.upsert(Bon::new(Arc::new(k.clone())), Arc::new(v.to_vec()), false);
+				}
+				file_mem_tab.root = root;
+				debug!("====> load tab: {:?} size: {:?}byte time elapsed: {:?} <====", tab_name_clone, load_size, start_time.elapsed());
+
+				return FileMemTab(Arc::new(Mutex::new(file_mem_tab)), store);
+			}
+			Err(e) => {
+				panic!("FileMemTab::new failed, error = {:?}", e);
+			}
+		}
+
 	}
 	fn transaction(&self, id: &Guid, writable: bool) -> Arc<dyn TabTxn> {
 		let txn = Arc::new(FileMemTxn::new(self.clone(), id, writable));
 		return txn
-	}
-
-	// 通过这个函数来得到sender, sender 发送 LmdbMsg::CreateTab 消息给数据库线程，
-	// lmdb 把数据读出来之后放到 OrdMap 中, 通过sender返回OrdMap的 root， 覆盖原来的root
-	fn set_param(&mut self, t: GenType) {
-		match t {
-			GenType::USize(x) => {
-				let sender = unsafe { *Box::from_raw(x as *mut Sender<LmdbMsg>) };
-				self.1 = Some(sender.clone());
-
-				let tab_name = self.0.lock().unwrap().tab.clone();
-				let (s, r) = unbounded();
-				let _ = sender.send(LmdbMsg::CreateTab(tab_name, s));
-				match r.recv() {
-					Ok(root) => {
-						// 把从lmdb中存储的数据加载到内存表，替换原来的root
-						self.0.lock().unwrap().root = root;
-					}
-					Err(e) => {
-						error!("Can't receive OrdMap root, error: {:?}", e);
-					}
-				}
-			}
-			_ => {
-
-			}
-		};
-	}
-}
-
-fn load_data_to_mem_tab(env: Arc<Environment>, file_tab: &Atom, root: &mut OrdMap<Tree<Bon, Bin>>) {
-	if let Ok(db) = env.clone().open_db(Some(file_tab.as_str())) {
-		let lmdb_txn = env.begin_ro_txn().unwrap();
-		let mut cursor = lmdb_txn.open_ro_cursor(db).unwrap();
-		let mut load_size = 0;
-		let start_time = Instant::now();
-		for (k, v) in cursor.iter() {
-			if v.len() > 0 {
-				load_size += v.len();
-				root.upsert(Bon::new(Arc::new(k.to_vec())), Arc::new(v.to_vec()), false);
-			}
-		}
-
-		drop(cursor);
-		match lmdb_txn.commit(){
-			Ok(_) => {}
-			Err(_) => {
-				error!("lmdb commit failed for tab: {:?}", file_tab);
-			}
-		}
-
-		debug!("====> load tab: {:?} size: {:?}byte time elapsed: {:?} <====", file_tab, load_size, start_time.elapsed());
-	} else {
-		error!("====> load data from unknown tab: {:?} <====", file_tab);
 	}
 }
 
@@ -117,7 +193,7 @@ fn load_data_to_mem_tab(env: Arc<Environment>, file_tab: &Atom, root: &mut OrdMa
 * 基于内存的Lmdb数据库
 */
 #[derive(Clone)]
-pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>, Sender<LmdbMsg>);
+pub struct FileMemDB(Arc<RwLock<Tabs<FileMemTab>>>);
 
 impl FileMemDB {
 	/**
@@ -127,6 +203,7 @@ impl FileMemDB {
 	* @returns 返回基于内存的Lmdb数据库
 	*/
 	pub fn new(db_path: Atom, db_size: usize) -> Self {
+		env::set_var("DB_PATH", db_path.to_string());
 		if !Path::new(&db_path.to_string()).exists() {
             let _ = fs::create_dir(db_path.to_string());
 		}
@@ -162,50 +239,7 @@ impl FileMemDB {
 			}
 		}
 
-		let env = Arc::new(
-			Environment::new()
-				.set_max_dbs(MAX_DBS_PER_ENV)
-				.set_map_size(db_size)
-				.set_flags(EnvironmentFlags::NO_TLS)
-				.open(Path::new(&db_path.to_string()))
-				.expect("create lmdb env failed")
-		);
-
-		let (sender, receiver) = unbounded();
-
-        let _  = thread::Builder::new().name("lmdb_writer_thread".to_string()).spawn(move || {
-			let mut write_cache: HashMap<(Atom, Atom, Bin), Option<Bin>> = HashMap::new();
-			let mut dbs = HashMap::new();
-
-            loop {
-                match receiver.recv() {
-					Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
-						dbs.entry(tab_name.get_hash() as u64)
-							.or_insert(
-								env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
-						);
-						let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
-
-						load_data_to_mem_tab(env.clone(), &tab_name, &mut root);
-						let _ = sender.send(root);
-					}
-					Ok(LmdbMsg::SaveData(event)) => {
-						debug!("====> save data for tab: {:?} <====", event.tab);
-						match event.other {
-							EventType::Tab {key, value} => {
-								write_cache.insert((event.ware, event.tab, key), value);
-							}
-							_ => {}
-						}
-						save_data(&mut dbs, env.clone(), receiver.clone(), &mut write_cache);
-					}
-
-					Err(_) => {}
-            	}
-			}
-        });
-
-		FileMemDB(Arc::new(RwLock::new(Tabs::new())), sender)
+		FileMemDB(Arc::new(RwLock::new(Tabs::new())))
 	}
 }
 
@@ -213,13 +247,7 @@ fn save_data(dbs: &mut HashMap<u64, Database>, env: Arc<Environment>, receiver: 
 	loop {
 		match receiver.try_recv() {
 			Ok(LmdbMsg::CreateTab(tab_name, sender)) => {
-				dbs.entry(tab_name.get_hash() as u64)
-					.or_insert(
-						env.create_db(Some(tab_name.clone().as_str()), DatabaseFlags::empty()).unwrap()
-				);
-				let mut root = OrdMap::<Tree<Bon, Bin>>::new(None);
-				load_data_to_mem_tab(env.clone(), &tab_name, &mut root);
-				let _ = sender.send(root);
+				
 			}
 
 			Ok(LmdbMsg::SaveData(event)) => {
@@ -393,14 +421,13 @@ impl OpenTab for FileMemDB {
 	// 打开指定的表，表必须有meta
 	fn open<'a, T: Tab>(&self, tab: &Atom, _cb: Box<Fn(SResult<T>) + 'a>) -> Option<SResult<T>> {
 		let mut table = T::new(tab);
-		table.set_param(GenType::USize(Box::into_raw(Box::new(self.1.clone())) as usize));
 		Some(Ok(table))
 	}
 }
 impl Ware for FileMemDB {
 	// 拷贝全部的表
 	fn tabs_clone(&self) -> Arc<Ware> {
-		Arc::new(FileMemDB(Arc::new(RwLock::new(self.0.read().unwrap().clone_map())), self.1.clone()))
+		Arc::new(FileMemDB(Arc::new(RwLock::new(self.0.read().unwrap().clone_map()))))
 	}
 	// 列出全部的表
 	fn list(&self) -> Box<Iterator<Item=Atom>> {
@@ -416,12 +443,12 @@ impl Ware for FileMemDB {
 	}
 	// 获取当前表结构快照
 	fn snapshot(&self) -> Arc<WareSnapshot> {
-		Arc::new(DBSnapshot(self.clone(), RefCell::new(self.0.read().unwrap().snapshot()), self.1.clone()))
+		Arc::new(DBSnapshot(self.clone(), RefCell::new(self.0.read().unwrap().snapshot())))
 	}
 }
 
 // 内存库快照
-pub struct DBSnapshot(FileMemDB, RefCell<TabLog<FileMemTab>>, Sender<LmdbMsg>);
+pub struct DBSnapshot(FileMemDB, RefCell<TabLog<FileMemTab>>);
 
 impl WareSnapshot for DBSnapshot {
 	// 列出全部的表
@@ -461,10 +488,8 @@ impl WareSnapshot for DBSnapshot {
 		(self.0).0.write().unwrap().rollback(id)
 	}
 	// 库修改通知
-	fn notify(&self, event: Event) {
-		if event.ware == Atom::from("file") {
-			self.2.send(LmdbMsg::SaveData(event));
-		}
+	fn notify(&self, _event: Event) {
+		
 	}
 }
 
@@ -565,8 +590,11 @@ impl FileMemTxn {
 
 		return Ok(())
 	}
+
+	// 同时异步存储数据到log file 中
 	//提交
-	pub fn commit1(&mut self) -> SResult<FnvHashMap<Bin, RwLog>> {
+	pub fn commit1(&mut self, cb: TxCallback) -> CommitResult {
+		let txcb_wrapper = TxCbWrapper(cb);
 		let mut tab = self.tab.0.lock().unwrap();
 		let log = match tab.prepare.remove(&self.id) {
 			Some(rwlog) => {
@@ -598,10 +626,46 @@ impl FileMemTxn {
 				}
 				rwlog
 			},
-			None => return Err(String::from("error prepare null"))
+			None => return Some(Err(String::from("error prepare null")))
 		};
 
-		Ok(log)
+		let async_tab = self.tab.1.clone();
+
+		let _ = STORE_RUNTIME.spawn(STORE_RUNTIME.alloc(), async move {
+			let mut error = false;
+			for (k, rw_v) in log {
+				match rw_v {
+					RwLog::Read => {},
+					_ => {
+						match rw_v {
+							RwLog::Write(None) => {
+								debug!("delete key = {:?}", k);
+								if let Err(_) =  async_tab.remove(k.to_vec()).await {
+									error = true;
+									break;
+								}
+							}
+							RwLog::Write(Some(v)) => {
+								debug!("insert k = {:?}, v = {:?}", k, v);
+								if let Err(_) = async_tab.write(k.to_vec(), v.to_vec()).await {
+									error = true;
+									break;
+								}
+							}
+							_ => {}
+						}
+					}
+				}
+			}
+
+			if error {
+				txcb_wrapper.0(Err("commit failed".to_string()));
+			} else {
+				txcb_wrapper.0(Ok(()));
+			}
+		});
+
+		None
 	}
 	//回滚
 	pub fn rollback1(&mut self) -> SResult<()> {
@@ -633,15 +697,18 @@ impl Txn for RefMemeryTxn {
 		}
 	}
 	// 提交一个事务
-	fn commit(&self, _cb: TxCallback) -> CommitResult {
+	fn commit(&self, cb: TxCallback) -> CommitResult {
 		let mut txn = self.0.borrow_mut();
 		txn.state = TxState::Committing;
-		match txn.commit1() {
-			Ok(log) => {
+		match txn.commit1(cb) {
+			Some(Ok(log)) => {
 				txn.state = TxState::Commited;
 				return Some(Ok(log))
 			},
-			Err(e) => return Some(Err(e.to_string())),
+			Some(Err(e)) => {
+				return Some(Err(e.to_string()))
+			}
+			None => None
 		}
 	}
 	// 回滚一个事务
