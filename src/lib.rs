@@ -1,11 +1,5 @@
 #[allow(dead_code,unused_variables,non_snake_case,unused_parens,unused_assignments,unused_unsafe,unused_imports)]
 
-extern crate crc;
-extern crate core;
-extern crate fnv;
-extern crate lmdb;
-extern crate tempdir;
-
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]

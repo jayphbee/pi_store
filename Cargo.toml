@@ -36,3 +36,4 @@ async = { path = "../pi_lib/async" }
 async_file = { path = "../pi_lib/async_file" }
 crc32fast = "1.2"
 fastcmp = "1.0"
+num_cpus = "1.13.0"

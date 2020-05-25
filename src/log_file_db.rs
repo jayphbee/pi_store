@@ -31,11 +31,12 @@ use r#async::lock::spin_lock::SpinLock;
 use nodec::rpc::RPCClient;
 use bon::{ ReadBuffer, WriteBuffer };
 use json;
+use num_cpus;
 
 lazy_static! {
 	static ref BACKUP_TABLES: RwLock<HashSet<(String, String)>> =  RwLock::new(HashSet::new());
 	pub static ref STORE_RUNTIME: MultiTaskRuntime<()> = {
-        let pool = MultiTaskPool::new("File-Runtime".to_string(), 2, 1024 * 1024, 10, Some(10));
+        let pool = MultiTaskPool::new("File-Runtime".to_string(), num_cpus::get(), 1024 * 1024, 10, Some(10));
         pool.startup(true)
     };
 }
