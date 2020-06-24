@@ -5,8 +5,5 @@ extern crate lazy_static;
 #[macro_use]
 extern crate log;
 
-pub mod lmdb_file;
-pub mod pool;
-pub mod file_mem_db;
 pub mod log_store;
 pub mod log_file_db;
