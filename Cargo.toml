@@ -14,7 +14,6 @@ fnv = "1.0.3"
 tempdir = "0.3"
 rand = "*"
 crossbeam-channel = "0.4"
-pi_vm = { path = "../pi_vm" }
 lmdb = { git = "https://github.com/GaiaWorld/lmdb-rs"}
 pi_db = {path = "../pi_db"}
 hash_value = { path = "../pi_math/hash_value" }
