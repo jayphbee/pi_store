@@ -116,7 +116,10 @@ impl LogFileDB {
                     }
                 }
             });
-        }
+		} else {
+			let _ = SEQ_CHAN.0.send(0);
+		}
+		
 
 		LogFileDB(Arc::new(RwLock::new(Tabs::new())))
 	}
