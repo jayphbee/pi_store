@@ -609,7 +609,7 @@ impl LogFile {
             unsafe {
                 let mut async_file = Box::from_raw(self.0.writable.load(Ordering::Relaxed));
                 match (*async_file).as_mut().unwrap().1.write(0,
-                                                              Arc::new(block.into()),
+                                                              Arc::from(Vec::from(block)),
                                                               WriteOptions::Sync(true)).await {
                     Err(e) => {
                         //同步日志块失败，则立即返回错误
@@ -744,7 +744,7 @@ impl LogFile {
                     loop {
                         if (&buf).len() >= buf_len {
                             //合并缓冲区已满，则将缓冲区写入临时整理日志文件
-                            match tmp_file.write(0, Arc::new(buf), WriteOptions::None).await {
+                            match tmp_file.write(0, Arc::from(buf), WriteOptions::None).await {
                                 Err(e) => {
                                     self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
                                     return Err(Error::new(ErrorKind::Other, format!("Write tmp log block failed, path: {:?}, reason: {:?}", tmp_path.to_path_buf(), e)));
@@ -785,7 +785,7 @@ impl LogFile {
 
                 if buf.len() > 0 {
                     //将缓冲区中剩余日志写入临时整理文件
-                    match tmp_file.write(0, Arc::new(buf), WriteOptions::None).await {
+                    match tmp_file.write(0, Arc::from(buf), WriteOptions::None).await {
                         Err(e) => {
                             self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
                             return Err(Error::new(ErrorKind::Other, format!("Write tmp log block failed, path: {:?}, reason: {:?}", tmp_path.to_path_buf(), e)));
@@ -800,7 +800,7 @@ impl LogFile {
                 //将合并后的日志块的头写入临时整理文件
                 let mut header = Vec::with_capacity(DEFAULT_LOG_BLOCK_HEADER_LEN);
                 write_header(&mut header, hasher, total_size);
-                match tmp_file.write(0, Arc::new(header), WriteOptions::Sync(true)).await {
+                match tmp_file.write(0, Arc::from(header), WriteOptions::Sync(true)).await {
                     Err(e) => {
                         self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
                         return Err(Error::new(ErrorKind::Other, format!("Write tmp log header failed, path: {:?}, reason: {:?}", tmp_path.to_path_buf(), e)));
