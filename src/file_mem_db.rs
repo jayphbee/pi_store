@@ -536,6 +536,7 @@ impl FileMemTxn {
 
 	//预提交
 	pub fn prepare1(&mut self) -> SResult<()> {
+		self.state = TxState::Preparing;
 		let mut tab = self.tab.0.lock().unwrap();
 		//遍历事务中的读写日志
 		for (key, rw_v) in self.rwlog.iter() {
@@ -550,11 +551,17 @@ impl FileMemTxn {
 				match tab.root.get(&key) {
 					Some(r1) => match self.old.get(&key) {
 						Some(r2) if (r1 as *const Bin) == (r2 as *const Bin) => (),
-						_ => return Err(String::from("parpare conflicted value diff"))
+						_ => {
+							self.state = TxState::PreparFail;
+							return Err(String::from("parpare conflicted value diff"))
+						}
 					},
 					_ => match self.old.get(&key) {
 						None => (),
-						_ => return Err(String::from("parpare conflicted old not None"))
+						_ => {
+							self.state = TxState::PreparFail;
+							return Err(String::from("parpare conflicted old not None"))
+						}
 					}
 				}
 			}
@@ -562,11 +569,13 @@ impl FileMemTxn {
 		let rwlog = mem::replace(&mut self.rwlog, FnvHashMap::with_capacity_and_hasher(0, Default::default()));
 		//写入预提交
 		tab.prepare.insert(self.id.clone(), rwlog);
+		self.state = TxState::PreparOk;
 
 		return Ok(())
 	}
 	//提交
 	pub fn commit1(&mut self) -> SResult<FnvHashMap<Bin, RwLog>> {
+		self.state = TxState::Committing;
 		let mut tab = self.tab.0.lock().unwrap();
 		let log = match tab.prepare.remove(&self.id) {
 			Some(rwlog) => {
@@ -598,15 +607,21 @@ impl FileMemTxn {
 				}
 				rwlog
 			},
-			None => return Err(String::from("error prepare null"))
+			None => {
+				self.state = TxState::CommitFail;
+				return Err(String::from("error prepare null"))
+			}
 		};
+		self.state = TxState::Commited;
 
 		Ok(log)
 	}
 	//回滚
 	pub fn rollback1(&mut self) -> SResult<()> {
+		self.state = TxState::Rollbacking;
 		let mut tab = self.tab.0.lock().unwrap();
 		tab.prepare.remove(&self.id);
+		self.state = TxState::Rollbacked;
 
 		Ok(())
 	}
@@ -641,7 +656,10 @@ impl Txn for RefMemeryTxn {
 				txn.state = TxState::Commited;
 				return Some(Ok(log))
 			},
-			Err(e) => return Some(Err(e.to_string())),
+			Err(e) => {
+				txn.state = TxState::CommitFail;
+				return Some(Err(e.to_string()))
+			}
 		}
 	}
 	// 回滚一个事务
@@ -653,7 +671,10 @@ impl Txn for RefMemeryTxn {
 				txn.state = TxState::Rollbacked;
 				return Some(Ok(()))
 			},
-			Err(e) => return Some(Err(e.to_string())),
+			Err(e) => {
+				txn.state = TxState::RollbackFail;
+				return Some(Err(e.to_string()))
+			}
 		}
 	}
 }
