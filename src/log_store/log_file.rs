@@ -577,7 +577,10 @@ impl LogFile {
     }
 
     //提交当前日志块，返回提交是否成功
-    pub async fn commit(&self, mut log_uid: usize, is_forcibly: bool) -> Result<()> {
+    pub async fn commit(&self,
+                        mut log_uid: usize,
+                        is_forcibly: bool,
+                        is_split: bool) -> Result<()> {
         let mut commit_block = None;
         let mut mutex = self.0.commit_lock.lock().await; //获取提交锁
 
@@ -616,8 +619,8 @@ impl LogFile {
 
         if let Some(block) = commit_block {
             //有需要提交的日志块
-            if block.len() == 0 {
-                //没有需要提交的日志块，则立即返回成功
+            if block.len() == 0 && !is_split {
+                //没有需要提交的日志块且不需要强制分裂，则立即返回成功
                 let waits = (&mut *mutex);
                 for _ in 0..waits.len() {
                     //唤醒所有等待提交完成的任务
@@ -660,8 +663,8 @@ impl LogFile {
 
                         if !self.0.mutex_status.compare_and_swap(false, true, Ordering::SeqCst) {
                             //当前没有整理，则检查是否需要创建新的可写日志文件
-                            if self.0.writable_len.fetch_add(len, Ordering::Relaxed) + len >= self.0.size_limit {
-                                //当前可写日志文件已达限制，则立即创建新的可写日志文件
+                            if (self.0.writable_len.fetch_add(len, Ordering::Relaxed) + len >= self.0.size_limit) || is_split {
+                                //当前可写日志文件已达限制或需要强制分裂，则立即创建新的可写日志文件
                                 match append_writable(self.0.rt.clone(),
                                                       self.0.path.clone(),
                                                       self.0.log_id.fetch_add(1, Ordering::Relaxed)).await {
@@ -699,10 +702,13 @@ impl LogFile {
     }
 
     //延迟提交，返回延迟提交是否成功
-    pub async fn delay_commit(&self, log_uid: usize, timeout: usize) -> Result<()> {
+    pub async fn delay_commit(&self,
+                              log_uid: usize,
+                              is_split: bool,
+                              timeout: usize) -> Result<()> {
         if self.0.delay_commit.compare_and_swap(false, true, Ordering::SeqCst) {
             //已经有延迟提交，则立即返回失败
-            return self.commit(log_uid, false).await
+            return self.commit(log_uid, false, is_split).await
         }
 
         let rt = self.0.rt.clone();
@@ -710,11 +716,11 @@ impl LogFile {
         self.0.rt.spawn(self.0.rt.alloc(), async move {
             rt.wait_timeout(timeout).await; //延迟指定时间
             log.0.delay_commit.store(false, Ordering::Relaxed); //如果有延迟提交，则设置为无延迟提交
-            if let Err(e) = log.commit(log_uid, true).await {
+            if let Err(e) = log.commit(log_uid, true, is_split).await {
                 error!("Delay commit failed, log_uid: {:?}, timeout: {:?}, reason: {:?}", log_uid, timeout, e);
             }
         });
-        return self.commit(log_uid, false).await
+        return self.commit(log_uid, false, is_split).await
     }
 
     //整理只读日志文件，成功后返回整理文件的大小和日志数量
