@@ -100,10 +100,10 @@ const DEFAULT_COLLECTED_LOG_FILE_INIT_EXT: &str = "0";
 */
 pub trait PairLoader {
     //判断是否需要加载关键字的键值对
-    fn is_require(&self, key: &Vec<u8>) -> bool;
+    fn is_require(&self, log_file: Option<&PathBuf>, key: &Vec<u8>) -> bool;
 
     //加载指定键值对，值为None表示此关键字的键值对已被移除
-    fn load(&mut self, method: LogMethod, key: Vec<u8>, value: Option<Vec<u8>>);
+    fn load(&mut self, log_file: Option<&PathBuf>, method: LogMethod, key: Vec<u8>, value: Option<Vec<u8>>);
 }
 
 /*
@@ -395,32 +395,36 @@ impl LogFile {
         }
     }
 
-    //加载日志文件的内容到指定缓存，需要合并日志
+    //加载日志文件的内容到指定缓存，可以指定只读日志文件的路径，需要合并日志
     pub async fn load<C: PairLoader>(&self,
                                      cache: &mut C,
+                                     path: Option<PathBuf>,
                                      is_checksum: bool) -> Result<()> {
+        let log_index = unsafe { get_log_index(path.as_ref(), &*self.0.readable.load(Ordering::Relaxed)) };
         let mut offset = None;
 
         //加载当前可写日志文件的内容
-        loop {
-            match load_block(self,
-                             cache,
-                             None,
-                             offset,
-                             is_checksum).await {
-                Err(e) => {
-                    //读可写日志文件的指定二进制块失败，则立即返回错误
-                    return Err(e);
-                },
-                Ok(None) => {
-                    //读可写日志文件完成，则重置日志文件位置，并开始读只读日志文件
-                    offset = None;
-                    break;
-                },
-                Ok(Some(next)) => {
-                    //更新日志文件位置，，并继续读当前可写日志文件的下一个日志块
-                    offset = Some(next);
-                },
+        if log_index.is_none() {
+            loop {
+                match load_block(self,
+                                 cache,
+                                 None,
+                                 offset,
+                                 is_checksum).await {
+                    Err(e) => {
+                        //读可写日志文件的指定二进制块失败，则立即返回错误
+                        return Err(e);
+                    },
+                    Ok(None) => {
+                        //读可写日志文件完成，则重置日志文件位置，并开始读只读日志文件
+                        offset = None;
+                        break;
+                    },
+                    Ok(Some(next)) => {
+                        //更新日志文件位置，，并继续读当前可写日志文件的下一个日志块
+                        offset = Some(next);
+                    },
+                }
             }
         }
 
@@ -428,10 +432,30 @@ impl LogFile {
         let readable_box = unsafe { Box::from_raw(self.0.readable.load(Ordering::Relaxed)) };
         let len = (&*readable_box).len();
         let mut indexes = Vec::new();
-        for index in 0..len {
-            indexes.push(index);
+        match log_index {
+            None => {
+                //加载所有只读日志文件
+                for index in 0..len {
+                    indexes.push(index);
+                }
+                indexes.reverse();
+            },
+            Some(mut i) => {
+                //从指定只读日志文件开始，加载只读日志文件
+                if i >= len {
+                    //当序号大于等于只读日志文件数量，则加载所有只读日志文件
+                    for index in 0..len {
+                        indexes.push(index);
+                    }
+                    indexes.reverse();
+                } else {
+                    //否则只加载指定的只读日志文件
+                    for index in 0..(i + 1) {
+                        indexes.push(index);
+                    }
+                }
+            },
         }
-        indexes.reverse();
 
         for index in indexes {
             loop {
@@ -1020,6 +1044,48 @@ fn log_file_name_to_usize(name: &str) -> Option<usize> {
     None
 }
 
+//根据文件路径获取日志文件的序号
+fn get_log_index(log_path: Option<&PathBuf>,
+                 readable: &Vec<(PathBuf, AsyncFile<()>)>) -> Option<usize> {
+    if let Some(path) = log_path {
+        //指定了文件路径
+        let mut index = 0; //初始偏移
+        for (p, _) in readable {
+            if p.canonicalize().unwrap() == path.canonicalize().unwrap() {
+                //标准化后，路径相同则立即返回偏移
+                return Some(index);
+            }
+
+            //标准化后，路径不同，则继续
+            index += 1;
+        }
+    }
+
+    //没有指定文件路径或指定的文件路径不存在，则立即返回空
+    None
+}
+
+//根据序号获取日志文件的路径
+fn get_log_path(index: Option<usize>,
+                writable: &Option<(PathBuf, AsyncFile<()>)>,
+                readable: &Vec<(PathBuf, AsyncFile<()>)>) -> Option<PathBuf> {
+    if let Some(index) = index {
+        //返回只读日志文件的路径
+        if let Some((readable_path, _)) = readable.get(index) {
+            Some(readable_path.clone())
+        } else {
+            None
+        }
+    } else {
+        //返回当前可写日志文件的路径
+        if let Some((writable_path, _)) = writable {
+            Some(writable_path.clone())
+        } else {
+            None
+        }
+    }
+}
+
 //加载指定日志文件的指定日志块，合并相同关键字的日志，成功返回下一个日志块头的偏移，返回空表示已加载到日志文件头
 async fn load_block<C: PairLoader>(log_file: &LogFile,
                                    cache: &mut C,
@@ -1033,10 +1099,14 @@ async fn load_block<C: PairLoader>(log_file: &LogFile,
         },
         Ok((next, logs)) => {
             //读日志文件的指定二进制块成功
+            let log_index_file = unsafe { get_log_path(log_index,
+                                                       &*log_file.0.writable.load(Ordering::Relaxed),
+                                                       &*log_file.0.readable.load(Ordering::Relaxed)) };
+
             for (method, key, value) in logs {
-                if cache.is_require(&key) {
+                if cache.is_require(log_index_file.as_ref(), &key) {
                     //需要加入缓存
-                    cache.load(method, key, value);
+                    cache.load(log_index_file.as_ref(), method, key, value);
                 }
             }
 

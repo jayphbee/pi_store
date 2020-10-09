@@ -1,5 +1,6 @@
 use std::thread;
 use std::sync::Arc;
+use std::path::PathBuf;
 use std::collections::BTreeMap;
 use std::time::{Instant, Duration};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -160,11 +161,11 @@ struct TestCache {
 }
 
 impl PairLoader for TestCache {
-    fn is_require(&self, key: &Vec<u8>) -> bool {
+    fn is_require(&self, log_file: Option<&PathBuf>, key: &Vec<u8>) -> bool {
         !self.removed.contains_key(key) && !self.map.contains_key(key)
     }
 
-    fn load(&mut self, _method: LogMethod, key: Vec<u8>, value: Option<Vec<u8>>) {
+    fn load(&mut self, log_file: Option<&PathBuf>, _method: LogMethod, key: Vec<u8>, value: Option<Vec<u8>>) {
         if let Some(value) = value {
             unsafe {
                 self.map.insert(key, Some(String::from_utf8_unchecked(value)));
@@ -211,7 +212,7 @@ fn test_log_load() {
             Ok(log) => {
                 let mut cache = TestCache::new(true);
                 let start = Instant::now();
-                match log.load(&mut cache, true).await {
+                match log.load(&mut cache, None, true).await {
                     Err(e) => {
                         println!("!!!!!!load log failed, e: {:?}", e);
                     },
