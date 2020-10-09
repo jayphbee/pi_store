@@ -770,7 +770,7 @@ impl AsyncLogFileStore {
 
 	async fn write(&self, key: Vec<u8>, value: Vec<u8>) -> Result<Option<Vec<u8>>> {
         let id = self.log_file.append(LogMethod::PlainAppend, key.as_ref(), value.as_ref());
-        if let Err(e) = self.log_file.delay_commit(id, 10).await {
+        if let Err(e) = self.log_file.delay_commit(id, false, 10).await {
             Err(e)
         } else {
             if let Some(value) = self.map.lock().insert(key, value.into()) {
@@ -792,7 +792,7 @@ impl AsyncLogFileStore {
 
 	pub async fn remove(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         let id = self.log_file.append(LogMethod::Remove, key.as_ref(), &[]);
-        if let Err(e) = self.log_file.delay_commit(id, 10).await {
+        if let Err(e) = self.log_file.delay_commit(id, false, 10).await {
             Err(e)
         } else {
             if let Some(value) = self.map.lock().remove(&key) {
