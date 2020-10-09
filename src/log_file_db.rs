@@ -733,11 +733,11 @@ unsafe impl Send for AsyncLogFileStore {}
 unsafe impl Sync for AsyncLogFileStore {}
 
 impl PairLoader for AsyncLogFileStore {
-    fn is_require(&self, key: &Vec<u8>) -> bool {
+    fn is_require(&self, _log_file: Option<&PathBuf>, key: &Vec<u8>) -> bool {
 		!self.removed.lock().contains_key(key) && !self.map.lock().contains_key(key)
     }
 
-    fn load(&mut self, _method: LogMethod, key: Vec<u8>, value: Option<Vec<u8>>) {
+    fn load(&mut self, _log_file: Option<&PathBuf>, _method: LogMethod, key: Vec<u8>, value: Option<Vec<u8>>) {
 		if let Some(value) = value {
 			self.map.lock().insert(key, value.into());
 		} else {
@@ -758,7 +758,7 @@ impl AsyncLogFileStore {
 					log_file: file.clone()
 				};
 
-                if let Err(e) = file.load(&mut store, true).await {
+                if let Err(e) = file.load(&mut store, None, true).await {
                     Err(e)
                 } else {
                     //初始化内存数据成功
