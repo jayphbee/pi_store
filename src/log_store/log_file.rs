@@ -303,7 +303,8 @@ impl LogFile {
     pub async fn open<P: AsRef<Path> + Debug>(rt: MultiTaskRuntime<()>,
                                               path: P,
                                               mut block_size_limit: usize,
-                                              mut log_size_limit: usize) -> Result<Self> {
+                                              mut log_size_limit: usize,
+                                              log_file_index: Option<usize>) -> Result<Self> {
         if !path.as_ref().exists() {
             //指定的路径不存在，则线程安全的创建指定路径
             if let Err(e) = create_dir(rt.clone(), path.as_ref().to_path_buf()).await {
@@ -327,7 +328,13 @@ impl LogFile {
                 //打开所有日志文件成功
                 if log_files.len() == 0 {
                     //没有任何的日志文件，则初始化日志文件
-                    let init_log_file = path.as_ref().to_path_buf().join(create_log_file_name(DEFAULT_LOG_FILE_NAME_WIDTH, DEFAULT_INIT_LOG_FILE_NUM));
+                    let mut init_log_file_index = DEFAULT_INIT_LOG_FILE_NUM; //初始化默认的日志文件序号
+                    if let Some(log_file_index) = log_file_index {
+                        //初始化指定的日志文件序号
+                        init_log_file_index = log_file_index;
+                    }
+
+                    let init_log_file = path.as_ref().to_path_buf().join(create_log_file_name(DEFAULT_LOG_FILE_NAME_WIDTH, init_log_file_index));
                     match AsyncFile::open(rt.clone(), init_log_file.clone(), AsyncFileOptions::ReadAppend).await {
                         Err(e) => {
                             Err(Error::new(ErrorKind::Other, format!("Open init log file failed, file: {:?}, reason: {:?}", init_log_file, e)))
@@ -341,7 +348,7 @@ impl LogFile {
                                 rt: rt.clone(),
                                 path: path.as_ref().to_path_buf(),
                                 size_limit: log_size_limit,
-                                log_id: AtomicUsize::new(DEFAULT_INIT_LOG_FILE_NUM + 1),
+                                log_id: AtomicUsize::new(init_log_file_index + 1),
                                 writable_len: AtomicUsize::new(0),
                                 writable,
                                 readable,

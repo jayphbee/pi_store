@@ -748,7 +748,7 @@ impl PairLoader for AsyncLogFileStore {
 
 impl AsyncLogFileStore {
 	async fn open<P: AsRef<Path> + std::fmt::Debug>(path: P, buf_len: usize, file_len: usize) -> Result<Self> {
-		match LogFile::open(STORE_RUNTIME.clone(), path, buf_len, file_len).await {
+		match LogFile::open(STORE_RUNTIME.clone(), path, buf_len, file_len, None).await {
             Err(e) => Err(e),
             Ok(file) => {
                 //打开指定路径的日志存储成功

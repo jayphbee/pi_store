@@ -52,7 +52,8 @@ fn test_log_append() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -89,7 +90,8 @@ fn test_log_remove() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -126,7 +128,8 @@ fn test_log_read() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -205,7 +208,8 @@ fn test_log_load() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -237,7 +241,8 @@ fn test_log_collect() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -268,7 +273,8 @@ fn test_log_append_delay_commit() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -305,7 +311,8 @@ fn test_log_remove_delay_commit() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -342,7 +349,8 @@ fn test_log_append_delay_commit_by_split() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
@@ -379,7 +387,8 @@ fn test_log_remove_delay_commit_by_split() {
         match LogFile::open(rt_copy.clone(),
                             "./log",
                             8000,
-                            1024 * 1024).await {
+                            1024 * 1024,
+                            None).await {
             Err(e) => {
                 println!("!!!!!!open log failed, e: {:?}", e);
             },
