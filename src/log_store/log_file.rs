@@ -696,6 +696,9 @@ impl LogFile {
                                         self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
                                     },
                                 }
+                            } else {
+                                //当前可写日志文件未达限制且不需要强制分裂
+                                self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
                             }
                         }
                         Box::into_raw(async_file); //避免释放可写文件
@@ -728,6 +731,44 @@ impl LogFile {
             }
         });
         return self.commit(log_uid, false, is_split).await
+    }
+
+    //立即分裂当前的日志文件
+    pub async fn split(&self) -> Result<usize> {
+        let mut mutex = self.0.commit_lock.lock().await; //获取提交锁
+
+        if !self.0.mutex_status.compare_and_swap(false, true, Ordering::SeqCst) {
+            //当前没有整理，则创建新的可写日志文件
+            let new_log_index = self.0.log_id.fetch_add(1, Ordering::Relaxed);
+            match append_writable(self.0.rt.clone(),
+                                  self.0.path.clone(),
+                                  new_log_index).await {
+                Err(e) => {
+                    //追加新的可写日志文件失败，则立即返回错误
+                    self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                    Err(Error::new(ErrorKind::Other, format!("Split log file failed, path: {:?}, reason: {:?}", self.0.path, e)))
+                },
+                Ok((new_writable_path, new_writable)) => {
+                    //追加新的可写日志文件成功
+                    unsafe {
+                        if let Some((last_writable_path, last_writable)) = (*self.0.writable.load(Ordering::Relaxed)).take() {
+                            //将当前可写日志文件追加到只读日志文件列表中
+                            (&mut *self.0.readable.load(Ordering::Relaxed))
+                                .push((last_writable_path, last_writable));
+                        }
+
+                        *self.0.writable.load(Ordering::Relaxed) = Some((new_writable_path, new_writable)); //替换当前可写日志文件
+                        self.0.writable_len.store(0, Ordering::Relaxed); //重置当前可写日志文件大小
+                    }
+                    self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+
+                    Ok(new_log_index)
+                },
+            }
+        } else {
+            //当前有整理与分裂冲突，则立即返回错误
+            Err(Error::new(ErrorKind::WouldBlock, format!("Split log file failed, path: {:?}, reason: collect conflict", self.0.path)))
+        }
     }
 
     //整理只读日志文件，成功后返回整理文件的大小和日志数量
