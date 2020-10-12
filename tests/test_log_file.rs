@@ -1,17 +1,19 @@
 use std::thread;
 use std::sync::Arc;
 use std::path::PathBuf;
-use std::collections::BTreeMap;
+use std::collections::{VecDeque, BTreeMap};
 use std::time::{Instant, Duration};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
 
 use crc32fast::Hasher;
 use fastcmp::Compare;
 
-use r#async::rt::multi_thread::{MultiTaskPool, MultiTaskRuntime};
+use r#async::{lock::mutex_lock::Mutex,
+              rt::multi_thread::{MultiTaskPool, MultiTaskRuntime}};
 use hash::XHashMap;
 
 use pi_store::log_store::log_file::{PairLoader, LogMethod, LogFile};
+use std::io::ErrorKind;
 
 #[test]
 fn test_crc32fast() {
@@ -405,6 +407,59 @@ fn test_log_remove_delay_commit_by_split() {
                             println!("!!!!!!commit log failed, e: {:?}", e);
                         } else {
                             counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            },
+        }
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+#[test]
+fn test_log_split() {
+    let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
+    let rt = pool.startup(true);
+
+    let rt_copy = rt.clone();
+    rt.spawn(rt.alloc(), async move {
+        match LogFile::open(rt_copy.clone(),
+                            "./log",
+                            8000,
+                            1024 * 1024,
+                            None).await {
+            Err(e) => {
+                println!("!!!!!!open log failed, e: {:?}", e);
+            },
+            Ok(log) => {
+                let mut count = Arc::new(AtomicUsize::new(0));
+                let counter = Arc::new(Counter(AtomicUsize::new(0), Instant::now()));
+
+                for index in 0..10000 {
+                    let log_copy = log.clone();
+                    let count_copy = count.clone();
+                    let counter_copy = counter.clone();
+                    rt_copy.spawn(rt_copy.alloc(), async move {
+                        let key = ("Test".to_string() + index.to_string().as_str()).into_bytes();
+                        let value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes();
+                        let uid = log_copy.append(LogMethod::PlainAppend, key.as_slice(), value);
+                        if let Err(e) = log_copy.delay_commit(uid, false, 20).await {
+                            println!("!!!!!!commit log failed, e: {:?}", e);
+                        } else {
+                            counter_copy.0.fetch_add(1, Ordering::Relaxed);
+
+                            if count_copy.fetch_add(1, Ordering::Relaxed) == 999 {
+                                match log_copy.split().await {
+                                    Err(e) => {
+                                        println!("!!!!!!split log failed, e: {:?}", e);
+                                    },
+                                    Ok(log_index) => {
+                                        println!("!!!!!!split log ok, log index: {}", log_index);
+                                    },
+                                }
+                                count_copy.store(0, Ordering::SeqCst);
+                            }
                         }
                     });
                 }
