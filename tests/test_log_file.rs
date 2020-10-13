@@ -436,6 +436,22 @@ fn test_log_split() {
                 let mut count = Arc::new(AtomicUsize::new(0));
                 let counter = Arc::new(Counter(AtomicUsize::new(0), Instant::now()));
 
+                let log_copy = log.clone();
+                rt_copy.spawn(rt_copy.alloc(), async move {
+                    let mut cache = TestCache::new(true);
+                    let start = Instant::now();
+                    match log_copy.load(&mut cache, None, true).await {
+                        Err(e) => {
+                            println!("!!!!!!load log failed, e: {:?}", e);
+                        },
+                        Ok(_) => {
+                            println!("!!!!!!load log ok, len: {:?}, time: {:?}", cache.len(), Instant::now() - start);
+                        },
+                    }
+                });
+
+                thread::sleep(Duration::from_millis(5000));
+
                 for index in 0..10000 {
                     let log_copy = log.clone();
                     let count_copy = count.clone();
