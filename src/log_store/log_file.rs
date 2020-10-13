@@ -438,6 +438,8 @@ impl LogFile {
         //加载只读日志文件的内容
         let readable_box = unsafe { Box::from_raw(self.0.readable.load(Ordering::Relaxed)) };
         let len = (&*readable_box).len();
+        Box::into_raw(readable_box); //避免被提前释放
+
         let mut indexes = Vec::new();
         match log_index {
             None => {
