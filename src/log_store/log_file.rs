@@ -593,7 +593,10 @@ impl LogFile {
         let mut commit_block = None;
         let mut mutex = self.0.commit_lock.lock().await; //获取提交锁
 
+		println!("commit 0000000, is_forcibly = {:?}, log_uid = {:?}, committed_uid = {:?}",is_forcibly, log_uid, self.0.commited_uid.load(Ordering::Relaxed));
+
         if log_uid as usize <= self.0.commited_uid.load(Ordering::Relaxed) {
+			println!("commit 111111");
             //指定的日志已提交，则立即返回提交成功，也不需要唤醒任何的等待提交完成的任务
             return Ok(());
         }
@@ -604,7 +607,9 @@ impl LogFile {
             if is_forcibly {
                 //强制提交当前日志块，则交换出当前日志块
                 commit_block = (&mut *lock).0.take();
-                (&mut *lock).0 = Some(LogBlock::new(self.0.current_limit));
+				(&mut *lock).0 = Some(LogBlock::new(self.0.current_limit));
+				println!("commit 22222");
+				
             } else {
                 //检查当前日志块是否已达大小限制
                 if !(&mut *lock).0.as_ref().unwrap().is_size_limit(self.0.current_limit) {
@@ -612,12 +617,14 @@ impl LogFile {
                     let r = AsyncValue::new(AsyncRuntime::Multi(self.0.rt.clone()));
                     (&mut *mutex).push_back(r.clone());
                     drop(lock); //释放日志块锁
-                    drop(mutex); //释放提交锁
+					drop(mutex); //释放提交锁
+					println!("commit 333333");
                     return r.await;
                 } else {
                     //当前日志块已达提交大小限制，则交换出当前日志块
                     commit_block = (&mut *lock).0.take();
-                    (&mut *lock).0 = Some(LogBlock::new(self.0.current_limit));
+					(&mut *lock).0 = Some(LogBlock::new(self.0.current_limit));
+					println!("commit 444444");
                 }
             }
 
@@ -627,8 +634,12 @@ impl LogFile {
         }
 
         if let Some(block) = commit_block {
+			println!("commit 555555555");
+
             //有需要提交的日志块
             if block.len() == 0 && !is_split {
+				println!("commit 666666666");
+
                 //没有需要提交的日志块且不需要强制分裂，则立即返回成功
                 let waits = (&mut *mutex);
                 for _ in 0..waits.len() {
@@ -639,7 +650,9 @@ impl LogFile {
                 }
 
                 return Ok(());
-            }
+			}
+			
+			let start = std::time::Instant::now();
 
             //写文件
             unsafe {
@@ -661,6 +674,8 @@ impl LogFile {
                         return Err(Error::new(ErrorKind::Other, format!("Sync log failed, path: {:?}, reason: {:?}", self.0.path, e)));
                     },
                     Ok(len) => {
+						println!("commit 777777777, write file time = {:?}, write len = {:?}", start.elapsed(), len);
+
                         //提交日志块成功
                         let waits = (&mut *mutex);
                         for _ in 0..waits.len() {
@@ -671,6 +686,7 @@ impl LogFile {
                         }
 
                         if !self.0.mutex_status.compare_and_swap(false, true, Ordering::SeqCst) {
+							println!("commit 88888888");
                             //当前没有整理，则检查是否需要创建新的可写日志文件
                             if (self.0.writable_len.fetch_add(len, Ordering::Relaxed) + len >= self.0.size_limit) || is_split {
                                 //当前可写日志文件已达限制或需要强制分裂，则立即创建新的可写日志文件
@@ -702,7 +718,10 @@ impl LogFile {
                                 //当前可写日志文件未达限制且不需要强制分裂
                                 self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
                             }
-                        }
+						}
+						println!("commit 999999");
+
+						
                         Box::into_raw(async_file); //避免释放可写文件
                     },
                 }
