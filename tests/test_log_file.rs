@@ -289,7 +289,7 @@ fn test_log_append_delay_commit() {
                         let key = ("Test".to_string() + index.to_string().as_str()).into_bytes();
                         let value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes();
                         let uid = log_copy.append(LogMethod::PlainAppend, key.as_slice(), value);
-                        if let Err(e) = log_copy.delay_commit(uid, false, 20).await {
+                        if let Err(e) = log_copy.delay_commit(uid, false, 10).await {
                             println!("!!!!!!commit log failed, e: {:?}", e);
                         } else {
                             counter_copy.0.fetch_add(1, Ordering::Relaxed);
