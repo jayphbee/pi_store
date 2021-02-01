@@ -1053,9 +1053,7 @@ async fn clean<P: AsRef<Path>>(rt: &MultiTaskRuntime<()>, path: P) -> Result<Vec
             }
 
             //反转已清理的日志文件路径列表，并返回
-            println!("!!!!!!result0: {:?}", result);
             result.sort();
-            println!("!!!!!!result1: {:?}", result);
             Ok(result)
         },
     }
