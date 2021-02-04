@@ -47,7 +47,7 @@ impl Drop for Counter {
 #[test]
 fn test_log_append() {
     let pool = MultiTaskPool::new("Test-Log-Append".to_string(), 8, 1024 * 1024, 10, None);
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -85,7 +85,7 @@ fn test_log_append() {
 #[test]
 fn test_log_remove() {
     let pool = MultiTaskPool::new("Test-Log-Remove".to_string(), 8, 1024 * 1024, 10, None);
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -268,7 +268,7 @@ fn test_log_collect() {
 #[test]
 fn test_log_append_delay_commit() {
     let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -306,7 +306,7 @@ fn test_log_append_delay_commit() {
 #[test]
 fn test_log_remove_delay_commit() {
     let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -344,7 +344,7 @@ fn test_log_remove_delay_commit() {
 #[test]
 fn test_log_append_delay_commit_by_split() {
     let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -480,6 +480,43 @@ fn test_log_split() {
                     });
                 }
             },
+        }
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+#[test]
+fn test_log_collect_logs() {
+    let pool = MultiTaskPool::new("Test-Log-Load".to_string(), 8, 1024 * 1024, 10, Some(10));
+    let rt = pool.startup(false);
+
+    let rt_copy = rt.clone();
+    rt.spawn(rt.alloc(), async move {
+        match LogFile::open(rt_copy.clone(),
+                            "./log",
+                            8000,
+                            1024 * 1024,
+                            None).await {
+            Err(e) => {
+                println!("!!!!!!open log failed, e: {:?}", e);
+            },
+            Ok(log) => {
+                let log_paths = vec![
+                    PathBuf::from("./log/000001"),
+                    PathBuf::from("./log/000002"),
+                ];
+
+                let start = Instant::now();
+                match log.collect_logs(log_paths, 1024 * 1024, false).await {
+                    Err(e) => {
+                        println!("!!!!!!collect logs failed, e: {:?}", e);
+                    },
+                    Ok((size, len)) => {
+                        println!("!!!!!!collect logs ok, size: {:?}, len: {:?}, time: {:?}", size, len, Instant::now() - start);
+                    },
+                }
+            }
         }
     });
 

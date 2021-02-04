@@ -96,6 +96,151 @@ const DEFAULT_TMP_LOG_FILE_EXT: &str = "tmp";
 const DEFAULT_COLLECTED_LOG_FILE_INIT_EXT: &str = "0";
 
 /*
+* 获取指定日志文件目录中有效日志文件路径列表
+*/
+pub async fn read_log_paths(log_file: &LogFile) -> Result<Vec<PathBuf>> {
+    let rt = log_file.0.rt.clone();
+    let path = log_file.0.path.clone();
+    match read_dir(&path) {
+        Err(e) => {
+            //分析目录失败，则立即返回错误
+            Err(Error::new(ErrorKind::Other, format!("Read log dir failed, path: {:?}, reason: {:?}", path, e)))
+        },
+        Ok(dir) => {
+            //读日志目录成功，则首先过滤目录中的备份日志文件和非日志文件
+            let mut log_paths = Vec::new();
+            for r in dir {
+                if let Ok(entry) = r {
+                    let file = entry.path();
+                    if file.is_dir() {
+                        //忽略目录
+                        continue;
+                    }
+
+                    if let Some(ext_name) = file.extension() {
+                        //有扩展名
+                        match ext_name.to_str() {
+                            Some(DEFAULT_BAK_LOG_FILE_EXT) => {
+                                //忽略备份的日志文件
+                                continue;
+                            },
+                            Some(ext_name_str) => {
+                                if let Err(_) = ext_name_str.parse::<usize>() {
+                                    //忽略扩展名为非备份或非整数的所有文件，并继续打开后续的文件
+                                    continue;
+                                }
+                                //扩展名为整数的文件，则继续
+                            },
+                            _ => (), //没有扩展名的文件，则继续
+                        }
+                    }
+
+                    match entry.metadata() {
+                        Err(e) => {
+                            //无法获取文件元信息，则立即返回错误
+                            return Err(Error::new(ErrorKind::Other, format!("Read log file failed, path: {:?}, reason: {:?}", &file, e)));
+                        },
+                        Ok(meta) => {
+                            if meta.is_dir() {
+                                //忽略目录
+                                continue;
+                            }
+                        },
+                    }
+
+                    //记录日志文件名
+                    log_paths.push(file);
+                } else {
+                    //读取日志文件目录失败，则立即返回错误
+                    return Err(Error::new(ErrorKind::Other, format!("Read log dir failed, path: {:?}, reason: invalid file", path)));
+                }
+            }
+
+            //排序已清理的日志文件路径列表，并返回
+            log_paths.sort();
+            Ok(log_paths)
+        },
+    }
+}
+
+/*
+* 从指定日志文件的指定位置开始，读取二进制块，返回读取的字节数和日志，返回字节数为0表示指定日志文件的指定位置没有二进制块
+*/
+pub async fn read_log_block(rt: &MultiTaskRuntime<()>,
+                            file_path: &PathBuf,
+                            file: &AsyncFile<()>,
+                            offset: Option<u64>,
+                            is_checksum: bool) -> Result<(u64, LinkedList<(LogMethod, Vec<u8>, Option<Vec<u8>>)>)> {
+    let top = file.get_size();
+    let mut next_offset = 0;
+    let mut result = LinkedList::new();
+
+    if let Some(header_offset) = offset {
+        //从指定位置开始读
+        match read_block_header(file_path, file, header_offset).await {
+            Err(e) => {
+                //读块头失败，则立即返回错误
+                return Err(Error::new(ErrorKind::Other, format!("Read log block failed, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+            },
+            Ok((payload_offset, payload_time, payload_checksum, payload_len)) => {
+                //读块头成功
+                if let Err(e) = read_block_payload(&mut result,
+                                                   file_path,
+                                                   file,
+                                                   payload_offset,
+                                                   payload_time,
+                                                   payload_checksum,
+                                                   payload_len,
+                                                   is_checksum).await {
+                    //校验块负载失败，则立即返回错误
+                    return Err(Error::new(ErrorKind::Other, format!("Valid failed for read log block, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+                }
+
+                //设置下一个块头的偏移
+                match payload_offset.checked_sub(DEFAULT_LOG_BLOCK_HEADER_LEN as u64) {
+                    None => next_offset = 0,
+                    Some(off) => next_offset = off,
+                }
+            },
+        }
+    } else {
+        //从日志文件尾开始读
+        if top > 0 {
+            //当前日志文件有日志
+            let header_offset = top - DEFAULT_LOG_BLOCK_HEADER_LEN as u64; //获取日志文件的尾块头位置
+            match read_block_header(file_path, file, header_offset).await {
+                Err(e) => {
+                    //读块头失败，则立即返回错误
+                    return Err(Error::new(ErrorKind::Other, format!("Read log tail block failed, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+                },
+                Ok((payload_offset, payload_time, payload_checksum, payload_len)) => {
+                    //读尾块头成功
+                    if let Err(e) = read_block_payload(&mut result,
+                                                       file_path,
+                                                       file,
+                                                       payload_offset,
+                                                       payload_time,
+                                                       payload_checksum,
+                                                       payload_len,
+                                                       is_checksum).await {
+                        //校验尾块负载失败，则立即返回错误
+                        return Err(Error::new(ErrorKind::Other, format!("Valid failed for read log tail block, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+                    }
+
+                    //设置下一个块头的偏移
+                    match payload_offset.checked_sub(DEFAULT_LOG_BLOCK_HEADER_LEN as u64) {
+                        None => next_offset = 0,
+                        Some(off) => next_offset = off,
+                    }
+                },
+            }
+        }
+    }
+
+    Ok((next_offset, result))
+}
+
+/*
 * 键值对加载器
 */
 pub trait PairLoader {
@@ -585,6 +730,81 @@ impl LogFile {
         Ok((next_offset, result))
     }
 
+    //从指定日志文件的指定位置开始，读取二进制块，返回读取的字节数和日志，返回字节数为0表示指定日志文件的指定位置没有二进制块
+    pub async fn read_block_log(&self,
+                                file_path: &PathBuf,
+                                file: &AsyncFile<()>,
+                                offset: Option<u64>,
+                                is_checksum: bool) -> Result<(u64, LinkedList<(LogMethod, Vec<u8>, Option<Vec<u8>>)>)> {
+        let top = file.get_size();
+        let mut next_offset = 0;
+        let mut result = LinkedList::new();
+
+        if let Some(header_offset) = offset {
+            //从指定位置开始读
+            match read_block_header(file_path, file, header_offset).await {
+                Err(e) => {
+                    //读块头失败，则立即返回错误
+                    return Err(Error::new(ErrorKind::Other, format!("Read log block failed, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+                },
+                Ok((payload_offset, payload_time, payload_checksum, payload_len)) => {
+                    //读块头成功
+                    if let Err(e) = read_block_payload(&mut result,
+                                                       file_path,
+                                                       file,
+                                                       payload_offset,
+                                                       payload_time,
+                                                       payload_checksum,
+                                                       payload_len,
+                                                       is_checksum).await {
+                        //校验块负载失败，则立即返回错误
+                        return Err(Error::new(ErrorKind::Other, format!("Valid failed for read log block, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+                    }
+
+                    //设置下一个块头的偏移
+                    match payload_offset.checked_sub(DEFAULT_LOG_BLOCK_HEADER_LEN as u64) {
+                        None => next_offset = 0,
+                        Some(off) => next_offset = off,
+                    }
+                },
+            }
+        } else {
+            //从日志文件尾开始读
+            if top > 0 {
+                //当前日志文件有日志
+                let header_offset = top - DEFAULT_LOG_BLOCK_HEADER_LEN as u64; //获取日志文件的尾块头位置
+                match read_block_header(file_path, file, header_offset).await {
+                    Err(e) => {
+                        //读块头失败，则立即返回错误
+                        return Err(Error::new(ErrorKind::Other, format!("Read log tail block failed, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+                    },
+                    Ok((payload_offset, payload_time, payload_checksum, payload_len)) => {
+                        //读尾块头成功
+                        if let Err(e) = read_block_payload(&mut result,
+                                                           file_path,
+                                                           file,
+                                                           payload_offset,
+                                                           payload_time,
+                                                           payload_checksum,
+                                                           payload_len,
+                                                           is_checksum).await {
+                            //校验尾块负载失败，则立即返回错误
+                            return Err(Error::new(ErrorKind::Other, format!("Valid failed for read log tail block, path: {:?}, offset: {:?}, reason: {:?}", file_path, offset, e)));
+                        }
+
+                        //设置下一个块头的偏移
+                        match payload_offset.checked_sub(DEFAULT_LOG_BLOCK_HEADER_LEN as u64) {
+                            None => next_offset = 0,
+                            Some(off) => next_offset = off,
+                        }
+                    },
+                }
+            }
+        }
+
+        Ok((next_offset, result))
+    }
+
     //提交当前日志块，返回提交是否成功
     pub async fn commit(&self,
                         mut log_uid: usize,
@@ -792,6 +1012,7 @@ impl LogFile {
         let readable_len = unsafe { (&*readable_box).len() };
         if readable_len == 0 {
             //没有需要整理的只读日志文件，则立即返回成功
+            Box::into_raw(readable_box); //避免被回收
             self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
             return Ok((0, 0));
         }
@@ -846,6 +1067,184 @@ impl LogFile {
                                           offset,
                                           true,
                                           is_hidden_remove).await {
+                            Err(e) => {
+                                //合并指定日志文件的指定二进制块失败，则立即返回错误
+                                return Err(e);
+                            },
+                            Ok(None) => {
+                                //合并指定日志文件完成，重置日志文件位置，并继续合并下一个日志文件
+                                offset = None;
+                                break;
+                            },
+                            Ok(Some(next)) => {
+                                //合并指定日志文件的日志块完成，更新日志文件位置，并继续合并当前只读日志文件的下一个日志块
+                                offset = Some(next);
+                            },
+                        }
+                    }
+                }
+
+                if buf.len() > 0 {
+                    //将缓冲区中剩余日志写入临时整理文件
+                    match tmp_file.write(0, Arc::from(buf), WriteOptions::None).await {
+                        Err(e) => {
+                            self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                            return Err(Error::new(ErrorKind::Other, format!("Write tmp log block failed, path: {:?}, reason: {:?}", tmp_path.to_path_buf(), e)));
+                        },
+                        Ok(size) => {
+                            //写入临时整理日志文件成功，则统计写入的字节数，并重置缓冲区
+                            total_size += size;
+                        }
+                    }
+                }
+
+                //将合并后的日志块的头写入临时整理文件
+                let mut header = Vec::with_capacity(DEFAULT_LOG_BLOCK_HEADER_LEN);
+                write_header(&mut header, hasher, total_size);
+                match tmp_file.write(0, Arc::from(header), WriteOptions::Sync(true)).await {
+                    Err(e) => {
+                        self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                        return Err(Error::new(ErrorKind::Other, format!("Write tmp log header failed, path: {:?}, reason: {:?}", tmp_path.to_path_buf(), e)));
+                    },
+                    Ok(size) => {
+                        //写入临时整理日志文件头成功
+                        if let Err(e) = rename(self.0.rt.clone(), tmp_path.clone(), collected_path.clone()).await {
+                            self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                            return Err(Error::new(ErrorKind::Other, format!("Rename tmp log failed, from: {:?}, to: {:?}, reason: {:?}", tmp_path, collected_path, e)));
+                        }
+
+                        //清理整理后的日志文件目录，将被整理的日志文件改名为备份日志文件
+                        if let Err(e) = clean(&self.0.rt.clone(), self.0.path.clone()).await {
+                            //清理整理后的日志文件目录失败，则立即返回错误
+                            self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                            return Err(Error::new(ErrorKind::Other, format!("Clean log dir failed, path: {:?}, reason: {:?}", self.0.path, e)));
+                        }
+
+                        //整理成功
+                        self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                        Ok((total_size + size, total_len))
+                    }
+                }
+            },
+        }
+    }
+
+    //整理指定的只读日志文件，成功后返回整理文件的大小和日志数量
+    pub async fn collect_logs(&self,
+                              mut remove_paths: Vec<PathBuf>,
+                              mut log_paths: Vec<PathBuf>,
+                              buf_len: usize,
+                              is_hidden_remove: bool) -> Result<(usize, usize)> {
+        if self.0.mutex_status.compare_and_swap(false, true, Ordering::SeqCst) {
+            //当前正在整理中，则立即返回错误
+            return Err(Error::new(ErrorKind::Other, "Collect log failed, reason: collectting"));
+        }
+
+        //清理整理前的日志文件目录
+        if let Err(e) = clean(&self.0.rt.clone(), self.0.path.clone()).await {
+            //清理整理后的日志文件目录失败，则立即返回错误
+            self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+            return Err(Error::new(ErrorKind::Other, format!("Clean log dir failed, path: {:?}, reason: {:?}", self.0.path, e)));
+        }
+
+        //逻辑移除需要移除的只读日志文件
+        for remove_path in remove_paths {
+            let mut bak_path = remove_path.clone();
+            if let Some(bak_path_ext) = bak_path.extension() {
+                //当前日志文件有扩展名
+                bak_path.set_extension(bak_path_ext.to_string_lossy().as_ref().to_string() + "." + DEFAULT_BAK_LOG_FILE_EXT);
+            } else {
+                //当前日志文件无扩展名
+                bak_path.set_extension(DEFAULT_BAK_LOG_FILE_EXT);
+            }
+
+            match rename(self.0.rt.clone(), remove_path.clone(), bak_path.clone()).await {
+                Err(e) => {
+                    //改名为备份日志文件失败，则立即返回错误
+                    return Err(Error::new(ErrorKind::Other, format!("Rename log to bak failed, from: {:?}, to: {:?}, reason: invalid file", remove_path, bak_path)));
+                },
+                Ok(_) => {
+                    //改名为备份日志文件成功，则逻辑移除只读日志文件成功，并继续逻辑移除下一个需要移除的只读日志文件
+                    continue;
+                },
+            }
+        }
+
+        //开始只读日志文件的整理，用于清理临时整理日志文件
+        let readable_len = log_paths.len();
+        if readable_len == 0 {
+            //没有需要整理的只读日志文件，则立即返回成功
+            self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+            return Ok((0, 0));
+        }
+
+        //排序只读日志文件路径，并打开对应的只读日志文件
+        log_paths.sort();
+        let mut log_files = Vec::with_capacity(log_paths.len());
+        for log_path in &log_paths {
+            match AsyncFile::open(self.0.rt.clone(), log_path.clone(), AsyncFileOptions::OnlyRead).await {
+                Err(e) => {
+                    //指定只读日志文件打开失败，则立即返回错误原因
+                    return Err(Error::new(ErrorKind::Other, format!("Open only read log file failed, path: {:?}, reason: {:?}", log_path, e)));
+                },
+                Ok(file) => {
+                    //打开指定的只读日志文件
+                    log_files.push(file);
+                },
+            };
+        }
+
+        //获取最后的只读日志文件路径
+        let last_readable_path = log_paths.get(log_paths.len() - 1).unwrap();
+
+        match create_tmp_log(self.0.rt.clone(), last_readable_path.clone()).await {
+            Err(e) => {
+                self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                Err(e)
+            },
+            Ok((tmp_path, tmp_file, collected_path)) => {
+                log_paths.reverse();
+                log_files.reverse();
+                let log_path_files = log_paths
+                    .iter()
+                    .zip(log_files.iter())
+                    .map(|(p, f)| (p.clone(), f.clone()))
+                    .collect::<Vec<(PathBuf, AsyncFile<()>)>>();
+
+                //加载并合并所有只读日志文件
+                let mut total_size = 0;
+                let mut total_len = 0;
+                let mut offset = None;
+                let mut map = XHashMap::default();
+                let mut hasher = Hasher::new();
+                let mut buf = Vec::with_capacity(buf_len + DEFAULT_MERGE_LOG_BUF_SIZE);
+                for (file_path, file) in log_path_files {
+                    loop {
+                        if (&buf).len() >= buf_len {
+                            //合并缓冲区已满，则将缓冲区写入临时整理日志文件
+                            match tmp_file.write(0, Arc::from(buf), WriteOptions::None).await {
+                                Err(e) => {
+                                    self.0.mutex_status.store(false, Ordering::Relaxed); //解除互斥操作锁
+                                    return Err(Error::new(ErrorKind::Other, format!("Write tmp log block failed, path: {:?}, reason: {:?}", tmp_path.to_path_buf(), e)));
+                                },
+                                Ok(size) => {
+                                    //写入临时整理日志文件成功，则统计写入的字节数，并重置缓冲区
+                                    total_size += size;
+                                    buf = Vec::with_capacity(buf_len + DEFAULT_MERGE_LOG_BUF_SIZE);
+                                }
+                            }
+                        }
+
+                        match merge_block_log(self,
+                                              &mut map,
+                                              &mut buf,
+                                              &mut hasher,
+                                              &mut total_len,
+                                              &file_path,
+                                              &file,
+                                              offset,
+                                              true,
+                                              is_hidden_remove).await {
                             Err(e) => {
                                 //合并指定日志文件的指定二进制块失败，则立即返回错误
                                 return Err(e);
@@ -1307,6 +1706,63 @@ async fn merge_block(log_file: &LogFile,
                      is_checksum: bool,
                      is_hidden_remove: bool) -> Result<Option<u64>> {
     match log_file.read_block(log_index, offset, is_checksum).await {
+        Err(e) => {
+            //读可写日志文件的指定二进制块失败，则立即返回错误
+            Err(e)
+        },
+        Ok((next, logs)) => {
+            //读日志文件的指定二进制块成功
+            for (method, key, value) in logs {
+                let key = Arc::new(key);
+                if let None =  map.get(&key) {
+                    //没有指定关键字的日志，则记录并加入结果集
+                    map.insert(key.clone(), ());
+                    if let Some(value) = value {
+                        //写方法的日志，则将日志写入缓冲区，并更新校验码
+                        let off = buf.len();
+                        write_buf(buf, method, key.as_slice(), value.as_slice());
+                        hasher.update(&buf[off..]);
+                        *total_len += 1;
+
+                    } else {
+                        //移除方法的日志
+                        if is_hidden_remove {
+                            //结果集中忽略移除方法的日志
+                            continue;
+                        }
+
+                        //将日志写入缓冲区，并更新校验码
+                        let off = buf.len();
+                        write_buf(buf, method, key.as_slice(), &[]);
+                        hasher.update(&buf[off..]);
+                        *total_len += 1;
+                    }
+                }
+            }
+
+            if next == 0 {
+                //已读到日志文件头，则立即返回
+                Ok(None)
+            } else {
+                //更新日志文件位置，则返回当前日志文件的下一个日志块
+                Ok(Some(next))
+            }
+        },
+    }
+}
+
+//加载指定日志文件的指定日志块，合并相同关键字的日志，将合并后的日志写入缓冲区，并计算校验码，成功返回下一个日志块头的偏移，返回空表示已加载到日志文件头
+async fn merge_block_log(log_file: &LogFile,
+                         map: &mut XHashMap<Arc<Vec<u8>>, ()>,
+                         buf: &mut Vec<u8>,
+                         hasher: &mut Hasher,
+                         total_len: &mut usize,
+                         file_path: &PathBuf,
+                         file: &AsyncFile<()>,
+                         offset: Option<u64>,
+                         is_checksum: bool,
+                         is_hidden_remove: bool) -> Result<Option<u64>> {
+    match log_file.read_block_log(file_path, file, offset, is_checksum).await {
         Err(e) => {
             //读可写日志文件的指定二进制块失败，则立即返回错误
             Err(e)
