@@ -1402,6 +1402,7 @@ async fn clean<P: AsRef<Path>>(rt: &MultiTaskRuntime<()>, path: P) -> Result<Vec
                     return Err(Error::new(ErrorKind::Other, format!("Open log dir failed, path: {:?}, reason: invalid file", path.as_ref())));
                 }
             }
+            log_paths.sort();
 
             //打开日志文件
             let mut result = Vec::with_capacity(log_paths.len());
