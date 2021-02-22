@@ -12,7 +12,7 @@ use r#async::{lock::mutex_lock::Mutex,
               rt::multi_thread::{MultiTaskPool, MultiTaskRuntime}};
 use hash::XHashMap;
 
-use pi_store::log_store::log_file::{PairLoader, LogMethod, LogFile};
+use pi_store::log_store::log_file::{PairLoader, LogMethod, LogFile, read_log_file, read_log_file_block};
 use std::io::ErrorKind;
 
 #[test]
@@ -120,45 +120,6 @@ fn test_log_remove() {
     thread::sleep(Duration::from_millis(1000000000));
 }
 
-#[test]
-fn test_log_read() {
-    let pool = MultiTaskPool::new("Test-Log-Read".to_string(), 8, 1024 * 1024, 10, None);
-    let rt = pool.startup(true);
-
-    let rt_copy = rt.clone();
-    rt.spawn(rt.alloc(), async move {
-        match LogFile::open(rt_copy.clone(),
-                            "./log",
-                            8000,
-                            1024 * 1024,
-                            None).await {
-            Err(e) => {
-                println!("!!!!!!open log failed, e: {:?}", e);
-            },
-            Ok(log) => {
-                let mut offset = None;
-                loop {
-                    if let Some(0) = offset {
-                        break;
-                    }
-
-                    match log.read_block(None, offset, true).await {
-                        Err(e) => {
-                            println!("!!!!!!read log failed, e: {:?}", e);
-                        },
-                        Ok((next_offset, logs)) => {
-                            offset = Some(next_offset);
-                            println!("!!!!!!read log ok, offset: {:?}, len: {:?}", offset, logs.len());
-                        },
-                    }
-                }
-            }
-        }
-    });
-
-    thread::sleep(Duration::from_millis(1000000000));
-}
-
 struct TestCache {
     is_hidden_remove:   bool,
     removed:            XHashMap<Vec<u8>, ()>,
@@ -218,7 +179,7 @@ fn test_log_load() {
             Ok(log) => {
                 let mut cache = TestCache::new(true);
                 let start = Instant::now();
-                match log.load(&mut cache, None, true).await {
+                match log.load(&mut cache, None, 32 * 1024, true).await {
                     Err(e) => {
                         println!("!!!!!!load log failed, e: {:?}", e);
                     },
@@ -250,7 +211,7 @@ fn test_log_collect() {
             },
             Ok(log) => {
                 let start = Instant::now();
-                match log.collect(1024 * 1024, false).await {
+                match log.collect(1024 * 1024, 32 * 1024, false).await {
                     Err(e) => {
                         println!("!!!!!!load log failed, e: {:?}", e);
                     },
@@ -440,7 +401,7 @@ fn test_log_split() {
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     let mut cache = TestCache::new(true);
                     let start = Instant::now();
-                    match log_copy.load(&mut cache, None, true).await {
+                    match log_copy.load(&mut cache, None, 32 * 1024, true).await {
                         Err(e) => {
                             println!("!!!!!!load log failed, e: {:?}", e);
                         },
@@ -508,7 +469,7 @@ fn test_log_collect_logs() {
                 ];
 
                 let start = Instant::now();
-                match log.collect_logs(log_paths, 1024 * 1024, false).await {
+                match log.collect_logs(vec![], log_paths, 1024 * 1024, 32 * 1024, true).await {
                     Err(e) => {
                         println!("!!!!!!collect logs failed, e: {:?}", e);
                     },
