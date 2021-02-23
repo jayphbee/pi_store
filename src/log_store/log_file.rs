@@ -13,7 +13,7 @@ use bytes::{Buf, BufMut};
 use crc32fast::Hasher;
 use fastcmp::Compare;
 use crossbeam_channel::{Sender, Receiver, unbounded};
-use log::{error, warn};
+use log::{error, warn, debug};
 
 use r#async::{lock::{spin_lock::SpinLock, mutex_lock::Mutex},
               rt::{AsyncValue, AsyncRuntime, multi_thread::MultiTaskRuntime}};
@@ -1325,13 +1325,13 @@ pub async fn read_log_file(file_path: PathBuf,
 
     if let Some(off) = offset {
         //从当前日志文件的指定位置开始读指定长度的二进制
-        let real_offset = off.checked_sub(real_len).unwrap_or(0); //通过上次获取数据后返回的偏移，计算出本次获取数据的偏移
-        match file.read(real_offset, real_len as usize).await {
+        debug!("=====>read file, real_offset: {}, real_len: {}", off, real_len);
+        match file.read(off, real_len as usize).await {
             Err(e) => {
-                Err(Error::new(ErrorKind::Other, format!("Read log file failed, path: {:?}, file size: {:?}, offset: {:?}, len: {:?}, reason: {:?}", file_path, file_size, real_offset, real_len, e)))
+                Err(Error::new(ErrorKind::Other, format!("Read log file failed, path: {:?}, file size: {:?}, offset: {:?}, len: {:?}, reason: {:?}", file_path, file_size, off, real_len, e)))
             },
             Ok(bin) => {
-                Ok((real_offset, bin))
+                Ok((off, bin))
             },
         }
     } else {
@@ -1359,6 +1359,7 @@ pub fn read_log_file_block(file_path: PathBuf,
                            file_offset: u64,
                            read_len: u64,
                            is_checksum: bool) -> Result<(u64, u64, LinkedList<(LogMethod, Vec<u8>, Option<Vec<u8>>)>)> {
+    debug!("=====>file_path: {:?}, bin len: {}, file_offset: {}, read_len: {}", file_path, bin.len(), file_offset, read_len);
     let mut result = LinkedList::new();
     if bin.len() == 0 {
         //缓冲区长度为0，则立即退出
@@ -1371,9 +1372,9 @@ pub fn read_log_file_block(file_path: PathBuf,
     while bin_top >= header_len {
         let header_offset = bin_top - header_len; //获取缓冲区的当前头偏移
         match read_block_header(bin, file_offset, read_len, header_offset) {
-            (Some((new_file_offset, new_read_len)), _, _, _, _) => {
+            (Some((next_file_offset, next_read_len)), _, _, _, _) => {
                 //读当前缓冲区中，当前二进制数据未包括完整的日志块负载，则立即返回需要读取的日志文件偏移和长度，以保证可以继续读日志块
-                return Ok((new_file_offset, new_read_len, result));
+                return Ok((next_file_offset, next_read_len, result));
             },
             (None, payload_offset, payload_time, payload_checksum, payload_len) => {
                 //读日志块头成功
@@ -1392,32 +1393,39 @@ pub fn read_log_file_block(file_path: PathBuf,
 
                 bin_top -= payload_len as u64; //读日志块负载成功，从缓冲区的剩余长度中减去日志块负载长度
 
+                debug!("=====>file_offset: {}, bin_top: {}", file_offset, bin_top);
                 if file_offset == 0 && bin_top == 0 {
                     //已读取当前日志文件的所有日志块，则立即退出
-                    return Ok((file_offset, bin_top, result));
+                    return Ok((0, 0, result));
                 }
             },
         }
     }
 
     //返回下次需要读取的日志文件偏移和这次从所有的完整日志块中读取的日志
-    Ok((file_offset + bin_top, read_len, result))
+    let unread_len = file_offset + bin_top; //获取文件剩余未读长度和缓冲区未读长度
+    let next_file_offset = unread_len.checked_sub(read_len).unwrap_or(0);
+    let next_read_len = if unread_len < read_len {
+        //文件剩余未读长度小于当前读取长度
+        unread_len
+    } else {
+        //文件剩余未读长度大于等于当前读取长度
+        read_len
+    };
+    Ok((next_file_offset, next_read_len, result))
 }
 
 //读二进制块头，返回块负载偏移、长度和校验码，如果读二进制块头失败，则返回需要读取的日志文件偏移和长度，以保证后续读二进制块头成功
 fn read_block_header(bin: &Vec<u8>,
                      file_offset: u64,
-                     mut read_len: u64,
+                     read_len: u64,
                      header_offset: u64) -> (Option<(u64, u64)>, u64, u64, u32, u32) {
+    debug!("=====>bin len: {}, file_offset: {}, read_len: {}, header_offset: {}", bin.len(), file_offset, read_len, header_offset);
     let head_bin_len = bin[0..header_offset as usize].len();
-    if head_bin_len < DEFAULT_LOG_BLOCK_HEADER_LEN {
-        //当前日志块的头长度超过了当前剩余缓冲区的长度
-        let file_header_offset = file_offset + header_offset;
-        return (Some((file_header_offset, read_len)), 0, 0, 0, 0);
-    }
 
     //从缓冲区中获取块头
     let bytes = &bin[header_offset as usize..header_offset as usize + DEFAULT_LOG_BLOCK_HEADER_LEN];
+    debug!("=====>bytes: {:?}", bytes);
 
     //从块从中获取相关负载摘要
     let mut header = Cursor::new(bytes);
@@ -1426,16 +1434,31 @@ fn read_block_header(bin: &Vec<u8>,
     let payload_len = header.get_u32_le(); //读取块负载长度
 
     if head_bin_len < payload_len as usize {
-        //当前日志块的负载长度超过了当前剩余缓冲区的长度
-        if payload_len as u64 > read_len {
-            //当前日志块的负载长度超过了默认的文件读长度，则更新下次需要读取的文件长度
-            read_len = payload_len as u64 + DEFAULT_LOG_BLOCK_HEADER_LEN as u64;
+        debug!("=====>, head_bin_len: {}, payload_len: {}", head_bin_len, payload_len);
+        //当前日志块的负载长度超过了当前剩余缓冲区的长度，则获取下次需要读取的日志块头偏移和下次需要读取的文件长度
+        let block_len = payload_len as u64 + DEFAULT_LOG_BLOCK_HEADER_LEN as u64; //日志块的长度
+        if block_len > read_len {
+            //当前日志块的长度超过了当前的文件读长度，则更新包括了当前缓冲区中未读数据的下次需要读取的日志块头偏移和下次需要读取的精确的文件长度
+            let next_file_offset = file_offset.checked_sub(block_len - (head_bin_len as u64 + DEFAULT_LOG_BLOCK_HEADER_LEN as u64)).unwrap_or(0);
+            debug!("=====>, file_header_offset: {}, next_read_len: {}", next_file_offset, block_len);
+            (Some((next_file_offset, block_len)), 0, 0, 0, 0)
+        } else {
+            //当前日志块的长度未超过当前的文件读长度，则更新包括了当前缓冲区中未读数据的下次需要读取的日志块头偏移和下次需要读取的文件长度
+            let next_read_len = if file_offset + head_bin_len as u64 + DEFAULT_LOG_BLOCK_HEADER_LEN as u64 >= read_len {
+                //文件剩余未读长度和缓冲区剩余未读长度之和大于等于当前文件读长度
+                read_len
+            } else {
+                //文件剩余未读长度和缓冲区剩余未读长度之和小于当前文件读长度
+                file_offset + head_bin_len as u64 + DEFAULT_LOG_BLOCK_HEADER_LEN as u64
+            };
+            let next_file_offset = file_offset.checked_sub(next_read_len - (head_bin_len as u64 + DEFAULT_LOG_BLOCK_HEADER_LEN as u64)).unwrap_or(0);
+            debug!("=====>, file_header_offset: {}, next_read_len: {}", next_file_offset, next_read_len);
+            (Some((next_file_offset, next_read_len)), 0, 0, 0, 0)
         }
-        let file_header_offset = (file_offset + header_offset).checked_sub(read_len).unwrap_or(0);
-        (Some((file_header_offset, read_len)), 0, 0, 0, 0)
     } else {
         //当前日志块的负载长度未超过当前剩余缓冲区的长度，则返回当前日志块的负载摘要
         let payload_offset = header_offset - payload_len as u64;
+        debug!("=====>payload_offset: {}, payload_len: {}", payload_offset, payload_len);
         (None, payload_offset, payload_time, payload_checksum, payload_len)
     }
 }
