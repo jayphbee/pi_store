@@ -1628,12 +1628,8 @@ async fn merge_block(log_file: &LogFile,
                         }
 
                         if next_file_offset == 0 && next_len == 0 {
-                            //已读到日志文件头，则立即返回
-                            if buf.len() >= buf_len {
-                                //合并缓冲区已满，则将缓冲区写入缓冲区向量中，并创建新的合并缓冲区
-                                bufs.push(buf);
-                            }
-
+                            //已读到日志文件头，则将缓冲区写入缓冲区向量中，并立即返回
+                            bufs.push(buf);
                             break;
                         } else {
                             //更新日志文件位置
