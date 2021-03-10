@@ -15,7 +15,7 @@ tempdir = "0.3"
 rand = "*"
 crossbeam-channel = "0.4"
 lmdb = { git = "https://github.com/GaiaWorld/lmdb-rs"}
-pi_db = {path = "../pi_db"}
+#pi_db = {path = "../pi_db"}
 hash_value = { path = "../pi_math/hash_value" }
 bon = { path = "../pi_lib/bon" }
 worker = { path = "../pi_lib/worker" }

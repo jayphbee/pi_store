@@ -12,7 +12,7 @@ use r#async::{lock::mutex_lock::Mutex,
               rt::multi_thread::{MultiTaskPool, MultiTaskRuntime}};
 use hash::XHashMap;
 
-use pi_store::log_store::log_file::{PairLoader, LogMethod, LogFile};
+use pi_store::log_store::log_file::{PairLoader, LogMethod, LogFile, read_log_file, read_log_file_block};
 use std::io::ErrorKind;
 
 #[test]
@@ -47,7 +47,7 @@ impl Drop for Counter {
 #[test]
 fn test_log_append() {
     let pool = MultiTaskPool::new("Test-Log-Append".to_string(), 8, 1024 * 1024, 10, None);
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -85,7 +85,7 @@ fn test_log_append() {
 #[test]
 fn test_log_remove() {
     let pool = MultiTaskPool::new("Test-Log-Remove".to_string(), 8, 1024 * 1024, 10, None);
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -114,45 +114,6 @@ fn test_log_remove() {
                     });
                 }
             },
-        }
-    });
-
-    thread::sleep(Duration::from_millis(1000000000));
-}
-
-#[test]
-fn test_log_read() {
-    let pool = MultiTaskPool::new("Test-Log-Read".to_string(), 8, 1024 * 1024, 10, None);
-    let rt = pool.startup(true);
-
-    let rt_copy = rt.clone();
-    rt.spawn(rt.alloc(), async move {
-        match LogFile::open(rt_copy.clone(),
-                            "./log",
-                            8000,
-                            1024 * 1024,
-                            None).await {
-            Err(e) => {
-                println!("!!!!!!open log failed, e: {:?}", e);
-            },
-            Ok(log) => {
-                let mut offset = None;
-                loop {
-                    if let Some(0) = offset {
-                        break;
-                    }
-
-                    match log.read_block(None, offset, true).await {
-                        Err(e) => {
-                            println!("!!!!!!read log failed, e: {:?}", e);
-                        },
-                        Ok((next_offset, logs)) => {
-                            offset = Some(next_offset);
-                            println!("!!!!!!read log ok, offset: {:?}, len: {:?}", offset, logs.len());
-                        },
-                    }
-                }
-            }
         }
     });
 
@@ -218,7 +179,7 @@ fn test_log_load() {
             Ok(log) => {
                 let mut cache = TestCache::new(true);
                 let start = Instant::now();
-                match log.load(&mut cache, None, true).await {
+                match log.load(&mut cache, None, 32 * 1024, true).await {
                     Err(e) => {
                         println!("!!!!!!load log failed, e: {:?}", e);
                     },
@@ -250,7 +211,7 @@ fn test_log_collect() {
             },
             Ok(log) => {
                 let start = Instant::now();
-                match log.collect(1024 * 1024, false).await {
+                match log.collect(1024 * 1024, 32 * 1024, false).await {
                     Err(e) => {
                         println!("!!!!!!load log failed, e: {:?}", e);
                     },
@@ -268,7 +229,7 @@ fn test_log_collect() {
 #[test]
 fn test_log_append_delay_commit() {
     let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -289,7 +250,7 @@ fn test_log_append_delay_commit() {
                         let key = ("Test".to_string() + index.to_string().as_str()).into_bytes();
                         let value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes();
                         let uid = log_copy.append(LogMethod::PlainAppend, key.as_slice(), value);
-                        if let Err(e) = log_copy.delay_commit(uid, false, 20).await {
+                        if let Err(e) = log_copy.delay_commit(uid, false, 10).await {
                             println!("!!!!!!commit log failed, e: {:?}", e);
                         } else {
                             counter_copy.0.fetch_add(1, Ordering::Relaxed);
@@ -306,7 +267,7 @@ fn test_log_append_delay_commit() {
 #[test]
 fn test_log_remove_delay_commit() {
     let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -344,7 +305,7 @@ fn test_log_remove_delay_commit() {
 #[test]
 fn test_log_append_delay_commit_by_split() {
     let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
-    let rt = pool.startup(true);
+    let rt = pool.startup(false);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -440,7 +401,7 @@ fn test_log_split() {
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     let mut cache = TestCache::new(true);
                     let start = Instant::now();
-                    match log_copy.load(&mut cache, None, true).await {
+                    match log_copy.load(&mut cache, None, 32 * 1024, true).await {
                         Err(e) => {
                             println!("!!!!!!load log failed, e: {:?}", e);
                         },
@@ -480,6 +441,43 @@ fn test_log_split() {
                     });
                 }
             },
+        }
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+#[test]
+fn test_log_collect_logs() {
+    let pool = MultiTaskPool::new("Test-Log-Load".to_string(), 8, 1024 * 1024, 10, Some(10));
+    let rt = pool.startup(false);
+
+    let rt_copy = rt.clone();
+    rt.spawn(rt.alloc(), async move {
+        match LogFile::open(rt_copy.clone(),
+                            "./log",
+                            8000,
+                            1024 * 1024,
+                            None).await {
+            Err(e) => {
+                println!("!!!!!!open log failed, e: {:?}", e);
+            },
+            Ok(log) => {
+                let log_paths = vec![
+                    PathBuf::from("./log/000001"),
+                    PathBuf::from("./log/000002"),
+                ];
+
+                let start = Instant::now();
+                match log.collect_logs(vec![], log_paths, 1024 * 1024, 32 * 1024, true).await {
+                    Err(e) => {
+                        println!("!!!!!!collect logs failed, e: {:?}", e);
+                    },
+                    Ok((size, len)) => {
+                        println!("!!!!!!collect logs ok, size: {:?}, len: {:?}, time: {:?}", size, len, Instant::now() - start);
+                    },
+                }
+            }
         }
     });
 
