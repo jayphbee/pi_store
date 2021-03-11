@@ -228,8 +228,8 @@ fn test_log_collect() {
 
 #[test]
 fn test_log_append_delay_commit() {
-    let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 1024 * 1024, 10, Some(10));
-    let rt = pool.startup(false);
+    let pool = MultiTaskPool::new("Test-Log-Commit".to_string(), 8, 2 * 1024 * 1024, 10, Some(10));
+    let rt = pool.startup(true);
 
     let rt_copy = rt.clone();
     rt.spawn(rt.alloc(), async move {
@@ -250,7 +250,7 @@ fn test_log_append_delay_commit() {
                         let key = ("Test".to_string() + index.to_string().as_str()).into_bytes();
                         let value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes();
                         let uid = log_copy.append(LogMethod::PlainAppend, key.as_slice(), value);
-                        if let Err(e) = log_copy.delay_commit(uid, false, 10).await {
+                        if let Err(e) = log_copy.delay_commit(uid, false, 0).await {
                             println!("!!!!!!commit log failed, e: {:?}", e);
                         } else {
                             counter_copy.0.fetch_add(1, Ordering::Relaxed);
