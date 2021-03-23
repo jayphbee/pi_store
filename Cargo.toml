@@ -14,8 +14,6 @@ fnv = "1.0.3"
 tempdir = "0.3"
 rand = "*"
 crossbeam-channel = "0.4"
-lmdb = { git = "https://github.com/GaiaWorld/lmdb-rs"}
-#pi_db = {path = "../pi_db"}
 hash_value = { path = "../pi_math/hash_value" }
 bon = { path = "../pi_lib/bon" }
 worker = { path = "../pi_lib/worker" }
@@ -27,9 +25,7 @@ gray = {path = "../pi_lib/gray" }
 guid = {path = "../pi_lib/guid" }
 util = {path = "../pi_lib/util" }
 sinfo = {path = "../pi_lib/sinfo" }
-timer = {path = "../pi_lib/timer" }
 ordmap = {path = "../pi_lib/ordmap" }
-nodec = { path = "../pi_net/nodec" }
 hash = { path = "../pi_lib/hash" }
 async = { path = "../pi_lib/async" }
 async_file = { path = "../pi_lib/async_file" }
