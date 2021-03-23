@@ -1,4 +1,3 @@
-
 // use std::sync::{Arc, Mutex, RwLock};
 // use std::cell::RefCell;
 // use std::mem;
@@ -119,7 +118,6 @@
 // 		} else {
 // 			let _ = SEQ_CHAN.0.send(0);
 // 		}
-		
 
 // 		LogFileDB(Arc::new(RwLock::new(Tabs::new())))
 // 	}
@@ -221,7 +219,7 @@
 
 // 								let mut kb = WriteBuffer::new();
 // 								kb.write_u64(seq);
-	
+
 // 								if value1.is_some() {
 // 									wb.write_bin(&value1.clone().unwrap(), 0..value1.clone().unwrap().len());
 // 									let _ = STORE_RUNTIME.spawn(STORE_RUNTIME.alloc(), async move {
@@ -517,7 +515,7 @@
 // 			if tabkv.value == None {
 // 				match txn.delete(tabkv.key.clone()) {
 // 				Ok(_) => (),
-// 				Err(e) => 
+// 				Err(e) =>
 // 					{
 // 						return Some(Err(e.to_string()))
 // 					},
@@ -594,13 +592,8 @@
 // 	}
 // }
 
-
-
-
-
 // //================================ 内部结构和方法
 // const TIMEOUT: usize = 100;
-
 
 // type BinMap = OrdMap<Tree<Bon, Bin>>;
 
@@ -781,7 +774,7 @@
 //             }
 //         }
 // 	}
-	
+
 // 	fn read(&self, key: &[u8]) -> Option<Arc<[u8]>> {
 //         if let Some(value) = self.map.lock().get(key) {
 //             return Some(value.clone())
@@ -848,7 +841,7 @@
 // 				}
 // 			}
 // 		});
-		
+
 // 		match r.recv() {
 // 			Ok(store) => {
 // 				let mut root= OrdMap::<Tree<Bon, Bin>>::new(None);
